@@ -234,15 +234,27 @@ package func fuseQuantizedLinearProjections(
 /// parameters, turns the fusion off and drops every compiled trace that read
 /// it, until the next preparation.
 ///
-/// The fused matmul serves the calls of fewer than ``fewestMatrixRows`` input
-/// rows: a decode step and a short speculative verify. There MLX computes each
-/// output from its own weights, scales and biases in an order the output width
-/// does not change (`qmv`, `qmv_wide`, or ``MultiRowQuantizedMatvec``), thus
-/// each output of the fused matmul has the bits of the separate projection. A
-/// longer call, a prefill, keeps the separate matmuls: MLX gives it to its
-/// split-K matrix kernel, whose split of the inner dimension depends on the
-/// output width, so a wider fused matmul would sum in another order.
+/// By default (``FusedRows/vectorCalls``) the fused matmul serves the calls of
+/// fewer than ``fewestMatrixRows`` input rows: a decode step and a short
+/// speculative verify. There MLX computes each output from its own weights,
+/// scales and biases in an order the output width does not change (`qmv`,
+/// `qmv_wide`, or ``MultiRowQuantizedMatvec``), thus each output of the fused
+/// matmul has the bits of the separate projection. A longer call, a prefill,
+/// keeps the separate matmuls: MLX gives it to its split-K matrix kernel, whose
+/// split of the inner dimension depends on the output width, so a wider fused
+/// matmul would sum in another order. A group of ``FusedRows/everyCall`` runs
+/// the fused matmul for a prefill too.
 package final class FusedQuantizedProjectionGroup {
+
+    /// The calls whose outputs the fused matmul computes.
+    package enum FusedRows {
+        /// The calls of fewer than ``FusedQuantizedProjectionGroup/fewestMatrixRows``
+        /// input rows. Each output has the bits of its separate projection.
+        case vectorCalls
+        /// Every call, a prefill too. A prefill may sum in another order than
+        /// the separate projections.
+        case everyCall
+    }
 
     /// The last axis of a projection input or output, which holds the
     /// numbers of one row.
@@ -263,6 +275,14 @@ package final class FusedQuantizedProjectionGroup {
     /// order of the fused rows.
     package let keys: [String]
 
+    /// The calls whose outputs the fused matmul computes.
+    package let fusedRows: FusedRows
+
+    /// Whether the group fuses its projections. A disabled group prepares
+    /// nothing, and computes every call with the separate matmuls, even after
+    /// a preparation.
+    package var isEnabled: Bool
+
     private let projection = FusedQuantizedLinearProjectionCache()
 
     // Trace setup runs under the lock of each trace, which an invalidation
@@ -270,10 +290,15 @@ package final class FusedQuantizedProjectionGroup {
     private let readingTracesLock = NSLock()
     private var readingTraces: [ObjectIdentifier: ReadingTrace] = [:]
 
-    /// - Parameter keys: The checkpoint keys of the projections under their
-    ///   module, in the order the module gives the projections.
-    package init(keys: [String]) {
+    /// - Parameters:
+    ///   - keys: The checkpoint keys of the projections under their module,
+    ///     in the order the module gives the projections.
+    ///   - fusedRows: The calls whose outputs the fused matmul computes.
+    ///   - isEnabled: Whether the group fuses its projections.
+    package init(keys: [String], fusedRows: FusedRows = .vectorCalls, isEnabled: Bool = true) {
         self.keys = keys
+        self.fusedRows = fusedRows
+        self.isEnabled = isEnabled
     }
 
     /// Whether the fused projection computes the outputs.
@@ -282,7 +307,7 @@ package final class FusedQuantizedProjectionGroup {
     /// Fuses `projections` and installs, in `owner`, a view of each one under
     /// its key. Projections that differ in quantization, carry a bias, or are
     /// not plain ``QuantizedLinear`` layers (an adapter, for example) keep
-    /// their own matmuls.
+    /// their own matmuls, as all projections of a disabled group do.
     ///
     /// - Parameters:
     ///   - projections: The projections of ``keys``, in that order.
@@ -291,7 +316,7 @@ package final class FusedQuantizedProjectionGroup {
     @discardableResult
     package func prepare(_ projections: [Linear], in owner: Module) throws -> Bool {
         let keys = keys
-        return try projection.prepare(enabled: true, linears: projections) { views in
+        return try projection.prepare(enabled: isEnabled, linears: projections) { views in
             try owner.update(
                 modules: ModuleChildren(
                     values: Dictionary(
@@ -301,7 +326,7 @@ package final class FusedQuantizedProjectionGroup {
     }
 
     /// The outputs of `projections` for `x`, in order: the parts of the fused
-    /// matmul once prepared, for fewer than ``fewestMatrixRows`` input rows,
+    /// matmul once prepared, while enabled, for the calls of ``fusedRows``,
     /// else one matmul for each projection. Each matmul runs through
     /// ``MultiRowQuantizedMatvec/projection(_:by:)``.
     ///
@@ -310,8 +335,7 @@ package final class FusedQuantizedProjectionGroup {
     ///   - projections: The projections of ``keys``, in that order.
     /// - Returns: The output of each projection, shape `(batch, tokens, rows)`.
     package func callAsFunction(_ x: MLXArray, _ projections: [Linear]) -> [MLXArray] {
-        let inputRows = x.size / x.dim(Self.rowAxis)
-        guard let fused = projection.fused, inputRows < Self.fewestMatrixRows else {
+        guard isEnabled, let fused = projection.fused, fuses(x) else {
             return projections.map { MultiRowQuantizedMatvec.projection(x, by: $0) }
         }
         let rows = projections.dropLast().map(\.shape.0)
@@ -319,6 +343,17 @@ package final class FusedQuantizedProjectionGroup {
         return split(
             MultiRowQuantizedMatvec.projection(x, by: fused), indices: ends,
             axis: Self.rowAxis)
+    }
+
+    /// Whether the fused matmul computes the outputs for `x`, by
+    /// ``fusedRows``.
+    private func fuses(_ x: MLXArray) -> Bool {
+        switch fusedRows {
+        case .vectorCalls:
+            x.size / x.dim(Self.rowAxis) < Self.fewestMatrixRows
+        case .everyCall:
+            true
+        }
     }
 
     /// The fused projection as compile state of `trace`, which the group

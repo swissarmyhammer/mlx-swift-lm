@@ -16,4 +16,4 @@ title: 'Qwen3.8: fused 8-bit-KV decode and verify attention kernel for head dim 
 
 ## Acceptance
 - [ ] KV8 plain and MTP decode at 32k and 64k faster than bf16 KV (qwenbench.sh with QWEN_KV_BITS=8), or a recorded NO-GO.
-- [ ] Default path unchanged (`qwencheck.sh` identical). #qwen-perf
+- [ ] Default path unchanged (`qwencheck.sh` identical). #qwen-perf-candidate

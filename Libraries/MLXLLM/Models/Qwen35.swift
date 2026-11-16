@@ -196,10 +196,31 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     @ModuleInfo(key: "in_proj_b") var inProjB: Linear
     @ModuleInfo(key: "in_proj_a") var inProjA: Linear
 
-    // Inference-only physical projection. The four registered modules remain
-    // as views so checkpoint, adapter, and parameter paths do not change.
-    private let fusedInputProjection = FusedQuantizedLinearProjectionCache()
-    var fusedInputProjectionEnabled = qwen35FourGDNEnabled
+    /// The four input projections as one matmul for every call, once the
+    /// loader prepares them; `MLX_QWEN_FOUR_GDN=0` keeps them separate.
+    private let fusedInputProjection = FusedQuantizedProjectionGroup(
+        keys: ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"], fusedRows: .everyCall,
+        isEnabled: qwen35FourGDNEnabled)
+
+    /// Whether the four input projections run as one matmul; see
+    /// ``FusedQuantizedProjectionGroup/isEnabled``.
+    var fusedInputProjectionEnabled: Bool {
+        get { fusedInputProjection.isEnabled }
+        set { fusedInputProjection.isEnabled = newValue }
+    }
+
+    /// The places of the four input projections among the outputs of the
+    /// fused input projection.
+    private enum InputProjectionPart {
+        /// `in_proj_qkv`.
+        static let qkv = 0
+        /// `in_proj_z`.
+        static let z = 1
+        /// `in_proj_b`.
+        static let b = 2
+        /// `in_proj_a`.
+        static let a = 3
+    }
 
     @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
     @ParameterInfo(key: "A_log") var aLog: MLXArray
@@ -254,95 +275,57 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         parameters: ModuleParameters, verify: VerifyUpdate,
         path: [String] = [], modulePath: [String] = []
     ) throws -> Self {
-        let inputProjectionPrefixes = [
-            "in_proj_qkv.", "in_proj_z.", "in_proj_b.", "in_proj_a.",
-        ]
-        let replacesInputProjection = parameters.flattened().contains { key, _ in
-            inputProjectionPrefixes.contains(where: key.hasPrefix)
+        try fusedInputProjection.invalidating(afterUpdating: parameters) {
+            try super.update(
+                parameters: parameters, verify: verify, path: path, modulePath: modulePath)
         }
-        defer {
-            // Parameter updates are incremental and can throw after changing an
-            // earlier tensor. Invalidate on both success and failure so a stale
-            // physical projection can never remain published.
-            if replacesInputProjection {
-                fusedInputProjection.invalidate()
-            }
-        }
-        return try super.update(
-            parameters: parameters, verify: verify, path: path, modulePath: modulePath)
     }
 
     override func updateModule(key: String, _ value: Any) throws {
-        let replacesInputProjection =
-            key == "in_proj_qkv" || key == "in_proj_z"
-            || key == "in_proj_b" || key == "in_proj_a"
-        defer {
-            // This is conservative when the setter itself rejects the value,
-            // and necessary when a bulk update changed an earlier key first.
-            if replacesInputProjection {
-                fusedInputProjection.invalidate()
-            }
+        try fusedInputProjection.invalidating(afterReplacing: key) {
+            try super.updateModule(key: key, value)
         }
-        try super.updateModule(key: key, value)
     }
 
+    /// Whether one matmul computes the four input projections.
     var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
 
-    /// The fused projection as compile state for a trace that runs this
-    /// layer. It is not a registered child (the checkpoint topology stays the
-    /// four projections), so a trace would otherwise read its arrays as tape
-    /// constants, and MLX keeps such constants alive after the trace is erased.
-    var fusedProjectionTraceState: [Module] {
-        fusedInputProjection.fused.map { [$0] } ?? []
+    /// The fused input projection as compile state of `trace`; see
+    /// ``FusedQuantizedProjectionGroup/traceState(of:)``.
+    func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        fusedInputProjection.traceState(of: trace)
     }
 
-    /// Build one physical quantized projection while retaining the four named
-    /// module paths as storage-sharing views. This runs at most once between
-    /// parameter/module updates; failed eligibility checks are not repeated on
-    /// every token. The model loader calls this before publishing the model;
-    /// forward passes never invoke it.
+    /// Fuses the four input projections; see
+    /// ``FusedQuantizedProjectionGroup``. The model loader calls this before
+    /// it publishes the model; a forward never does.
+    ///
+    /// - Returns: Whether one matmul computes the four projections.
     @discardableResult
     func prepareFusedInputProjection() throws -> Bool {
-        try fusedInputProjection.prepare(
-            enabled: fusedInputProjectionEnabled,
-            linears: [
-                inProjQKV, inProjZ, inProjB, inProjA,
-            ]
-        ) { sourceViews in
-            try update(
-                modules: ModuleChildren(values: [
-                    "in_proj_qkv": .value(sourceViews[0]),
-                    "in_proj_z": .value(sourceViews[1]),
-                    "in_proj_b": .value(sourceViews[2]),
-                    "in_proj_a": .value(sourceViews[3]),
-                ]), verify: [])
-        }
+        try fusedInputProjection.prepare(inputProjections, in: self)
     }
 
+    /// The four input projections, in the order of the fused rows.
+    private var inputProjections: [Linear] { [inProjQKV, inProjZ, inProjB, inProjA] }
+
+    /// The four input projections of `inputs`, with `z` split into heads.
+    ///
+    /// - Parameters:
+    ///   - inputs: The layer input, shape `(batch, sequence, hiddenSize)`.
+    ///   - batch: The batch size of `inputs`.
+    ///   - sequence: The tokens of `inputs`.
+    /// - Returns: The mixed qkv, `z` of shape `(batch, sequence, heads,
+    ///   headVDim)`, `b` and `a`.
     func projectInputs(_ inputs: MLXArray, batch: Int, sequence: Int) -> (
         qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray
     ) {
-        guard fusedInputProjectionEnabled, let fusedInProj = fusedInputProjection.fused else {
-            return (
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjQKV),
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjZ).reshaped(
-                    batch, sequence, numVHeads, headVDim),
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjB),
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjA)
-            )
-        }
-
-        let projected = MultiRowQuantizedMatvec.projection(inputs, by: fusedInProj)
-        let qkvEnd = keyDim * 2 + valueDim
-        let zEnd = qkvEnd + valueDim
-        let bEnd = zEnd + numVHeads
-        let aEnd = bEnd + numVHeads
+        let projected = fusedInputProjection(inputs, inputProjections)
         return (
-            projected[0..., 0..., ..<qkvEnd],
-            projected[0..., 0..., qkvEnd ..< zEnd].reshaped(
-                batch, sequence, numVHeads, headVDim),
-            projected[0..., 0..., zEnd ..< bEnd],
-            projected[0..., 0..., bEnd ..< aEnd]
+            projected[InputProjectionPart.qkv],
+            projected[InputProjectionPart.z].reshaped(batch, sequence, numVHeads, headVDim),
+            projected[InputProjectionPart.b],
+            projected[InputProjectionPart.a]
         )
     }
 
@@ -897,7 +880,7 @@ final class Qwen35DecoderLayer: Module, FusedProjectionDecodeLayer {
     /// - Parameter trace: The trace that runs this layer.
     /// - Returns: The fused projections the layer holds.
     func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
-        (linearAttn?.fusedProjectionTraceState ?? [])
+        (linearAttn?.fusedProjectionTraceState(of: trace) ?? [])
             + (selfAttn?.fusedProjectionTraceState(of: trace) ?? [])
             + ((mlp as? Qwen3NextMLP)?.fusedProjectionTraceState(of: trace) ?? [])
     }

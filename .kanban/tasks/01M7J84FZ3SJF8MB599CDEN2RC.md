@@ -52,10 +52,26 @@ comments:
     - evidence: no library or test file changed (git status: only .kanban). The existing opt-in `GenerateParameters(kvBits: 8)` already works with MTP verify, ChatSession reuse and prompt-cache restore. Harness (scratchpad only): qwencli/Sources/qwencli/main.swift gains QWEN_KV_BITS (all modes), `agree` (teacher-forced top-1) and `restore` (save/load snapshot) modes, line-buffered stdout; new kv8check.sh, goldcmp.py. Measurements: qwen_bench_kv8.txt(.raw), qwenbench_kv8.log, kv8check.log, kv8restore.log, kv8_golden.json; default qwencheck -> qwencheck_cden2rc.log / qwen_golden_cden2rc.json (8/8 identical to qwen_golden_mn44v3n.json, SESSION PASS, TOOLCHAT PASS). Correction to the earlier comment: bf16 MTP also splits from plain at near-ties (short 114, 32k 82), so plain/MTP near-tie splits are not KV8-specific.
     - next: user decides on the NO-GO; follow-up candidate ^6xcb05k (fused 8-bit-KV attention kernel) needs sign-off.
   timestamp: 2026-11-16T21:02:25.112828+00:00
+- actor: claude-code
+  id: 01m7k2qc3tme0agdna04qefe3f
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (4015abdd) — 0 findings (0 confirmed, 0 refuted); 6 .kanban files changed, no validator matches them, no source file in the diff. Acceptance: both items were already checked, and the evidence supports them: the KV8 table and the NO-GO are in the comments, and the default qwencheck run gives 8/8 records identical to qwen_golden_mn44v3n.json with no library change.
+    - next: done; the follow-up ^6xcb05k needs the user's sign-off.
+  timestamp: 2026-11-16T21:03:05.338205+00:00
+- actor: claude-code
+  id: 01m7k2qnt64rs5ytpzq0rgyhe4
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: no-change — measured NO-GO (KV8 slower: plain +12/+18%, MTP 2.6–3.5x at 32k/64k)
+    - test: n/a — no library change
+    - commit: 4015abdd (kanban evidence)
+    - review: clean → done
+  timestamp: 2026-11-16T21:03:15.270935+00:00
 depends_on:
 - 01M7J84C1V3YZ5VGSXGMN44V3N
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffbb80
 title: 'Qwen3.8: measure an 8-bit KV cache for the full-attention layers (opt-in go/no-go)'
 ---
 ## Why
