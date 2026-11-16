@@ -30,27 +30,72 @@ private func supportsExactCompiledDecode(_ dtype: DType) -> Bool {
 public struct Qwen35Configuration: Codable, Sendable {
 
     public struct TextConfiguration: Codable, Sendable {
+        /// The values a `config.json` that leaves a field out gets.
+        fileprivate enum Defaults {
+            /// The width of the hidden states.
+            static let hiddenSize = 4096
+            /// The decoder layers.
+            static let hiddenLayers = 32
+            /// The width of the MLP.
+            static let intermediateSize = 14_336
+            /// The query heads of an attention layer.
+            static let attentionHeads = 32
+            /// The key and value heads of an attention layer.
+            static let kvHeads = 8
+            /// The value heads of a GDN layer.
+            static let linearNumValueHeads = 64
+            /// The key heads of a GDN layer.
+            static let linearNumKeyHeads = 16
+            /// The width of a GDN key head.
+            static let linearKeyHeadDim = 192
+            /// The width of a GDN value head.
+            static let linearValueHeadDim = 128
+            /// The kernel size of the GDN conv.
+            static let linearConvKernelDim = 4
+            /// The epsilon of the RMS norms.
+            static let rmsNormEps: Float = 1e-6
+            /// The tokens of the vocabulary.
+            static let vocabularySize = 248_320
+            /// The base of the rotary frequencies.
+            static let ropeTheta: Float = 100_000.0
+            /// The share of each head that M-RoPE rotates.
+            static let partialRotaryFactor: Float = 0.25
+            /// The longest sequence the positions were trained on.
+            static let maxPositionEmbeddings = 131_072
+            /// One full-attention layer for each of this many layers.
+            static let fullAttentionInterval = 4
+            /// The rotary frequencies of the temporal M-RoPE axis.
+            static let temporalFrequencies = 11
+            /// The rotary frequencies of the height M-RoPE axis.
+            static let heightFrequencies = 11
+            /// The rotary frequencies of the width M-RoPE axis.
+            static let widthFrequencies = 10
+            /// The rotary frequencies of the temporal, height and width
+            /// M-RoPE axes.
+            static let mropeSection = [temporalFrequencies, heightFrequencies, widthFrequencies]
+        }
+
         public var modelType: String = ""
-        public var hiddenSize: Int = 4096
-        public var hiddenLayers: Int = 32
-        public var intermediateSize: Int = 14_336
-        public var attentionHeads: Int = 32
-        public var kvHeads: Int = 8
-        public var linearNumValueHeads: Int = 64
-        public var linearNumKeyHeads: Int = 16
-        public var linearKeyHeadDim: Int = 192
-        public var linearValueHeadDim: Int = 128
-        public var linearConvKernelDim: Int = 4
-        public var rmsNormEps: Float = 1e-6
-        public var vocabularySize: Int = 248_320
-        public var ropeTheta: Float = 100_000.0
-        public var partialRotaryFactor: Float = 0.25
-        public var maxPositionEmbeddings: Int = 131_072
+        public var hiddenSize: Int = Defaults.hiddenSize
+        public var hiddenLayers: Int = Defaults.hiddenLayers
+        public var intermediateSize: Int = Defaults.intermediateSize
+        public var attentionHeads: Int = Defaults.attentionHeads
+        public var kvHeads: Int = Defaults.kvHeads
+        public var linearNumValueHeads: Int = Defaults.linearNumValueHeads
+        public var linearNumKeyHeads: Int = Defaults.linearNumKeyHeads
+        public var linearKeyHeadDim: Int = Defaults.linearKeyHeadDim
+        public var linearValueHeadDim: Int = Defaults.linearValueHeadDim
+        public var linearConvKernelDim: Int = Defaults.linearConvKernelDim
+        public var rmsNormEps: Float = Defaults.rmsNormEps
+        public var vocabularySize: Int = Defaults.vocabularySize
+        public var ropeTheta: Float = Defaults.ropeTheta
+        public var partialRotaryFactor: Float = Defaults.partialRotaryFactor
+        public var maxPositionEmbeddings: Int = Defaults.maxPositionEmbeddings
         public var tieWordEmbeddings: Bool = false
         public var attentionBias: Bool = false
         public var headDim: Int?
         public var ropeParameters: [String: StringOrNumber]?
-        public var fullAttentionInterval: Int = 4
+        public var fullAttentionInterval: Int = Defaults.fullAttentionInterval
         public var layerTypes: [String]?
         var resolvedLayerTypes: [String] = []
         public var mtpNumHiddenLayers: Int = 0
@@ -101,35 +146,52 @@ public struct Qwen35Configuration: Codable, Sendable {
             let container = try decoder.container(keyedBy: CodingKeys.self)
 
             self.modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? ""
-            self.hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 4096
-            self.hiddenLayers = try container.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? 32
+            self.hiddenSize =
+                try container.decodeIfPresent(Int.self, forKey: .hiddenSize)
+                ?? Defaults.hiddenSize
+            self.hiddenLayers =
+                try container.decodeIfPresent(Int.self, forKey: .hiddenLayers)
+                ?? Defaults.hiddenLayers
             self.intermediateSize =
-                try container.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 14_336
+                try container.decodeIfPresent(Int.self, forKey: .intermediateSize)
+                ?? Defaults.intermediateSize
             self.attentionHeads =
-                try container.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? 32
-            self.kvHeads = try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? 8
+                try container.decodeIfPresent(Int.self, forKey: .attentionHeads)
+                ?? Defaults.attentionHeads
+            self.kvHeads =
+                try container.decodeIfPresent(Int.self, forKey: .kvHeads) ?? Defaults.kvHeads
             self.linearNumValueHeads =
-                try container.decodeIfPresent(Int.self, forKey: .linearNumValueHeads) ?? 64
+                try container.decodeIfPresent(Int.self, forKey: .linearNumValueHeads)
+                ?? Defaults.linearNumValueHeads
             self.linearNumKeyHeads =
-                try container.decodeIfPresent(Int.self, forKey: .linearNumKeyHeads) ?? 16
+                try container.decodeIfPresent(Int.self, forKey: .linearNumKeyHeads)
+                ?? Defaults.linearNumKeyHeads
             self.linearKeyHeadDim =
-                try container.decodeIfPresent(Int.self, forKey: .linearKeyHeadDim) ?? 192
+                try container.decodeIfPresent(Int.self, forKey: .linearKeyHeadDim)
+                ?? Defaults.linearKeyHeadDim
             self.linearValueHeadDim =
-                try container.decodeIfPresent(Int.self, forKey: .linearValueHeadDim) ?? 128
+                try container.decodeIfPresent(Int.self, forKey: .linearValueHeadDim)
+                ?? Defaults.linearValueHeadDim
             self.linearConvKernelDim =
-                try container.decodeIfPresent(Int.self, forKey: .linearConvKernelDim) ?? 4
-            self.rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+                try container.decodeIfPresent(Int.self, forKey: .linearConvKernelDim)
+                ?? Defaults.linearConvKernelDim
+            self.rmsNormEps =
+                try container.decodeIfPresent(Float.self, forKey: .rmsNormEps)
+                ?? Defaults.rmsNormEps
             self.vocabularySize =
-                try container.decodeIfPresent(Int.self, forKey: .vocabularySize) ?? 248_320
+                try container.decodeIfPresent(Int.self, forKey: .vocabularySize)
+                ?? Defaults.vocabularySize
             self.maxPositionEmbeddings =
-                try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 131_072
+                try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
+                ?? Defaults.maxPositionEmbeddings
             self.tieWordEmbeddings =
                 try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
             self.attentionBias =
                 try container.decodeIfPresent(Bool.self, forKey: .attentionBias) ?? false
             self.headDim = try container.decodeIfPresent(Int.self, forKey: .headDim)
             self.fullAttentionInterval =
-                try container.decodeIfPresent(Int.self, forKey: .fullAttentionInterval) ?? 4
+                try container.decodeIfPresent(Int.self, forKey: .fullAttentionInterval)
+                ?? Defaults.fullAttentionInterval
             self.layerTypes = try container.decodeIfPresent([String].self, forKey: .layerTypes)
             let layerSchedule = try HybridAttentionSchedule(
                 hiddenLayerCount: hiddenLayers,
@@ -157,9 +219,9 @@ public struct Qwen35Configuration: Codable, Sendable {
 
             let defaultRopeParameters: [String: StringOrNumber] = [
                 "type": .string("default"),
-                "mrope_section": .ints([11, 11, 10]),
-                "rope_theta": .float(100_000.0),
-                "partial_rotary_factor": .float(0.25),
+                "mrope_section": .ints(Defaults.mropeSection),
+                "rope_theta": .float(Defaults.ropeTheta),
+                "partial_rotary_factor": .float(Defaults.partialRotaryFactor),
             ]
 
             var decodedRope = try container.decodeIfPresent(
@@ -185,12 +247,14 @@ public struct Qwen35Configuration: Codable, Sendable {
                     decodedRope["type"] = ropeType
                 }
                 self.ropeParameters = decodedRope
-                self.ropeTheta = decodedRope["rope_theta"]?.asFloat() ?? 100_000.0
-                self.partialRotaryFactor = decodedRope["partial_rotary_factor"]?.asFloat() ?? 0.25
+                self.ropeTheta = decodedRope["rope_theta"]?.asFloat() ?? Defaults.ropeTheta
+                self.partialRotaryFactor =
+                    decodedRope["partial_rotary_factor"]?.asFloat()
+                    ?? Defaults.partialRotaryFactor
             } else {
                 self.ropeParameters = defaultRopeParameters
-                self.ropeTheta = 100_000.0
-                self.partialRotaryFactor = 0.25
+                self.ropeTheta = Defaults.ropeTheta
+                self.partialRotaryFactor = Defaults.partialRotaryFactor
             }
 
             if self.headDim == nil {
@@ -201,23 +265,35 @@ public struct Qwen35Configuration: Codable, Sendable {
 
     public typealias VisionConfiguration = Qwen3VLConfiguration.VisionConfiguration
 
+    /// The ids of the special tokens a `config.json` that leaves them out gets.
+    private enum DefaultTokenId {
+        /// The placeholder of an image patch.
+        static let image = 248_056
+        /// The placeholder of a video patch.
+        static let video = 248_057
+        /// The token that opens an image or a video.
+        static let visionStart = 248_045
+        /// The token that closes an image or a video.
+        static let visionEnd = 248_046
+    }
+
     public let textConfiguration: TextConfiguration
     public let visionConfiguration: VisionConfiguration
     public let modelType: String
     private let _ignoreIndex: Int?
     public var ignoreIndex: Int { _ignoreIndex ?? -100 }
     private let _imageTokenId: Int?
-    public var imageTokenId: Int { _imageTokenId ?? 248_056 }
+    public var imageTokenId: Int { _imageTokenId ?? DefaultTokenId.image }
     private let _videoTokenId: Int?
-    public var videoTokenId: Int { _videoTokenId ?? 248_057 }
+    public var videoTokenId: Int { _videoTokenId ?? DefaultTokenId.video }
     private let _imageTokenIndex: Int?
     public var imageTokenIndex: Int { _imageTokenIndex ?? imageTokenId }
     private let _videoTokenIndex: Int?
     public var videoTokenIndex: Int { _videoTokenIndex ?? videoTokenId }
     private let _visionStartTokenId: Int?
-    public var visionStartTokenId: Int { _visionStartTokenId ?? 248_045 }
+    public var visionStartTokenId: Int { _visionStartTokenId ?? DefaultTokenId.visionStart }
     private let _visionEndTokenId: Int?
-    public var visionEndTokenId: Int { _visionEndTokenId ?? 248_046 }
+    public var visionEndTokenId: Int { _visionEndTokenId ?? DefaultTokenId.visionEnd }
     private let _vocabSize: Int?
     public var vocabSize: Int { _vocabSize ?? textConfiguration.vocabularySize }
     private let _eosTokenId: IntOrIntArray?
@@ -258,6 +334,25 @@ public enum Qwen35Language {
     /// The sequences of the one batch a compiled trace runs.
     private static let compiledBatchSize = 1
 
+    /// The rank of an array of shape `(batch, tokens)`: positions that every
+    /// M-RoPE axis shares, or a padding mask.
+    private static let batchTokensRank = 2
+
+    /// The dimensions of a head that one rotary frequency turns: a pair.
+    private static let dimensionsPerFrequency = 2
+
+    /// The axes of the M-RoPE positions, `(axes, batch, tokens)`, and of the
+    /// sections of the rotary frequencies. The frequencies interleave the
+    /// axes: frequency `i` belongs to axis `i % count` within its section.
+    private enum MRopeAxis {
+        /// The height axis.
+        static let height = 1
+        /// The width axis.
+        static let width = 2
+        /// The temporal, height and width axes.
+        static let count = 3
+    }
+
     /// The places of the two states of a GDN layer in its `MambaCache`.
     private enum LinearCacheSlot {
         /// The conv state.
@@ -276,7 +371,9 @@ public enum Qwen35Language {
             ropeParameters: [String: StringOrNumber]? = nil, maxPositionEmbeddings: Int = 131_072
         ) {
             let safeDim = max(1, dim)
-            var freq = MLXArray(stride(from: 0, to: safeDim, by: 2)).asType(.float32)
+            var freq = MLXArray(
+                stride(from: 0, to: safeDim, by: Qwen35Language.dimensionsPerFrequency)
+            ).asType(.float32)
             freq = freq / Float(safeDim)
 
             let ropeType = ropeParameters?["type"] ?? ropeParameters?["rope_type"]
@@ -291,12 +388,14 @@ public enum Qwen35Language {
                 self.attentionScaling = 1
             }
 
-            let sections = mropeSection.count >= 3 ? mropeSection : [11, 11, 10]
+            let sections =
+                mropeSection.count >= MRopeAxis.count
+                ? mropeSection : Qwen35Configuration.TextConfiguration.Defaults.mropeSection
             var indices = [Int32](repeating: 0, count: freq.dim(0))
-            for (dimension, offset) in [(1, 1), (2, 2)] {
-                let end = min(sections[dimension] * 3, indices.count)
-                for index in stride(from: offset, to: end, by: 3) {
-                    indices[index] = Int32(dimension)
+            for axis in [MRopeAxis.height, MRopeAxis.width] {
+                let end = min(sections[axis] * MRopeAxis.count, indices.count)
+                for index in stride(from: axis, to: end, by: MRopeAxis.count) {
+                    indices[index] = Int32(axis)
                 }
             }
             self.mropeIndices = MLXArray(indices).reshaped(1, 1, 1, -1)
@@ -308,10 +407,10 @@ public enum Qwen35Language {
 
         func callAsFunction(x: MLXArray, positionIds: MLXArray) -> (MLXArray, MLXArray) {
             var positionIds = positionIds
-            if positionIds.ndim == 2 {
+            if positionIds.ndim == Qwen35Language.batchTokensRank {
                 positionIds = broadcast(
                     positionIds[.newAxis, 0..., 0...],
-                    to: [3, positionIds.dim(0), positionIds.dim(1)])
+                    to: [MRopeAxis.count, positionIds.dim(0), positionIds.dim(1)])
             }
 
             let pos = positionIds.asType(.float32)
@@ -332,6 +431,20 @@ public enum Qwen35Language {
         }
     }
 
+    /// The YaRN constants of HF `_compute_yarn_parameters`.
+    private enum Yarn {
+        /// The rotations of the fastest frequency that YaRN keeps whole,
+        /// when the rope parameters leave out `beta_fast`.
+        static let betaFast: Float = 32
+        /// The slope of the attention factor over the log of the scale.
+        static let mscaleSlope = 0.1
+        /// The width a correction range of zero widens to, so the ramp never
+        /// divides by zero.
+        static let degenerateRangeWidth = 0.001
+        /// One full turn, in radians: two half turns.
+        static let fullTurn = Double.pi + Double.pi
+    }
+
     /// HF `_compute_yarn_parameters`: blended inverse frequencies and the attention factor.
     static func yarnParameters(
         dim: Int, base: Float, maxPositionEmbeddings: Int,
@@ -342,11 +455,11 @@ public enum Qwen35Language {
         let originalMax = Double(
             ropeParameters["original_max_position_embeddings"]?.asFloat()
                 ?? Float(maxPositionEmbeddings))
-        let betaFast = Double(ropeParameters["beta_fast"]?.asFloat() ?? 32)
+        let betaFast = Double(ropeParameters["beta_fast"]?.asFloat() ?? Yarn.betaFast)
         let betaSlow = Double(ropeParameters["beta_slow"]?.asFloat() ?? 1)
 
         func mscale(_ scale: Double, _ mscale: Double = 1) -> Double {
-            scale <= 1 ? 1 : 0.1 * mscale * Foundation.log(scale) + 1
+            scale <= 1 ? 1 : Yarn.mscaleSlope * mscale * Foundation.log(scale) + 1
         }
 
         let attentionFactor: Double
@@ -361,8 +474,8 @@ public enum Qwen35Language {
         }
 
         func correctionDim(_ rotations: Double) -> Double {
-            Double(dim) * Foundation.log(originalMax / (rotations * 2 * .pi))
-                / (2 * Foundation.log(base))
+            Double(dim) * Foundation.log(originalMax / (rotations * Yarn.fullTurn))
+                / (Double(dimensionsPerFrequency) * Foundation.log(base))
         }
         var low = correctionDim(betaFast)
         var high = correctionDim(betaSlow)
@@ -374,10 +487,11 @@ public enum Qwen35Language {
         }
         low = max(low, 0)
         high = min(high, Double(dim - 1))
-        if low == high { high += 0.001 }
+        if low == high { high += Yarn.degenerateRangeWidth }
 
-        let invFreq = (0 ..< dim / 2).map { i -> Float in
-            let posFreq = Foundation.pow(base, Double(2 * i) / Double(dim))
+        let invFreq = (0 ..< dim / dimensionsPerFrequency).map { i -> Float in
+            let posFreq = Foundation.pow(
+                base, Double(dimensionsPerFrequency * i) / Double(dim))
             let ramp = min(max((Double(i) - low) / (high - low), 0), 1)
             let extrapolation = 1 - ramp
             return Float(
@@ -490,14 +604,41 @@ public enum Qwen35Language {
         /// The place of the output gate among the halves of a `q_proj` head.
         private static let gatePart = 1
 
+        /// The power of the head width that scales the attention scores.
+        private static let scaleExponent: Float = -0.5
+
+        /// The axes of the token-major layout `(batch, tokens, heads, headDim)`.
+        private enum TokenMajorAxis {
+            /// The sequences of the batch.
+            static let batch = 0
+            /// The tokens of a sequence.
+            static let tokens = 1
+            /// The heads of a token.
+            static let heads = 2
+            /// The numbers of a head.
+            static let headDim = 3
+        }
+
+        /// The permutation between the token-major layout
+        /// `(batch, tokens, heads, headDim)` and the head-major layout
+        /// `(batch, heads, tokens, headDim)`; it is its own inverse.
+        private static let headTokenSwap = [
+            TokenMajorAxis.batch, TokenMajorAxis.heads, TokenMajorAxis.tokens,
+            TokenMajorAxis.headDim,
+        ]
+
+        /// The axis of the tokens in the head-major layout.
+        private static let headMajorTokenAxis = 2
+
         init(_ args: Qwen35Configuration.TextConfiguration) {
             self.numKeyValueHeads = args.kvHeads
             self.numAttentionHeads = args.attentionHeads
             self.headDim = args.headDim ?? (args.hiddenSize / args.attentionHeads)
-            self.scale = pow(Float(headDim), -0.5)
+            self.scale = pow(Float(headDim), Self.scaleExponent)
 
             _qProj.wrappedValue = Linear(
-                args.hiddenSize, numAttentionHeads * headDim * 2, bias: args.attentionBias)
+                args.hiddenSize, numAttentionHeads * headDim * Self.gatedQueryParts,
+                bias: args.attentionBias)
             _kProj.wrappedValue = Linear(
                 args.hiddenSize, numKeyValueHeads * headDim, bias: args.attentionBias)
             _vProj.wrappedValue = Linear(
@@ -508,7 +649,9 @@ public enum Qwen35Language {
             _qNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
             _kNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: args.rmsNormEps)
 
-            let mrope = args.ropeParameters?["mrope_section"]?.asInts() ?? [11, 11, 10]
+            let mrope =
+                args.ropeParameters?["mrope_section"]?.asInts()
+                ?? Qwen35Configuration.TextConfiguration.Defaults.mropeSection
             let rotaryDim = Int(Float(headDim) * args.partialRotaryFactor)
             self.rotaryEmbedding = RotaryEmbedding(
                 dim: rotaryDim, base: args.ropeTheta, mropeSection: mrope,
@@ -593,7 +736,7 @@ public enum Qwen35Language {
             let queries = projected[Self.queriesPart]
             let gate = gatedQueryHalves(queries)[Self.gatePart].reshaped(B, L, -1)
             let values = projected[Self.valuesPart].reshaped(B, L, numKeyValueHeads, -1)
-                .transposed(0, 2, 1, 3)
+                .transposed(axes: Self.headTokenSwap)
 
             return (queries, gate, projected[Self.keysPart], values)
         }
@@ -617,8 +760,10 @@ public enum Qwen35Language {
         ) -> (queries: MLXArray, keys: MLXArray) {
             let (B, L) = (keys.dim(0), keys.dim(1))
             return (
-                qNorm(gatedQueryHalves(queries)[Self.queryPart]).transposed(0, 2, 1, 3),
-                kNorm(keys.reshaped(B, L, numKeyValueHeads, -1)).transposed(0, 2, 1, 3)
+                qNorm(gatedQueryHalves(queries)[Self.queryPart])
+                    .transposed(axes: Self.headTokenSwap),
+                kNorm(keys.reshaped(B, L, numKeyValueHeads, -1))
+                    .transposed(axes: Self.headTokenSwap)
             )
         }
 
@@ -686,19 +831,13 @@ public enum Qwen35Language {
             let B = keyProjection.dim(0)
             let L = keyProjection.dim(1)
 
-            var positionIds = providedPositionIds
-
-            if positionIds == nil {
-                let offset = cache?.offset ?? 0
-                var base = MLXArray(stride(from: offset, to: offset + L, by: 1)).asType(.int32)
-                base = tiled(base[.newAxis, 0...], repetitions: [B, 1])
-                positionIds = base[.newAxis, 0..., 0...]
-                positionIds = tiled(positionIds!, repetitions: [3, 1, 1])
-            }
+            let positionIds =
+                providedPositionIds
+                ?? Self.positionsAfterCache(batch: B, tokens: L, cache: cache)
 
             let (queries, keys) = rotatedHeads(
                 queries: queryProjection, keys: keyProjection,
-                rotation: rotary ?? rotaryEmbedding(x: values, positionIds: positionIds!))
+                rotation: rotary ?? rotaryEmbedding(x: values, positionIds: positionIds))
 
             // The mask is sized for the keys the cache presents; slicing it to
             // an offset-derived length would misalign it after eviction.
@@ -709,11 +848,28 @@ public enum Qwen35Language {
                 mask: attentionMask)
         }
 
+        /// The M-RoPE positions of the tokens after the cache, the same on
+        /// every axis.
+        ///
+        /// - Parameters:
+        ///   - batch: The sequences of the batch.
+        ///   - tokens: The tokens of each sequence.
+        ///   - cache: The cache of the layer, or `nil` for positions from zero.
+        /// - Returns: The positions, shape `(axes, batch, tokens)`.
+        private static func positionsAfterCache(
+            batch: Int, tokens: Int, cache: KVCache?
+        ) -> MLXArray {
+            let offset = cache?.offset ?? 0
+            var base = MLXArray(stride(from: offset, to: offset + tokens, by: 1)).asType(.int32)
+            base = tiled(base[.newAxis, 0...], repetitions: [batch, 1])
+            return tiled(base[.newAxis, 0..., 0...], repetitions: [MRopeAxis.count, 1, 1])
+        }
+
         func mergeHeadsAndProject(attention: MLXArray, gate: MLXArray) -> MLXArray {
             let output =
                 attention
-                .transposed(0, 2, 1, 3)
-                .reshaped(attention.dim(0), attention.dim(2), -1)
+                .transposed(axes: Self.headTokenSwap)
+                .reshaped(attention.dim(0), attention.dim(Self.headMajorTokenAxis), -1)
             return MultiRowQuantizedMatvec.projection(output * sigmoid(gate), by: oProj)
         }
     }
@@ -820,6 +976,38 @@ public enum Qwen35Language {
         @ModuleInfo(key: "norm") package var norm: RMSNormGated
         @ModuleInfo(key: "out_proj") var outProj: Linear
 
+        /// The parts of the mixed qkv that each take `keyDim` channels: the
+        /// query and the key.
+        private static let keyDimParts = 2
+
+        /// The places of the query, the key and the value among the parts
+        /// of the convolved qkv.
+        private enum MixedQKVPart {
+            /// The query.
+            static let query = 0
+            /// The key.
+            static let key = 1
+            /// The value.
+            static let value = 2
+        }
+
+        /// The places of the four input projections among the views of the
+        /// fused input projection.
+        private enum InputProjectionPart {
+            /// `in_proj_qkv`.
+            static let qkv = 0
+            /// `in_proj_z`.
+            static let z = 1
+            /// `in_proj_b`.
+            static let b = 2
+            /// `in_proj_a`.
+            static let a = 3
+        }
+
+        /// The upper bound of the uniform draw of `A` that `A_log` starts
+        /// from before a checkpoint replaces it.
+        private static let initialDecayHigh = 16
+
         public init(_ args: Qwen35Configuration.TextConfiguration) {
             self.hiddenSize = args.hiddenSize
             self.numVHeads = args.linearNumValueHeads
@@ -829,7 +1017,7 @@ public enum Qwen35Language {
             self.keyDim = headKDim * numKHeads
             self.valueDim = headVDim * numVHeads
             self.convKernelSize = args.linearConvKernelDim
-            self.convDim = keyDim * 2 + valueDim
+            self.convDim = keyDim * Self.keyDimParts + valueDim
 
             precondition(
                 numVHeads % numKHeads == 0,
@@ -847,13 +1035,13 @@ public enum Qwen35Language {
                 bias: false
             )
 
-            _inProjQKV.wrappedValue = Linear(hiddenSize, keyDim * 2 + valueDim, bias: false)
+            _inProjQKV.wrappedValue = Linear(hiddenSize, convDim, bias: false)
             _inProjZ.wrappedValue = Linear(hiddenSize, valueDim, bias: false)
             _inProjB.wrappedValue = Linear(hiddenSize, numVHeads, bias: false)
             _inProjA.wrappedValue = Linear(hiddenSize, numVHeads, bias: false)
 
             _dtBias.wrappedValue = MLXArray.ones([numVHeads])
-            let a = MLXRandom.uniform(low: 0, high: 16, [numVHeads])
+            let a = MLXRandom.uniform(low: 0, high: Self.initialDecayHigh, [numVHeads])
             _aLog.wrappedValue = log(a)
 
             _norm.wrappedValue = RMSNormGated(dimensions: headVDim, eps: args.rmsNormEps)
@@ -931,10 +1119,10 @@ public enum Qwen35Language {
             ) { sourceViews in
                 try update(
                     modules: ModuleChildren(values: [
-                        "in_proj_qkv": .value(sourceViews[0]),
-                        "in_proj_z": .value(sourceViews[1]),
-                        "in_proj_b": .value(sourceViews[2]),
-                        "in_proj_a": .value(sourceViews[3]),
+                        "in_proj_qkv": .value(sourceViews[InputProjectionPart.qkv]),
+                        "in_proj_z": .value(sourceViews[InputProjectionPart.z]),
+                        "in_proj_b": .value(sourceViews[InputProjectionPart.b]),
+                        "in_proj_a": .value(sourceViews[InputProjectionPart.a]),
                     ]), verify: [])
             }
         }
@@ -953,7 +1141,7 @@ public enum Qwen35Language {
             }
 
             let projected = MultiRowQuantizedMatvec.projection(inputs, by: fusedInProj)
-            let qkvEnd = keyDim * 2 + valueDim
+            let qkvEnd = convDim
             let zEnd = qkvEnd + valueDim
             let bEnd = zEnd + numVHeads
             let aEnd = bEnd + numVHeads
@@ -1050,10 +1238,11 @@ public enum Qwen35Language {
             }
 
             let convOut = silu(conv1d(convInput))
-            let split = MLX.split(convOut, indices: [keyDim, 2 * keyDim], axis: -1)
-            let q = split[0].reshaped(B, S, numKHeads, headKDim)
-            let k = split[1].reshaped(B, S, numKHeads, headKDim)
-            let v = split[2].reshaped(B, S, numVHeads, headVDim)
+            let split = MLX.split(
+                convOut, indices: [keyDim, Self.keyDimParts * keyDim], axis: -1)
+            let q = split[MixedQKVPart.query].reshaped(B, S, numKHeads, headKDim)
+            let k = split[MixedQKVPart.key].reshaped(B, S, numKHeads, headKDim)
+            let v = split[MixedQKVPart.value].reshaped(B, S, numVHeads, headVDim)
 
             let (qNormed, kNormed) = GatedDeltaQueryKeyNorm.normalized(
                 query: q, key: k, dtype: q.dtype)
@@ -1716,11 +1905,16 @@ public enum Qwen35Language {
         }
 
         /// The attention of each full-attention layer of one compiled step,
-        /// through ``attend(_:mask:positionIds:rotary:)``. The attention
-        /// layers of a model share their rotation tables and rotate the same
-        /// tokens, so the first layer of the step computes the M-RoPE rotation
-        /// of `positionIds` and every later layer reuses it. Without
-        /// `positionIds` each layer rotates the positions after its cache.
+        /// through
+        /// ``DecoderLayer/attentionCacheStep(queries:keys:values:cache:mask:positionIds:rotary:)``.
+        /// The attention layers of a model share their rotation tables and
+        /// rotate the same tokens, so the first layer of the step computes the
+        /// M-RoPE rotation of `positionIds` and every later layer reuses it.
+        /// Without `positionIds` each layer rotates the positions after its
+        /// cache.
+        ///
+        /// The step holds the layers of the model when the step starts, and
+        /// no reference to the model, so it never reads a model that is gone.
         ///
         /// - Parameters:
         ///   - mask: The attention mask of the step.
@@ -1730,28 +1924,19 @@ public enum Qwen35Language {
         private func sharedRotationAttention(
             mask: MLXFast.ScaledDotProductAttentionMaskMode, positionIds: MLXArray?
         ) -> (CompiledDecodeSchedule.AttentionStep) -> MLXArray {
+            let layers = layers
             var rotary: RotaryValues?
-            return { [unowned self] step in
+            return { step in
+                let layer = layers[step.layer]
                 rotary =
                     rotary
                     ?? positionIds.map {
-                        layers[step.layer].fullAttention.rotaryEmbedding(
-                            x: step.values, positionIds: $0)
+                        layer.fullAttention.rotaryEmbedding(x: step.values, positionIds: $0)
                     }
-                return attend(step, mask: mask, positionIds: positionIds, rotary: rotary)
+                return layer.attentionCacheStep(
+                    queries: step.queries, keys: step.keys, values: step.values,
+                    cache: step.cache, mask: mask, positionIds: positionIds, rotary: rotary)
             }
-        }
-
-        /// The attention of a full-attention layer between two segments, through
-        /// ``DecoderLayer/attentionCacheStep(queries:keys:values:cache:mask:positionIds:rotary:)``.
-        private func attend(
-            _ step: CompiledDecodeSchedule.AttentionStep,
-            mask: MLXFast.ScaledDotProductAttentionMaskMode, positionIds: MLXArray?,
-            rotary: RotaryValues? = nil
-        ) -> MLXArray {
-            layers[step.layer].attentionCacheStep(
-                queries: step.queries, keys: step.keys, values: step.values, cache: step.cache,
-                mask: mask, positionIds: positionIds, rotary: rotary)
         }
     }
 
@@ -1824,7 +2009,9 @@ public enum Qwen35Language {
             }
 
             var positionIds = providedPositionIds
-            if positionIds == nil && (ropeMask == nil || ropeMask?.ndim == 2) {
+            if positionIds == nil
+                && (ropeMask == nil || ropeMask?.ndim == Qwen35Language.batchTokensRank)
+            {
                 if (hasCacheAnchor && cacheOffset == 0)
                     || ropeDeltas == nil
                     || cache == nil
@@ -1870,7 +2057,7 @@ public enum Qwen35Language {
 
                     base = base + delta[0..., .newAxis]
                     positionIds = broadcast(
-                        base[.newAxis, 0..., 0...], to: [3, batchSize, seqLength])
+                        base[.newAxis, 0..., 0...], to: [MRopeAxis.count, batchSize, seqLength])
                 }
             }
 
@@ -1939,6 +2126,17 @@ public enum Qwen35Language {
     }
 }
 
+/// The places of the keys and the values among the state arrays of a
+/// full-attention cache.
+private enum KVCacheStatePart {
+    /// The keys.
+    static let keys = 0
+    /// The values.
+    static let values = 1
+    /// The arrays of the state.
+    static let count = 2
+}
+
 private func qwen35VLMSharedKVState(
     cache: [KVCache?]?,
     fullAttentionIndex: Int?
@@ -1950,10 +2148,10 @@ private func qwen35VLMSharedKVState(
         return [:]
     }
     let state = faCache.state
-    guard state.count == 2 else {
+    guard state.count == KVCacheStatePart.count else {
         return [:]
     }
-    return ["full_attention": (state[0], state[1])]
+    return ["full_attention": (state[KVCacheStatePart.keys], state[KVCacheStatePart.values])]
 }
 
 private func qwen35VLMSharedKVOffsets(
@@ -2349,6 +2547,13 @@ public class Qwen35: Module, VLMModel {
         return try sanitize(weights: weights)
     }
 
+    /// The axis of the kernel of a conv1d weight in a raw checkpoint,
+    /// `(out, in, kernel)`.
+    private static let checkpointConvKernelAxis = 2
+
+    /// The axis of the kernel of a conv1d weight in MLX, `(out, kernel, in)`.
+    private static let convKernelAxis = 1
+
     public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
         // Whether the checkpoint stores RMSNorm weights in the raw (un-shifted)
         // convention that needs the `+1` offset. Mirrors the MLXLLM Qwen35 gate
@@ -2386,7 +2591,8 @@ public class Qwen35: Module, VLMModel {
             var value = originalValue
 
             if key.contains("conv1d.weight") && value.dim(-1) != 1 {
-                value = value.movedAxis(source: 2, destination: 1)
+                value = value.movedAxis(
+                    source: Self.checkpointConvKernelAxis, destination: Self.convKernelAxis)
             }
             if shouldShiftNormWeights
                 && normKeys.contains(where: { key.hasSuffix($0) }) && value.ndim == 1
