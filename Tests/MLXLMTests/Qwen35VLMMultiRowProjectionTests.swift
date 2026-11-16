@@ -124,11 +124,12 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
         Fixture.assertVerifyRowsMatchSingleRows(
             width: Fixture.hiddenSize, axis: Fixture.headTokenAxis, "attention q/k/v"
         ) { x in
-            let (queries, _, keys, values) = attention.projectPreRope(x)
-            return [queries, keys, values]
+            let projection = attention.projectPreNorm(x)
+            let normed = attention.normedHeads(queries: projection.queries, keys: projection.keys)
+            return [normed.queries, normed.keys, projection.values]
         }
         Fixture.assertVerifyRowsMatchSingleRows(width: Fixture.hiddenSize, "attention gate") {
-            [attention.projectPreRope($0).1]
+            [attention.projectPreNorm($0).gate]
         }
         let width = Fixture.attentionHeads * Fixture.headDimension
         Fixture.assertVerifyRowsMatchSingleRows(width: width, "attention o_proj") { gate in

@@ -467,6 +467,10 @@ public enum Qwen35Language {
 
         let rotaryEmbedding: RotaryEmbedding
 
+        /// The kernel of a decode token, or `nil` when it does not reproduce
+        /// the norms and the rotation of this layer.
+        private let decodeHeads: Qwen35DecodeHeadsKernel?
+
         /// The query, key and value projections as one matmul, once the
         /// loader prepares them.
         private let fusedQKV = FusedQuantizedProjectionGroup(keys: ["q_proj", "k_proj", "v_proj"])
@@ -477,6 +481,14 @@ public enum Qwen35Language {
         private static let keysPart = 1
         /// The place of the value projection among the q/k/v outputs.
         private static let valuesPart = 2
+
+        /// The halves of each head of the `q_proj` output: the query, then the
+        /// output gate.
+        private static let gatedQueryParts = 2
+        /// The place of the query among the halves of a `q_proj` head.
+        private static let queryPart = 0
+        /// The place of the output gate among the halves of a `q_proj` head.
+        private static let gatePart = 1
 
         init(_ args: Qwen35Configuration.TextConfiguration) {
             self.numKeyValueHeads = args.kvHeads
@@ -502,6 +514,9 @@ public enum Qwen35Language {
                 dim: rotaryDim, base: args.ropeTheta, mropeSection: mrope,
                 ropeParameters: args.ropeParameters,
                 maxPositionEmbeddings: args.maxPositionEmbeddings)
+            self.decodeHeads = Qwen35DecodeHeadsKernel(
+                queryHeads: numAttentionHeads, kvHeads: numKeyValueHeads, headDim: headDim,
+                rotaryDim: rotaryDim, queryEps: args.rmsNormEps, keyEps: args.rmsNormEps)
             super.init()
         }
 
@@ -547,38 +562,92 @@ public enum Qwen35Language {
             cache: KVCache?,
             positionIds: MLXArray?
         ) -> MLXArray {
-            let (queries, gate, keys, values) = projectPreRope(x)
+            let projection = projectPreNorm(x)
             let attention = attend(
-                queries: queries,
-                keys: keys,
-                values: values,
+                queries: projection.queries,
+                keys: projection.keys,
+                values: projection.values,
                 mask: mask,
                 cache: cache,
                 positionIds: positionIds)
-            return mergeHeadsAndProject(attention: attention, gate: gate)
+            return mergeHeadsAndProject(attention: attention, gate: projection.gate)
         }
 
-        /// Projections up to M-RoPE, which remains outside compiled traces.
-        func projectPreRope(
+        /// The projections of `x` up to the query and key norms, which run
+        /// outside the compiled traces with M-RoPE (see
+        /// ``rotatedHeads(queries:keys:rotation:)``).
+        ///
+        /// - Parameter x: The normed layer input, shape `(batch, tokens, hiddenSize)`.
+        /// - Returns: The `q_proj` output, which holds the query and the output
+        ///   gate of each head, shape `(batch, tokens, heads * 2 * headDim)`;
+        ///   the output gate, shape `(batch, tokens, heads * headDim)`; the
+        ///   `k_proj` output, shape `(batch, tokens, kvHeads * headDim)`; and
+        ///   the values, shape `(batch, kvHeads, tokens, headDim)`.
+        func projectPreNorm(
             _ x: MLXArray
-        ) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
+        ) -> (queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray) {
             let B = x.dim(0)
             let L = x.dim(1)
 
             let projected = fusedQKV(x, [qProj, kProj, vProj])
-            let qProjOutput = projected[Self.queriesPart]
-            let qSplit = qProjOutput.reshaped(B, L, numAttentionHeads, -1).split(parts: 2, axis: -1)
-            var queries = qSplit[0]
-            let gate = qSplit[1].reshaped(B, L, -1)
+            let queries = projected[Self.queriesPart]
+            let gate = gatedQueryHalves(queries)[Self.gatePart].reshaped(B, L, -1)
+            let values = projected[Self.valuesPart].reshaped(B, L, numKeyValueHeads, -1)
+                .transposed(0, 2, 1, 3)
 
-            var keys = projected[Self.keysPart]
-            var values = projected[Self.valuesPart]
+            return (queries, gate, projected[Self.keysPart], values)
+        }
 
-            queries = qNorm(queries).transposed(0, 2, 1, 3)
-            keys = kNorm(keys.reshaped(B, L, numKeyValueHeads, -1)).transposed(0, 2, 1, 3)
-            values = values.reshaped(B, L, numKeyValueHeads, -1).transposed(0, 2, 1, 3)
+        /// The query and the output gate of each head of a `q_proj` output,
+        /// each `(batch, tokens, heads, headDim)`.
+        private func gatedQueryHalves(_ queries: MLXArray) -> [MLXArray] {
+            queries.reshaped(queries.dim(0), queries.dim(1), numAttentionHeads, -1)
+                .split(parts: Self.gatedQueryParts, axis: -1)
+        }
 
-            return (queries, gate, keys, values)
+        /// The op path of the query and key norms and the head-major layout.
+        ///
+        /// - Parameters:
+        ///   - queries: The `q_proj` output from ``projectPreNorm(_:)``.
+        ///   - keys: The `k_proj` output from ``projectPreNorm(_:)``.
+        /// - Returns: The normed queries, shape `(batch, heads, tokens, headDim)`,
+        ///   and the normed keys, shape `(batch, kvHeads, tokens, headDim)`.
+        func normedHeads(
+            queries: MLXArray, keys: MLXArray
+        ) -> (queries: MLXArray, keys: MLXArray) {
+            let (B, L) = (keys.dim(0), keys.dim(1))
+            return (
+                qNorm(gatedQueryHalves(queries)[Self.queryPart]).transposed(0, 2, 1, 3),
+                kNorm(keys.reshaped(B, L, numKeyValueHeads, -1)).transposed(0, 2, 1, 3)
+            )
+        }
+
+        /// The normed and rotated heads the attention reads. A decode token
+        /// that ``Qwen35DecodeHeadsKernel`` reads takes the kernel, with the
+        /// bits of the op path in one dispatch; every other block takes the op
+        /// path: ``normedHeads(queries:keys:)``, then
+        /// ``Qwen35Language/applyMultimodalRotaryPosEmb(q:k:cos:sin:)``.
+        ///
+        /// - Parameters:
+        ///   - queries: The `q_proj` output from ``projectPreNorm(_:)``.
+        ///   - keys: The `k_proj` output from ``projectPreNorm(_:)``.
+        ///   - rotation: The M-RoPE rotation of the tokens.
+        /// - Returns: The queries, shape `(batch, heads, tokens, headDim)`, and
+        ///   the keys, shape `(batch, kvHeads, tokens, headDim)`.
+        func rotatedHeads(
+            queries: MLXArray, keys: MLXArray, rotation: RotaryValues
+        ) -> (queries: MLXArray, keys: MLXArray) {
+            if let decodeHeads,
+                let heads = decodeHeads.heads(
+                    queryProjection: queries, keyProjection: keys, queryWeight: qNorm.weight,
+                    keyWeight: kNorm.weight, rotation: rotation)
+            {
+                return heads
+            }
+            let normed = normedHeads(queries: queries, keys: keys)
+            let (rotatedQueries, rotatedKeys) = applyMultimodalRotaryPosEmb(
+                q: normed.queries, k: normed.keys, cos: rotation.cos, sin: rotation.sin)
+            return (rotatedQueries, rotatedKeys)
         }
 
         /// Dynamic M-RoPE, cache mutation, and SDPA stay eager. The attention
@@ -593,31 +662,29 @@ public enum Qwen35Language {
         /// each layer.
         ///
         /// - Parameters:
-        ///   - initialQueries: The queries before M-RoPE, shape
-        ///     `(batch, heads, tokens, headDim)`.
-        ///   - initialKeys: The new keys before M-RoPE, shape
-        ///     `(batch, kvHeads, tokens, headDim)`.
-        ///   - values: The new values, of the shape of `initialKeys`.
+        ///   - queryProjection: The `q_proj` output from ``projectPreNorm(_:)``,
+        ///     shape `(batch, tokens, heads * 2 * headDim)`.
+        ///   - keyProjection: The `k_proj` output from ``projectPreNorm(_:)``,
+        ///     shape `(batch, tokens, kvHeads * headDim)`.
+        ///   - values: The new values, shape `(batch, kvHeads, tokens, headDim)`.
         ///   - mask: The attention mask of the call.
         ///   - cache: The cache of this layer, or `nil`.
         ///   - providedPositionIds: The M-RoPE positions of the tokens, or
         ///     `nil` for the positions after the cache.
         ///   - rotary: The rotation of `providedPositionIds`, or `nil` to
         ///     compute it here.
-        /// - Returns: The attention output, of the shape of the queries.
+        /// - Returns: The attention output, shape `(batch, heads, tokens, headDim)`.
         func attend(
-            queries initialQueries: MLXArray,
-            keys initialKeys: MLXArray,
+            queries queryProjection: MLXArray,
+            keys keyProjection: MLXArray,
             values: MLXArray,
             mask: MLXFast.ScaledDotProductAttentionMaskMode,
             cache: KVCache?,
             positionIds providedPositionIds: MLXArray?,
             rotary: RotaryValues? = nil
         ) -> MLXArray {
-            let B = initialQueries.dim(0)
-            let L = initialQueries.dim(2)
-            var queries = initialQueries
-            var keys = initialKeys
+            let B = keyProjection.dim(0)
+            let L = keyProjection.dim(1)
 
             var positionIds = providedPositionIds
 
@@ -629,10 +696,9 @@ public enum Qwen35Language {
                 positionIds = tiled(positionIds!, repetitions: [3, 1, 1])
             }
 
-            let (cosValues, sinValues) =
-                rotary ?? rotaryEmbedding(x: values, positionIds: positionIds!)
-            (queries, keys) = applyMultimodalRotaryPosEmb(
-                q: queries, k: keys, cos: cosValues, sin: sinValues)
+            let (queries, keys) = rotatedHeads(
+                queries: queryProjection, keys: keyProjection,
+                rotation: rotary ?? rotaryEmbedding(x: values, positionIds: positionIds!))
 
             // The mask is sized for the keys the cache presents; slicing it to
             // an offset-derived length would misalign it after eviction.
@@ -1308,10 +1374,14 @@ public enum Qwen35Language {
                 recurrentState: step.recurrentState, snapshots: step.snapshots)
         }
 
+        /// The projections of the attention before its query and key norms,
+        /// which ``Attention/attend(queries:keys:values:mask:cache:positionIds:rotary:)``
+        /// runs outside the compiled traces with M-RoPE; see
+        /// ``Attention/projectPreNorm(_:)``.
         package func projectAttention(_ x: MLXArray) -> (
             queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray
         ) {
-            fullAttention.projectPreRope(x)
+            fullAttention.projectPreNorm(x)
         }
 
         package func mergeAttention(_ attention: MLXArray, gate: MLXArray) -> MLXArray {
@@ -1618,7 +1688,7 @@ public enum Qwen35Language {
             guard let embedded = compiledStepInput(inputs) else { return nil }
             return decodeSchedule.decode(
                 embedded, cache: cache, segments: compiledSegments, of: self,
-                attention: { attend($0, mask: .none, positionIds: positionIds) })
+                attention: sharedRotationAttention(mask: .none, positionIds: positionIds))
         }
 
         /// One speculative verify through the compiled segments of its shape, or
@@ -1628,8 +1698,7 @@ public enum Qwen35Language {
         ///
         /// Each attention layer runs its queries over the cache with the mask of
         /// the general path, so M-RoPE, the KV write and the attention kernels
-        /// stay outside the traces. The first layer computes the rotation of the
-        /// tokens, and every other layer reuses it.
+        /// stay outside the traces; see ``sharedRotationAttention(mask:positionIds:)``.
         private func verifyStep(
             _ inputs: MLXArray, _ cache: [KVCache?], positionIds: MLXArray?,
             shape: CompiledVerifyShape
@@ -1637,22 +1706,40 @@ public enum Qwen35Language {
             guard let embedded = compiledStepInput(inputs),
                 let caches = decodeSchedule.caches(cache, over: embedded)
             else { return nil }
-            let mask = decodeSchedule.attentionMask(embedded, cache)
-            var rotary: RotaryValues?
             return decodeSchedule.run(
                 embedded, caches: caches, verify: shape,
                 segment: { index, arguments in
                     compiledVerifySegments(self, key: shape, at: index, arguments)
                 },
-                attention: { step in
-                    rotary =
-                        rotary
-                        ?? positionIds.map {
-                            layers[step.layer].fullAttention.rotaryEmbedding(
-                                x: step.values, positionIds: $0)
-                        }
-                    return attend(step, mask: mask, positionIds: positionIds, rotary: rotary)
-                })
+                attention: sharedRotationAttention(
+                    mask: decodeSchedule.attentionMask(embedded, cache), positionIds: positionIds))
+        }
+
+        /// The attention of each full-attention layer of one compiled step,
+        /// through ``attend(_:mask:positionIds:rotary:)``. The attention
+        /// layers of a model share their rotation tables and rotate the same
+        /// tokens, so the first layer of the step computes the M-RoPE rotation
+        /// of `positionIds` and every later layer reuses it. Without
+        /// `positionIds` each layer rotates the positions after its cache.
+        ///
+        /// - Parameters:
+        ///   - mask: The attention mask of the step.
+        ///   - positionIds: The M-RoPE positions of the tokens of the step, or
+        ///     `nil` for the positions after the cache.
+        /// - Returns: The attention step of the schedule, for one step only.
+        private func sharedRotationAttention(
+            mask: MLXFast.ScaledDotProductAttentionMaskMode, positionIds: MLXArray?
+        ) -> (CompiledDecodeSchedule.AttentionStep) -> MLXArray {
+            var rotary: RotaryValues?
+            return { [unowned self] step in
+                rotary =
+                    rotary
+                    ?? positionIds.map {
+                        layers[step.layer].fullAttention.rotaryEmbedding(
+                            x: step.values, positionIds: $0)
+                    }
+                return attend(step, mask: mask, positionIds: positionIds, rotary: rotary)
+            }
         }
 
         /// The attention of a full-attention layer between two segments, through

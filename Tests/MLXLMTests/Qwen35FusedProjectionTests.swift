@@ -168,12 +168,12 @@ final class Qwen35FusedProjectionTests: XCTestCase {
             try vlmModel(prepared: false).modules().compactMap { $0 as? Qwen35Language.Attention }
                 .first)
         let inputs = Self.projectionTokenCounts.map(rows)
-        let separate = inputs.map { attention.projectPreRope($0) }
+        let separate = inputs.map { attention.projectPreNorm($0) }
 
         XCTAssertTrue(try attention.prepareFusedProjection())
 
         for (input, want) in zip(inputs, separate) {
-            let got = attention.projectPreRope(input)
+            let got = attention.projectPreNorm(input)
             assertBitIdentical(
                 [got.0, got.1, got.2, got.3], [want.0, want.1, want.2, want.3],
                 "VLM q/k/v of \(input.dim(1)) tokens")
