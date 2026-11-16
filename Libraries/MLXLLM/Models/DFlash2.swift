@@ -299,6 +299,9 @@ public struct DFlash2Configuration: Codable, Sendable {
 
 /// The axes of the drafter's tensors.
 private enum DFlash2Axis {
+    /// The batch axis of every tensor of the drafter.
+    static let batch = 0
+
     /// The token axis of hidden states, `[batch, tokens, width]`.
     static let token = 1
 
@@ -308,9 +311,15 @@ private enum DFlash2Axis {
     /// The row axis of heads-first keys and values, `[batch, heads, rows, headDim]`.
     static let row = 2
 
+    /// The head axis of tokens-first projections, `[batch, tokens, heads, headDim]`.
+    static let head = 2
+
+    /// The head-dimension axis of projections, `[batch, tokens, heads, headDim]`.
+    static let headDim = 3
+
     /// The permutation between `[batch, tokens, heads, headDim]` and heads first; it is its
     /// own inverse.
-    static let headsFirst = [0, 2, 1, 3]
+    static let headsFirst = [batch, head, token, headDim]
 }
 
 // MARK: - Projections
@@ -359,7 +368,8 @@ final class DFlash2DynamicConv: Module {
         _ hidden: MLXArray, dynamic: MLXArray, base: MLXArray, groupSize: Int
     ) -> MLXArray {
         let (batch, length, width) = (
-            hidden.dim(0), hidden.dim(DFlash2Axis.token), hidden.dim(DFlash2Axis.width)
+            hidden.dim(DFlash2Axis.batch), hidden.dim(DFlash2Axis.token),
+            hidden.dim(DFlash2Axis.width)
         )
         let groups = width / groupSize
         let blocks = hidden.reshaped(batch, length, groups, groupSize)
@@ -382,7 +392,8 @@ final class DFlash2DynamicConv: Module {
     func prepare(_ hidden: MLXArray) -> (convolved: MLXArray, kernel: MLXArray) {
         let groups = hidden.dim(-1) / groupSize
         let dynamic = DFlash2Projection.project(hidden, by: kernelProjection).reshaped(
-            hidden.dim(0), hidden.dim(1), Self.kernelSlots, kernelSize, groups)
+            hidden.dim(DFlash2Axis.batch), hidden.dim(DFlash2Axis.token), Self.kernelSlots,
+            kernelSize, groups)
         return (
             Self.convolve(
                 hidden, dynamic: dynamic[0..., 0..., 0, 0..., 0...],
@@ -431,7 +442,7 @@ final class DFlash2Attention: Module {
     func keysAndValues(
         _ x: MLXArray, rope: RoPELayer, position: MLXArray
     ) -> (keys: MLXArray, values: MLXArray) {
-        let (batch, length) = (x.dim(0), x.dim(1))
+        let (batch, length) = (x.dim(DFlash2Axis.batch), x.dim(DFlash2Axis.token))
         let keys = kNorm(
             DFlash2Projection.project(x, by: kProj).reshaped(batch, length, numKVHeads, headDim)
         ).transposed(axes: DFlash2Axis.headsFirst)
@@ -444,7 +455,7 @@ final class DFlash2Attention: Module {
     func projectBlock(
         _ x: MLXArray, rope: RoPELayer, position: MLXArray
     ) -> (queries: MLXArray, keys: MLXArray, values: MLXArray) {
-        let (batch, length) = (x.dim(0), x.dim(1))
+        let (batch, length) = (x.dim(DFlash2Axis.batch), x.dim(DFlash2Axis.token))
         let queries = qNorm(
             DFlash2Projection.project(x, by: qProj).reshaped(batch, length, numHeads, headDim)
         ).transposed(axes: DFlash2Axis.headsFirst)
@@ -454,7 +465,7 @@ final class DFlash2Attention: Module {
 
     /// The output projection of the attention `[B, heads, L, headDim]`.
     func project(_ attention: MLXArray) -> MLXArray {
-        let (batch, length) = (attention.dim(0), attention.dim(DFlash2Axis.row))
+        let (batch, length) = (attention.dim(DFlash2Axis.batch), attention.dim(DFlash2Axis.row))
         return DFlash2Projection.project(
             attention.transposed(axes: DFlash2Axis.headsFirst)
                 .reshaped(batch, length, numHeads * headDim),
@@ -549,11 +560,33 @@ final class DFlash2CandidateSelector: Module {
     private let compiledWalks = KeyedCompiledDecodeSegmentCaches<DFlash2CandidateSelector, Int>(
         count: 1, state: { selector, _ in [selector] },
         body: { selector, _, _, arguments in
-            [selector.walk(hidden: arguments[0], logits: arguments[1], anchor: arguments[2])]
+            [
+                selector.walk(
+                    hidden: arguments[WalkArgument.hidden],
+                    logits: arguments[WalkArgument.logits],
+                    anchor: arguments[WalkArgument.anchor])
+            ]
         })
 
+    /// The places of the arguments of a walk trace.
+    private enum WalkArgument {
+        static let hidden = 0
+        static let logits = 1
+        static let anchor = 2
+    }
+
+    /// The axes of the pair scores, `[batch, positions, candidates, rank]`.
+    private enum CandidateAxis {
+        static let batch = 0
+        static let position = 1
+        static let candidate = 2
+        static let rank = 3
+    }
+
     /// The permutation of `[batch, positions, candidates, rank]` that puts the candidates last.
-    private static let candidatesLast = [0, 1, 3, 2]
+    private static let candidatesLast = [
+        CandidateAxis.batch, CandidateAxis.position, CandidateAxis.rank, CandidateAxis.candidate,
+    ]
 
     /// Whether ``select(hidden:logits:anchor:)`` runs the walk through its traces.
     var compiledTracesEnabled = true
@@ -845,12 +878,19 @@ public final class DFlash2DraftModel: Module, ResumableMTPDrafterModel {
         return contextTraces(self, key: rows, at: 0, [targetHidden, position])
     }
 
+    /// The places of the arguments of a context trace.
+    private enum ContextArgument {
+        static let targetHidden = 0
+        static let position = 1
+    }
+
     /// `[targetHidden, position]` to `[keys, values]` for each layer.
     private func contextBody(_ arguments: [MLXArray]) -> [MLXArray] {
-        let context = hiddenNorm(DFlash2Projection.project(arguments[0], by: fc))
+        let context = hiddenNorm(
+            DFlash2Projection.project(arguments[ContextArgument.targetHidden], by: fc))
         return layers.flatMap { layer in
             let (keys, values) = layer.selfAttn.keysAndValues(
-                context, rope: rope, position: arguments[1])
+                context, rope: rope, position: arguments[ContextArgument.position])
             return [keys, values]
         }
     }
@@ -945,7 +985,7 @@ public final class DFlash2DraftModel: Module, ResumableMTPDrafterModel {
                 compiledTracesEnabled
                 ? segmentTraces(self, key: width, at: index, arguments)
                 : segmentBody(at: index, arguments)
-            x = outputs[0]
+            x = outputs[SegmentOutput.hidden]
             guard index < layers.count else { break }
             let rows = context[index]
             let attention = MLXFast.scaledDotProductAttention(
@@ -980,10 +1020,18 @@ public final class DFlash2DraftModel: Module, ResumableMTPDrafterModel {
 
     /// The places of the outputs of a segment that opens a layer.
     private enum SegmentOutput {
+        static let hidden = 0
         static let kernel = 1
         static let queries = 2
         static let keys = 3
         static let values = 4
+    }
+
+    /// The places of the arguments of a segment that closes a layer; the position is last.
+    private enum SegmentArgument {
+        static let hidden = 0
+        static let attention = 1
+        static let kernel = 2
     }
 
     /// The modules segment `index` reads: the layer it closes, and the layer it opens or the
@@ -999,9 +1047,11 @@ public final class DFlash2DraftModel: Module, ResumableMTPDrafterModel {
     /// `[x, attention, kernel, position]`. Out: `[x, kernel, queries, keys, values]`, or
     /// `[normed]` for the last.
     private func segmentBody(at index: Int, _ arguments: [MLXArray]) -> [MLXArray] {
-        var x = arguments[0]
+        var x = arguments[SegmentArgument.hidden]
         if index > 0 {
-            x = layers[index - 1].postAttention(x: x, attention: arguments[1], kernel: arguments[2])
+            x = layers[index - 1].postAttention(
+                x: x, attention: arguments[SegmentArgument.attention],
+                kernel: arguments[SegmentArgument.kernel])
         }
         guard index < layers.count else { return [norm(x)] }
         let (kernel, queries, keys, values) = layers[index].preAttention(

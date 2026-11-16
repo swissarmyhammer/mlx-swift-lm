@@ -184,6 +184,68 @@ comments:
     - known issues: 3, in AttentionKernelToleranceTests (aNearTieRejectsATokenOutsideTheTwoBest) and ToolTests MiniCPM5 (keeps a function close tag inside CDATA, 2). The branch changes no test files, so they are the same on stable.
     - next: review
   timestamp: 2026-11-16T13:49:49.513441+00:00
+- actor: claude-code
+  id: 01m7j9yn9jp708a7yvjabehfmw
+  text: |-
+    ### commit — changed
+    - evidence: 265c8543 feat(dflash2): port DFlash2 as an MTP drafter with 4-bit drafter quantization
+    - next: local branch dflash2-4bit only, not pushed
+  timestamp: 2026-11-16T13:50:09.714288+00:00
+- actor: claude-code
+  id: 01m7jafszn12a4q0ceypywjj6p
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (265c8543); 8 findings — Libraries/MLXLLM/Models/DFlash2.swift:313, :552, :556, :1004; Tests/MLXLMTests/DFlash2Tests.swift:34, :43, :53, :511
+    - next: implement the 8 open items in the 2026-11-16 07:50 Review Findings section, remove each cause file-wide, then re-review
+  timestamp: 2026-11-16T13:59:31.573502+00:00
+- actor: claude-code
+  id: 01m7jag7cvqx76xke8vbss4z83
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 12 files (DFlash2 as MTP drafter, 4-bit at load); NO-GO measured
+    - test: green — 5 bundles, 0 failures (4 env-gated LFM2 skips, 3 known issues, same files as stable)
+    - commit: 265c8543
+    - review: findings — DFlash2.swift:313, :552, :556, :1004; DFlash2Tests.swift:34, :43, :53, :511
+  timestamp: 2026-11-16T13:59:45.307113+00:00
+- actor: claude-code
+  id: 01m7janwjd4a18skcx9dc0s15a
+  text: |-
+    Review fixes (uncommitted, on top of 265c8543).
+
+    Cause of the magic-numbers findings: positional slots (trace-argument indices, tensor-axis permutations) and fixture values were written as bare literals. Fixed everywhere in both files:
+    - DFlash2.swift:
+      - DFlash2Axis gains `batch`, `head` and `headDim`, so `headsFirst = [batch, head, token, headDim]`. The `dim(0)`/`dim(1)` reads of hidden states now use `DFlash2Axis.batch`/`.token`.
+      - DFlash2CandidateSelector gains `WalkArgument` (hidden/logits/anchor) and `CandidateAxis` (batch/position/candidate/rank), so `candidatesLast` is built from names.
+      - The segment code gains `SegmentArgument` (hidden/attention/kernel) and `SegmentOutput.hidden`. The context trace gains `ContextArgument` (targetHidden/position).
+    - DFlash2Tests.swift:
+      - `targetLayerIds = [firstAttentionLayer, firstAttentionLayer + 1]`, where `firstAttentionLayer = fullAttentionInterval - 1`.
+      - `maskTokenId = vocabularySize - maskTokenDistanceFromEnd`.
+      - `fourBit` is built from `fourBitGroupSize` (= hiddenSize) and `fourBitBits` (= DFlash2DraftModel.fourBit.bits).
+    - `DFlash2Fixture.target(seed:hiddenSize:)`: `refusesAnotherTarget` now calls `DFlash2Fixture.target(hiddenSize: 2 * DFlash2Fixture.hiddenSize)`.
+
+    Useful to know:
+    - The reviewer's rule is swiftlint `no_magic_numbers` with `allowed_numbers [0, 1, -1, 100]`. Running it by hand (a child config with only_rules: no_magic_numbers) lists every site. Before the fix it reported 10 sites in the two files; after the fix it reports 0.
+    - `xcrun xctest -XCTest "MLXLMTests.<Suite>,..."` also filters Swift Testing suites.
+  timestamp: 2026-11-16T14:02:50.829278+00:00
+- actor: claude-code
+  id: 01m7janz8c4hr0pcqmmtvejnvc
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — Libraries/MLXLLM/Models/DFlash2.swift, Tests/MLXLMTests/DFlash2Tests.swift.
+      - swift-format: run over the repo.
+      - swiftlint no_magic_numbers: 0 violations.
+      - `swift build --build-tests`: Build complete, no compiler warnings. The only message is the known SwiftPM "missing creator for mutated node" tool message.
+      - `xcrun xctest -XCTest` on the 9 DFlash2 suites (Qwen35TargetLayerTapTests, DFlash2IteratorTests, ChatSessionDFlash2Tests, DFlash2Configuration/Geometry/Layer/Context/Proposal/QuantizationTests): 28 tests in 9 suites passed.
+      - All 8 findings are checked.
+    - next: test, then review
+  timestamp: 2026-11-16T14:02:53.580592+00:00
+- actor: claude-code
+  id: 01m7jb4nk9tdexnvrj2v1jhcwb
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (changed files touched and rebuilt: 0 compiler warnings; only the build-system node message about the Cmlx bundle). xcrun xctest on all five bundles, all exit 0. MLXLMTests: Swift Testing 2381 tests passed, XCTest 1098 executed, 0 failures. MLXGuidedGenerationTests: 78 passed. MLXFoundationModelsTests: 496 passed. CXGrammarTests: 7 passed. MLXHuggingFaceMacrosTests: 11 XCTest passed. Only the pre-existing 4 LFM2 skips and 3 known issues (AttentionKernelToleranceTests, ToolTests MiniCPM5), in files this branch does not touch.
+    - next: review
+  timestamp: 2026-11-16T14:10:55.209028+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'DFlash2 with a 4-bit drafter: port onto stable and measure go/no-go against MTP'
@@ -219,3 +281,16 @@ title: 'DFlash2 with a 4-bit drafter: port onto stable and measure go/no-go agai
 ## Notes
 - If the verify q_len × GQA goes over 32, MLX SDPA falls back to the unfused path. This hit Flint at L≥5 (Flint GQA 8). Check Qwen3.8's GQA and size the block accordingly.
 - Multi-turn prompt-cache reuse must keep working (see the ChatSessionDFlash2Tests on the old branch). #dflash2-4bit
+
+## Review Findings (2026-11-16 07:50)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 11 file(s) reviewed, 35 not reviewed (no validator matched: `.kanban/` tag and task files, `Libraries/MLXLLM/Documentation.docc/using-model.md`).
+
+- [x] `Libraries/MLXLLM/Models/DFlash2.swift:313` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/DFlash2.swift:552` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/DFlash2.swift:556` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Libraries/MLXLLM/Models/DFlash2.swift:1004` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/DFlash2Tests.swift:34` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/DFlash2Tests.swift:43` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/DFlash2Tests.swift:53` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/DFlash2Tests.swift:511` `reuse/reuse` — refusesAnotherTarget rebuilds a Qwen35 target configuration from scratch (Qwen35TextConfiguration decode of Qwen35FixtureJSON.text with the same layer, interval and vocabulary arguments) instead of extending DFlash2Fixture.target(seed:), which already builds that same target. Only the hidden size differs. The duplicated construction will drift from the fixture if the fixture's target shape changes. Give DFlash2Fixture.target a `hiddenSize: Int = hiddenSize` parameter (alongside `seed`) and call `DFlash2Fixture.target(hiddenSize: 2 * DFlash2Fixture.hiddenSize)` here. The wider target then comes from the same code path as every other test target.

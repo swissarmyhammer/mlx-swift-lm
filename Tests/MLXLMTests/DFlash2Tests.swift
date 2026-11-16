@@ -30,8 +30,12 @@ enum DFlash2Fixture {
     /// One full-attention layer for each two target layers.
     static let fullAttentionInterval = 2
 
-    /// The target layers the drafter reads: one linear layer and one attention layer.
-    static let targetLayerIds = [1, 2]
+    /// The first full-attention layer of the target, the last of its interval.
+    static let firstAttentionLayer = fullAttentionInterval - 1
+
+    /// The target layers the drafter reads: the first attention layer and the linear layer
+    /// after it.
+    static let targetLayerIds = [firstAttentionLayer, firstAttentionLayer + 1]
 
     /// The tokens of a verify the checkpoint was trained for, the anchor included.
     static let trainedBlockSize = 8
@@ -39,8 +43,11 @@ enum DFlash2Fixture {
     /// The sliding window of the drafter, small so a test fills it.
     static let slidingWindow = 12
 
+    /// How far below the end of the vocabulary the mask token sits.
+    static let maskTokenDistanceFromEnd = 2
+
     /// The token id that fills the block after the anchor.
-    static let maskTokenId = vocabularySize - 2
+    static let maskTokenId = vocabularySize - maskTokenDistanceFromEnd
 
     /// The seed of the target weights.
     static let targetSeed: UInt64 = 35
@@ -48,9 +55,17 @@ enum DFlash2Fixture {
     /// The seed of the drafter weights.
     static let drafterSeed: UInt64 = 5
 
+    /// The weights of one quantization group of ``fourBit``: the smallest input width of the
+    /// tiny drafter, so a group divides every one of them.
+    static let fourBitGroupSize = hiddenSize
+
+    /// The bits of one weight of ``fourBit``, those of ``DFlash2DraftModel/fourBit``.
+    static let fourBitBits = DFlash2DraftModel.fourBit.bits
+
     /// A 4-bit quantization whose groups divide every input width of the tiny drafter, as
     /// ``DFlash2DraftModel/fourBit`` divides those of the released one.
-    static let fourBit = BaseConfiguration.Quantization(groupSize: 32, bits: 4)
+    static let fourBit = BaseConfiguration.Quantization(
+        groupSize: fourBitGroupSize, bits: fourBitBits)
 
     /// The JSON of the drafter configuration, in the layout of the z-lab checkpoints.
     ///
@@ -114,7 +129,13 @@ enum DFlash2Fixture {
     }
 
     /// The hybrid Qwen 3.5 target on seeded random weights.
-    static func target(seed: UInt64 = targetSeed) throws -> Qwen35TextModel {
+    ///
+    /// - Parameters:
+    ///   - seed: The seed of the target weights.
+    ///   - hiddenSize: The width of the hidden state of the target.
+    static func target(
+        seed: UInt64 = targetSeed, hiddenSize: Int = hiddenSize
+    ) throws -> Qwen35TextModel {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
             from: Data(
@@ -508,17 +529,9 @@ struct DFlash2ProposalTests {
     @Test("a target of another shape is refused")
     func refusesAnotherTarget() throws {
         let drafter = try DFlash2Fixture.drafter()
-        let wider = try JSONDecoder().decode(
-            Qwen35TextConfiguration.self,
-            from: Data(
-                Qwen35FixtureJSON.text(
-                    mtpLayers: 0, hiddenLayers: DFlash2Fixture.targetLayers,
-                    fullAttentionInterval: DFlash2Fixture.fullAttentionInterval,
-                    hiddenSize: 2 * DFlash2Fixture.hiddenSize,
-                    vocabularySize: DFlash2Fixture.vocabularySize, tieWordEmbeddings: false
-                ).utf8))
+        let wider = try DFlash2Fixture.target(hiddenSize: 2 * DFlash2Fixture.hiddenSize)
         #expect(throws: MTPDrafterCompatibilityError.self) {
-            try drafter.validateCompatibility(with: Qwen35TextModel(wider))
+            try drafter.validateCompatibility(with: wider)
         }
     }
 }
