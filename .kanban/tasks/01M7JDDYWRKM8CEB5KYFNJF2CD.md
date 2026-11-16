@@ -75,8 +75,24 @@ comments:
     - evidence: 1 file — Tests/MLXLMTests/Qwen35GDNInputProjectionGroupTests.swift. swift-format ran. swift build --build-tests: Build complete, no compiler warnings. xcrun xctest -XCTest MLXLMTests.Qwen35GDNInputProjectionGroupTests: 8 tests, 0 failures. Mutation RED: 2 new tests failed (2 != 0) on an on→off-only guard, then the guard was reverted. The finding of 2026-11-16 15:49 is checked.
     - next: /review
   timestamp: 2026-11-16T21:54:36.205680+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7k5q585p555q4a49w9y2mz7
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (1a112a88) — 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed; 1 file reviewed, 2 .kanban files skipped (no validator); all 9 prior findings checked
+    - next: none — task moved to done
+  timestamp: 2026-11-16T21:55:24.037613+00:00
+- actor: claude-code
+  id: 01m7k5qfrfgfz6yy84gze0ke62
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — off→on rollback tests (mutation-verified)
+    - test: green — Qwen35GDNInputProjectionGroupTests 8/0 (run by implement)
+    - commit: 1a112a88
+    - review: clean → done
+  timestamp: 2026-11-16T21:55:34.799439+00:00
+position_column: done
+position_ordinal: ffffbc80
 title: Move the Qwen35 GDN input-projection fusion onto FusedQuantizedProjectionGroup
 ---
 ## Why

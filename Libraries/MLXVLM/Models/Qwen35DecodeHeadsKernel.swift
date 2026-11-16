@@ -27,11 +27,13 @@
 //    128 numbers. Each thread adds the squares of its numbers with `fma`,
 //    `simd_sum` adds the threads of each SIMD group, and a second `simd_sum`
 //    adds the sums of the SIMD groups from the lanes of one SIMD group, with
-//    zero in every other lane. The inverse is
-//    `precise::rsqrt(sum / width + eps)`, and the output is
-//    `weight * T(x * inverse)`, rounded in the dtype `T`. One SIMD group of
-//    this kernel reads the numbers of each SIMD group of the MLX kernel in
-//    turn, in the same lanes, and adds them the same way.
+//    zero in every other lane. The MLX source divides the sum by the width,
+//    and its fast math multiplies by the reciprocal of the width instead,
+//    which rounds differently for a width that is not a power of two. Thus
+//    the inverse is `precise::rsqrt(sum * (1 / width) + eps)`, and the
+//    output is `weight * T(x * inverse)`, rounded in the dtype `T`. One
+//    SIMD group of this kernel reads the numbers of each SIMD group of the
+//    MLX kernel in turn, in the same lanes, and adds them the same way.
 //  - The M-RoPE of `applyMultimodalRotaryPosEmb`: each MLX operation rounds
 //    in `T`, thus number `d` of the rotated part turns to
 //    `T(x[d] * cos[d]) + T(halfTurn[d] * sin[d])`, with `halfTurn[d] = -x[d + R/2]`
@@ -122,7 +124,7 @@ struct Qwen35DecodeHeadsKernel {
                 groupSum = squares;
             }
         }
-        float inverse = metal::precise::rsqrt(simd_sum(groupSum) / DIM + eps);
+        float inverse = metal::precise::rsqrt(simd_sum(groupSum) * (1.0f / DIM) + eps);
 
         T normed[groups][perLane];
         for (int g = 0; g < groups; g++) {

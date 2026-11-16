@@ -50,6 +50,11 @@ struct Qwen35DecodeHeadsKernelTests {
     /// groups of norm reads.
     private static let otherHeadDim = 192
 
+    /// A head width the kernel reads that is not a power of two: three SIMD
+    /// groups of norm reads. A division by it rounds otherwise than the
+    /// product with its reciprocal that the MLX RMS norm computes.
+    private static let threeGroupHeadDim = 384
+
     /// A rotary width the kernel does not read: wider than one SIMD group of
     /// norm reads.
     private static let wideRotaryDim = 256
@@ -132,7 +137,7 @@ struct Qwen35DecodeHeadsKernelTests {
     /// The `q_proj` output of `tokens` tokens of `batchSize` sequences: the
     /// query and the output gate of each head, one after the other.
     private static func queryProjection(
-        batchSize: Int, tokens: Int = decodeTokens, dtype: DType
+        batchSize: Int, tokens: Int = decodeTokens, headDim: Int = headDim, dtype: DType
     ) -> MLXArray {
         randomArray(
             [batchSize, tokens, queryHeads * gatedQueryParts * headDim], seed: Seed.queries,
@@ -141,7 +146,7 @@ struct Qwen35DecodeHeadsKernelTests {
 
     /// The `k_proj` output of `tokens` tokens of `batchSize` sequences.
     private static func keyProjection(
-        batchSize: Int, tokens: Int = decodeTokens, dtype: DType
+        batchSize: Int, tokens: Int = decodeTokens, headDim: Int = headDim, dtype: DType
     ) -> MLXArray {
         randomArray(
             [batchSize, tokens, kvHeads * headDim], seed: Seed.keys, spread: projectionSpread,
@@ -149,7 +154,9 @@ struct Qwen35DecodeHeadsKernelTests {
     }
 
     /// An RMS norm over `headDim` numbers whose weights are near one.
-    private static func norm(seed: UInt64, dtype: DType) throws -> RMSNorm {
+    private static func norm(
+        seed: UInt64, headDim: Int = headDim, dtype: DType
+    ) throws -> RMSNorm {
         let norm = RMSNorm(dimensions: headDim, eps: normEps)
         let weight = randomArray([headDim], seed: seed, spread: normWeightSpread) + 1
         try norm.update(
@@ -173,8 +180,8 @@ struct Qwen35DecodeHeadsKernelTests {
         return (cosines, sines)
     }
 
-    /// The kernel of the test layout.
-    private static func kernel() throws -> Qwen35DecodeHeadsKernel {
+    /// The kernel of the test layout with heads of `headDim` numbers.
+    private static func kernel(headDim: Int = headDim) throws -> Qwen35DecodeHeadsKernel {
         try #require(
             Qwen35DecodeHeadsKernel(
                 queryHeads: queryHeads, kvHeads: kvHeads, headDim: headDim, rotaryDim: rotaryDim,
@@ -222,13 +229,18 @@ struct Qwen35DecodeHeadsKernelTests {
 
     // MARK: - The kernel
 
-    @Test(arguments: headsCases)
-    func theKernelGivesTheBitsOfTheOpPath(headsCase: HeadsCase) throws {
+    /// Checks that the kernel gives the bits of the op path for `headsCase`
+    /// with heads of `headDim` numbers.
+    private func expectTheBitsOfTheOpPath(
+        _ headsCase: HeadsCase, headDim: Int = headDim,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
         let (batchSize, dtype) = (headsCase.batchSize, headsCase.dtype)
-        let queryProjection = Self.queryProjection(batchSize: batchSize, dtype: dtype)
-        let keyProjection = Self.keyProjection(batchSize: batchSize, dtype: dtype)
-        let queryNorm = try Self.norm(seed: Seed.queryNorm, dtype: dtype)
-        let keyNorm = try Self.norm(seed: Seed.keyNorm, dtype: dtype)
+        let queryProjection = Self.queryProjection(
+            batchSize: batchSize, headDim: headDim, dtype: dtype)
+        let keyProjection = Self.keyProjection(batchSize: batchSize, headDim: headDim, dtype: dtype)
+        let queryNorm = try Self.norm(seed: Seed.queryNorm, headDim: headDim, dtype: dtype)
+        let keyNorm = try Self.norm(seed: Seed.keyNorm, headDim: headDim, dtype: dtype)
         let rotation = Self.rotation(
             position: headsCase.position, batchSize: batchSize, dtype: dtype)
 
@@ -236,12 +248,23 @@ struct Qwen35DecodeHeadsKernelTests {
             queryProjection: queryProjection, keyProjection: keyProjection,
             queryNorm: queryNorm, keyNorm: keyNorm, rotation: rotation)
         let heads = try #require(
-            Self.kernel().heads(
+            Self.kernel(headDim: headDim).heads(
                 queryProjection: queryProjection, keyProjection: keyProjection,
-                queryWeight: queryNorm.weight, keyWeight: keyNorm.weight, rotation: rotation))
+                queryWeight: queryNorm.weight, keyWeight: keyNorm.weight, rotation: rotation),
+            sourceLocation: sourceLocation)
 
-        expectSameBits(heads.queries, reference.queries, "queries")
-        expectSameBits(heads.keys, reference.keys, "keys")
+        expectSameBits(heads.queries, reference.queries, "queries", sourceLocation: sourceLocation)
+        expectSameBits(heads.keys, reference.keys, "keys", sourceLocation: sourceLocation)
+    }
+
+    @Test(arguments: headsCases)
+    func theKernelGivesTheBitsOfTheOpPath(headsCase: HeadsCase) throws {
+        try expectTheBitsOfTheOpPath(headsCase)
+    }
+
+    @Test(arguments: headsCases)
+    func aHeadWidthThatIsNotAPowerOfTwoGivesTheBitsOfTheOpPath(headsCase: HeadsCase) throws {
+        try expectTheBitsOfTheOpPath(headsCase, headDim: Self.threeGroupHeadDim)
     }
 
     @Test func aBlockOfSeveralTokensTakesNoKernel() throws {

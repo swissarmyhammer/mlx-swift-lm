@@ -45,6 +45,11 @@ struct FlintDecodeHeadsKernelTests {
     /// A head width the kernel does not read.
     private static let otherHeadDim = 64
 
+    /// A head width that is not a power of two, three times ``headDim``.
+    /// The kernel must not read it: one SIMD group would add its squares in
+    /// another order than the three SIMD groups of the MLX RMS norm.
+    private static let threeGroupHeadDim = 384
+
     /// The epsilon of the query and key norms, the `rms_norm_eps` of Flint.
     private static let normEps: Float = 1e-6
 
@@ -238,6 +243,14 @@ struct FlintDecodeHeadsKernelTests {
     @Test func aHeadOfAnotherWidthHasNoKernel() {
         let kernel = FlintDecodeHeadsKernel(
             queryHeads: Self.queryHeads, kvHeads: Self.kvHeads, headDim: Self.otherHeadDim,
+            queryEps: Self.normEps, keyEps: Self.normEps, rotation: .unrotated)
+
+        #expect(kernel == nil)
+    }
+
+    @Test func aHeadWidthThatIsNotAPowerOfTwoHasNoKernel() {
+        let kernel = FlintDecodeHeadsKernel(
+            queryHeads: Self.queryHeads, kvHeads: Self.kvHeads, headDim: Self.threeGroupHeadDim,
             queryEps: Self.normEps, keyEps: Self.normEps, rotation: .unrotated)
 
         #expect(kernel == nil)
