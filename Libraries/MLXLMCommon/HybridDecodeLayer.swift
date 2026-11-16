@@ -125,11 +125,35 @@ extension HybridDecodeLayer {
     package func linearLayerBody(
         x: MLXArray, convState: MLXArray, recState: MLXArray, keepsSnapshots: Bool = false
     ) -> GatedDeltaLayerStep {
-        var step = gatedDeltaMixer(
-            inputLayerNorm(x), convState: convState, recState: recState,
+        let layer = linearLayerBody(
+            ResidualStream(x), convState: convState, recState: recState,
             keepsSnapshots: keepsSnapshots)
-        step.output = residualFeedForward(x + step.output)
+        var step = layer.mixer
+        step.output = layer.output.hidden
         return step
+    }
+
+    /// The gated delta net layer with its states passed in and out, for a
+    /// traced step over a residual stream: the residual sum of its input
+    /// and the sum of its output each run in the norm that reads them.
+    ///
+    /// - Parameters:
+    ///   - input: The layer input.
+    ///   - convState: The conv state before the first token.
+    ///   - recState: The recurrent state before the first token.
+    ///   - keepsSnapshots: True for a verify, whose layer keeps the states
+    ///     after each token for a rollback; false for a decode step.
+    /// - Returns: The layer output, with its feed-forward output not yet
+    ///   added, and the mixer step: the mixer output, the states after the
+    ///   last token, and the snapshot slots a verify keeps.
+    package func linearLayerBody(
+        _ input: ResidualStream, convState: MLXArray, recState: MLXArray,
+        keepsSnapshots: Bool = false
+    ) -> (output: ResidualStream, mixer: GatedDeltaLayerStep) {
+        let (x, normed) = input.normed(by: inputLayerNorm)
+        let mixer = gatedDeltaMixer(
+            normed, convState: convState, recState: recState, keepsSnapshots: keepsSnapshots)
+        return (residualFeedForward(x, adding: mixer.output), mixer)
     }
 
     /// The head of a full-attention layer: its projections before rope and
@@ -140,7 +164,23 @@ extension HybridDecodeLayer {
     package func attentionPreBody(x: MLXArray) -> (
         queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray
     ) {
-        projectAttention(inputLayerNorm(x))
+        let head = attentionPreBody(ResidualStream(x))
+        return (head.queries, head.gate, head.keys, head.values)
+    }
+
+    /// The head of a full-attention layer over a residual stream: the
+    /// residual sum of its input runs in its input norm.
+    ///
+    /// - Parameter input: The layer input.
+    /// - Returns: The layer input as one array, the residual branch around
+    ///   the attention, then the queries, the output gate, the keys and the
+    ///   values.
+    package func attentionPreBody(_ input: ResidualStream) -> (
+        hidden: MLXArray, queries: MLXArray, gate: MLXArray, keys: MLXArray, values: MLXArray
+    ) {
+        let (x, normed) = input.normed(by: inputLayerNorm)
+        let head = projectAttention(normed)
+        return (x, head.queries, head.gate, head.keys, head.values)
     }
 
     /// The tail of a full-attention layer after the attention over the cache.
@@ -151,12 +191,80 @@ extension HybridDecodeLayer {
     ///   - gate: The output gate from ``attentionPreBody(x:)``.
     /// - Returns: The layer output.
     package func attentionPostBody(x: MLXArray, attention: MLXArray, gate: MLXArray) -> MLXArray {
-        residualFeedForward(x + mergeAttention(attention, gate: gate))
+        attentionPostStream(x: x, attention: attention, gate: gate).hidden
     }
 
-    /// The residual feed-forward block that closes each layer.
-    private func residualFeedForward(_ h: MLXArray) -> MLXArray {
-        h + feedForward(postAttentionLayerNorm(h))
+    /// The tail of a full-attention layer after the attention over the
+    /// cache, as a residual stream: the sum of its output runs in the norm
+    /// that reads it.
+    ///
+    /// - Parameters:
+    ///   - x: The layer input, the residual branch around the attention.
+    ///   - attention: The output of the attention over the cache.
+    ///   - gate: The output gate from ``attentionPreBody(_:)``.
+    /// - Returns: The layer output, with its feed-forward output not yet
+    ///   added.
+    package func attentionPostStream(
+        x: MLXArray, attention: MLXArray, gate: MLXArray
+    ) -> ResidualStream {
+        residualFeedForward(x, adding: mergeAttention(attention, gate: gate))
+    }
+
+    /// The residual feed-forward block that closes each layer: the sum of the
+    /// residual and the mixer output, normed in one kernel, then the
+    /// feed-forward output, left to the next norm to add.
+    private func residualFeedForward(_ x: MLXArray, adding mixerOutput: MLXArray)
+        -> ResidualStream
+    {
+        let (h, normed) = postAttentionLayerNorm.normalizingSum(of: x, adding: mixerOutput)
+        return ResidualStream(residual: h, adding: feedForward(normed))
+    }
+}
+
+/// The hidden states between two blocks of a traced step: the residual
+/// stream, and the output of the block before when it is not yet added.
+///
+/// A block output joins the residual stream in the norm that reads the sum,
+/// a ``ResidualRMSNormKernel`` dispatch, so a traced step runs no add of its
+/// own before a norm.
+package struct ResidualStream {
+    /// The residual stream before the pending block output.
+    private let residual: MLXArray
+    /// The block output not yet added to ``residual``, or nil.
+    private let addend: MLXArray?
+
+    /// The stream of hidden states with no pending block output.
+    ///
+    /// - Parameter hidden: The hidden states, shape `(batch, tokens, hiddenSize)`.
+    package init(_ hidden: MLXArray) {
+        self.residual = hidden
+        self.addend = nil
+    }
+
+    /// The stream of `residual + addend`, whose sum the next norm runs.
+    ///
+    /// - Parameters:
+    ///   - residual: The residual stream, shape `(batch, tokens, hiddenSize)`.
+    ///   - addend: The block output to add to it, the same shape.
+    package init(residual: MLXArray, adding addend: MLXArray) {
+        self.residual = residual
+        self.addend = addend
+    }
+
+    /// The hidden states, with the pending block output added.
+    package var hidden: MLXArray {
+        addend.map { residual + $0 } ?? residual
+    }
+
+    /// The hidden states and their norm by `norm`, in one kernel when a
+    /// block output is pending.
+    ///
+    /// - Parameter norm: The norm that reads the hidden states.
+    /// - Returns: The hidden states and their norm.
+    package func normed(by norm: RMSNorm) -> (hidden: MLXArray, normed: MLXArray) {
+        guard let addend else { return (residual, norm(residual)) }
+        let fused = norm.normalizingSum(of: residual, adding: addend)
+        return (fused.sum, fused.normed)
     }
 }
 
