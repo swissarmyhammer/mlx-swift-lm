@@ -5,30 +5,25 @@ import MLX
 import MLXLMCommon
 import MLXLMTestSupport
 import Testing
+import os
 
 /// Holds the caches a generation hands over when it ends.
 ///
 /// The generation calls back on its own thread before its task returns, and the test reads after
-/// it awaited that task, thus a lock guards the caches.
-private final class GenerationCacheRecorder: @unchecked Sendable {
-
-    /// Guards `received`.
-    private let lock = NSLock()
+/// it awaited that task, thus a lock holds the caches.
+private final class GenerationCacheRecorder: Sendable {
 
     /// The caches the generation handed over, or nil.
-    private var received: SendableBox<[KVCache]>?
+    private let received = OSAllocatedUnfairLock<SendableBox<[KVCache]>?>(initialState: nil)
 
-    /// The callback the generation hands its caches to.
-    var handOff: GenerationCacheHandOff {
-        { caches in self.lock.withLock { self.received = caches } }
+    /// The hand-off the generation gives its caches to.
+    var handOff: GenerationHandOff {
+        GenerationHandOff(generationCache: { caches in self.received.withLock { $0 = caches } })
     }
 
     /// The caches the generation handed over, or nil when it handed none.
     func takeCaches() -> [KVCache]? {
-        lock.withLock {
-            defer { received = nil }
-            return received?.consume()
-        }
+        received.withLock { $0.take() }?.consume()
     }
 }
 
@@ -79,7 +74,7 @@ struct GenerationCacheHandOffTests {
             input: Self.input, cache: try context.model.newCache(parameters: nil),
             parameters: Self.eightBitParameters, context: context,
             speculation: speculates ? speculation(of: fixture) : nil,
-            generationCache: recorder.handOff)
+            handOff: recorder.handOff)
         for await _ in stream {}
         _ = await task.value
         return recorder.takeCaches()
@@ -107,7 +102,7 @@ struct GenerationCacheHandOffTests {
         let (stream, task) = try generateProtocolTokensTask(
             input: Self.input, cache: try context.model.newCache(parameters: nil),
             parameters: Self.eightBitParameters, context: context, decoder: nil,
-            generationCache: recorder.handOff)
+            handOff: recorder.handOff)
         for await _ in stream {}
         _ = await task.value
         let caches = try #require(recorder.takeCaches())

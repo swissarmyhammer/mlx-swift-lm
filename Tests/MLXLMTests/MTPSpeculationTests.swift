@@ -63,7 +63,7 @@ struct MTPSpeculationTests {
             input: LMInput(tokens: MLXArray(Self.prompt.map(Int32.init))), cache: cache,
             parameters: GenerateParameters(maxTokens: Self.generatedTokenCount, temperature: 0),
             context: context, speculation: speculation,
-            drafterContinuation: { callback.yield($0) })
+            handOff: GenerationHandOff(drafterContinuation: { callback.yield($0) }))
         var info: GenerateCompletionInfo?
         for await event in stream {
             if case .info(let completion) = event { info = completion }

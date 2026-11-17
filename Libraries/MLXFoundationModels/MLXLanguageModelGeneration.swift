@@ -759,11 +759,9 @@ extension MLXLanguageModel.Executor {
     ///     plan.
     ///   - state: the model state the prefill of the pass left, which the
     ///     next turn seeds its iterator with.
-    ///   - drafterState: receives the MTP drafter continuation of the
-    ///     generation when it ends, which the next turn resumes.
-    ///   - generationCache: receives the caches the generation last wrote
-    ///     into when it ends, which the next turn carries in the place of the
-    ///     caches of `plan`.
+    ///   - handOff: receives the MTP drafter continuation of the generation
+    ///     and the caches it last wrote into when it ends, which the next turn
+    ///     resumes and carries in the place of the caches of `plan`.
     ///   - promptCache: the slot that keeps the cache for the next turn.
     ///   - body: reads the token stream of the same generation.
     /// - Throws: the error that `body` throws.
@@ -771,8 +769,7 @@ extension MLXLanguageModel.Executor {
         task: Task<[Int], Never>,
         plan: ExecutorPromptCachePlan?,
         state: LMOutput.State?,
-        drafterState: ExecutorDrafterStateReceiver,
-        generationCache: ExecutorGenerationCacheReceiver,
+        handOff: ExecutorGenerationHandOff,
         promptCache: ExecutorPromptCacheSlot,
         body: () async throws -> Void
     ) async rethrows {
@@ -783,12 +780,9 @@ extension MLXLanguageModel.Executor {
             throw error
         }
         // The generation hands its drafter state and its caches over before
-        // the task returns its tokens, thus the receivers hold them here.
+        // the task returns its tokens, thus the hand-off holds them here.
         let generatedTokens = await task.value
-        promptCache.commit(
-            plan?.holding(generationCache: generationCache.takeGenerationCache()),
-            generatedTokens: generatedTokens, state: state,
-            drafterState: drafterState.drafterState)
+        handOff.commit(plan, generatedTokens: generatedTokens, state: state, to: promptCache)
     }
 
     /// Reads the cache of the session back from disk when it went there,
@@ -853,8 +847,7 @@ extension MLXLanguageModel.Executor {
         var detokenizer = context.tokenizer.makeStreamingDetokenizer()
         var result = AllowedToolGenerationResult()
         let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
-        let finalDrafterState = ExecutorDrafterStateReceiver()
-        let finalCache = ExecutorGenerationCacheReceiver()
+        let handOff = ExecutorGenerationHandOff()
         let (stream, task) = try Self.startTrackedGeneration {
             try generateProtocolTokensTask(
                 input: plan?.input ?? input,
@@ -866,14 +859,12 @@ extension MLXLanguageModel.Executor {
                 speculation: speculation,
                 mtpContinuation: plan?.drafterState,
                 preparedState: prefill.record,
-                drafterContinuation: finalDrafterState.receive,
-                generationCache: finalCache.receive)
+                handOff: handOff.generationHandOff)
         }
 
         try await withPromptCacheCommit(
             task: task, plan: plan, state: prefill.state,
-            drafterState: finalDrafterState, generationCache: finalCache,
-            promptCache: promptCache
+            handOff: handOff, promptCache: promptCache
         ) {
             generationLoop: for await generation in stream {
                 try Task.checkCancellation()
@@ -1226,8 +1217,7 @@ extension MLXLanguageModel.Executor {
         // tokens generation fed into it, and the text stream alone does not
         // carry those token identifiers.
         let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
-        let finalDrafterState = ExecutorDrafterStateReceiver()
-        let finalCache = ExecutorGenerationCacheReceiver()
+        let handOff = ExecutorGenerationHandOff()
         let (stream, task) = try Self.startTrackedGeneration {
             try generateTaskRecordingTokens(
                 input: plan?.input ?? input,
@@ -1238,14 +1228,12 @@ extension MLXLanguageModel.Executor {
                 speculation: speculation,
                 mtpContinuation: plan?.drafterState,
                 preparedState: prefill.record,
-                drafterContinuation: finalDrafterState.receive,
-                generationCache: finalCache.receive)
+                handOff: handOff.generationHandOff)
         }
 
         try await withPromptCacheCommit(
             task: task, plan: plan, state: prefill.state,
-            drafterState: finalDrafterState, generationCache: finalCache,
-            promptCache: promptCache
+            handOff: handOff, promptCache: promptCache
         ) {
             for await generation in stream {
                 try Task.checkCancellation()
@@ -1381,8 +1369,7 @@ extension MLXLanguageModel.Executor {
         // never executable.
         var decodedEvents = ReasoningDecodedEvents()
         let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
-        let finalDrafterState = ExecutorDrafterStateReceiver()
-        let finalCache = ExecutorGenerationCacheReceiver()
+        let handOff = ExecutorGenerationHandOff()
         let (stream, task) = try Self.startTrackedGeneration {
             try generateProtocolTokensTask(
                 input: plan?.input ?? input,
@@ -1394,14 +1381,12 @@ extension MLXLanguageModel.Executor {
                 speculation: speculation,
                 mtpContinuation: plan?.drafterState,
                 preparedState: prefill.record,
-                drafterContinuation: finalDrafterState.receive,
-                generationCache: finalCache.receive)
+                handOff: handOff.generationHandOff)
         }
 
         try await withPromptCacheCommit(
             task: task, plan: plan, state: prefill.state,
-            drafterState: finalDrafterState, generationCache: finalCache,
-            promptCache: promptCache
+            handOff: handOff, promptCache: promptCache
         ) {
             generationLoop: for await generation in stream {
                 try Task.checkCancellation()

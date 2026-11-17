@@ -291,16 +291,15 @@ package func generateTokensTask(
 ///
 ///   - speculation: the MTP drafter the generation speculates with, or `nil`
 ///     for plain decode, as
-///     ``generateTaskRecordingTokens(input:cache:state:parameters:context:speculation:mtpContinuation:components:wiredMemoryTicket:tools:preparedState:drafterContinuation:)``
+///     ``generateTaskRecordingTokens(input:cache:state:parameters:context:speculation:mtpContinuation:components:wiredMemoryTicket:tools:preparedState:handOff:)``
 ///     takes it.
 ///   - mtpContinuation: the drafter continuation saved with `cache`, or `nil`,
 ///     as that function takes it.
 ///   - preparedState: receives what the prefill left, as that function hands it
 ///     over.
-///   - drafterContinuation: receives, when the generation ends, the drafter
-///     continuation aligned with what `cache` then holds, or `nil`.
-///   - generationCache: receives, when the generation ends, the caches it last
-///     wrote into (see ``GenerationCacheProviding``).
+///   - handOff: receives, when the generation ends, the drafter continuation
+///     aligned with what `cache` then holds, or `nil`, and the caches the
+///     generation last wrote into, as that function hands them over.
 /// - Returns: the stream of raw tokens, and the task that generates them. The
 ///   value of the task is every generated token.
 package func generateProtocolTokensTask(
@@ -315,8 +314,7 @@ package func generateProtocolTokensTask(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     preparedState: PreparedGenerationState = { _, _ in },
-    drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in },
-    generationCache: @escaping GenerationCacheHandOff = { _ in }
+    handOff: GenerationHandOff = GenerationHandOff()
 ) throws -> (AsyncStream<TokenGeneration>, Task<[Int], Never>) {
     let iterator = try makePreparedIterator(
         input: input, cache: cache, state: state, parameters: parameters, context: context,
@@ -328,8 +326,7 @@ package func generateProtocolTokensTask(
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: RecordingGeneratedTokenList(
-            drafterContinuation: drafterContinuation, generationCache: generationCache),
+        tokenCollector: RecordingGeneratedTokenList(handOff: handOff),
         handler: RawTokenLoopHandler(
             additionalStopTokenIDs: decoder?.additionalStopTokenIDs ?? [],
             receivesStopTokens: decoder?.receivesStopTokens ?? false)

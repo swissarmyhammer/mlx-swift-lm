@@ -186,34 +186,55 @@ struct IgnoringGeneratedTokens: GeneratedTokenCollector {
     consuming func result(iterator _: any TokenIteratorProtocol) {}
 }
 
-/// Records the generated tokens, and hands the drafter continuation an MTP iterator left to a
-/// callback, for callers that keep a token ledger and take the drafter state apart from it.
+/// What a generation hands over when it ends, for a caller that carries its cache to a later
+/// turn: the drafter continuation an MTP iterator left, and the caches the generation last wrote
+/// into (see ``GenerationCacheProviding``).
 ///
-/// It also hands the caches the generation last wrote into to a second callback: a KV-cache
-/// configuration replaces each cache it compresses while the generation runs, thus a caller that
-/// keeps the caches it handed over for a later turn takes these in their place.
-struct RecordingGeneratedTokenList: GeneratedTokenCollector {
-    private var tokens: [Int] = []
+/// ``generateTaskRecordingTokens(input:cache:state:parameters:context:speculation:mtpContinuation:components:wiredMemoryTicket:tools:preparedState:handOff:)``
+/// and ``generateProtocolTokensTask(input:cache:state:parameters:context:decoder:speculation:mtpContinuation:components:wiredMemoryTicket:preparedState:handOff:)``
+/// both take one, and the collector they build hands over through it.
+package struct GenerationHandOff: Sendable {
 
     /// Receives the drafter continuation when the generation ends, or `nil` when the iterator
     /// left none.
-    private let receiveDrafterContinuation: @Sendable (MTPDrafterContinuation?) -> Void
+    package let drafterContinuation: @Sendable (MTPDrafterContinuation?) -> Void
 
     /// Receives the caches the generation last wrote into when it ends.
-    private let receiveGenerationCache: GenerationCacheHandOff
+    package let generationCache: GenerationCacheHandOff
 
-    /// Creates a collector that hands the drafter continuation to `drafterContinuation`, and the
+    /// Creates a hand-off that gives the drafter continuation to `drafterContinuation`, and the
     /// caches the generation left to `generationCache`.
     ///
     /// - Parameters:
     ///   - drafterContinuation: receives the continuation; the default drops it.
     ///   - generationCache: receives the caches; the default drops them.
-    init(
+    package init(
         drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in },
         generationCache: @escaping GenerationCacheHandOff = { _ in }
     ) {
-        self.receiveDrafterContinuation = drafterContinuation
-        self.receiveGenerationCache = generationCache
+        self.drafterContinuation = drafterContinuation
+        self.generationCache = generationCache
+    }
+}
+
+/// Records the generated tokens, and hands what the generation left to a ``GenerationHandOff``,
+/// for callers that keep a token ledger and take the drafter state apart from it.
+///
+/// The hand-off also takes the caches the generation last wrote into: a KV-cache configuration
+/// replaces each cache it compresses while the generation runs, thus a caller that keeps the
+/// caches it handed over for a later turn takes these in their place.
+struct RecordingGeneratedTokenList: GeneratedTokenCollector {
+    private var tokens: [Int] = []
+
+    /// Receives the drafter continuation and the caches when the generation ends.
+    private let receiver: GenerationHandOff
+
+    /// Creates a collector that hands what the generation left to `handOff`.
+    ///
+    /// - Parameter handOff: receives the drafter continuation and the caches; the default drops
+    ///   both.
+    init(handOff: GenerationHandOff = GenerationHandOff()) {
+        self.receiver = handOff
     }
 
     mutating func record(_ token: Int) {
@@ -222,14 +243,14 @@ struct RecordingGeneratedTokenList: GeneratedTokenCollector {
 
     consuming func result(iterator: any TokenIteratorProtocol) -> [Int] {
         if let provider = iterator as? any GenerationCacheProviding {
-            receiveGenerationCache(SendableBox(provider.generationCache))
+            receiver.generationCache(SendableBox(provider.generationCache))
         }
         return handOff(Self.drafterContinuation(leftBy: iterator))
     }
 
     /// Hands `continuation` to the callback and answers the recorded tokens.
     fileprivate consuming func handOff(_ continuation: MTPDrafterContinuation?) -> [Int] {
-        receiveDrafterContinuation(continuation)
+        receiver.drafterContinuation(continuation)
         return tokens
     }
 }

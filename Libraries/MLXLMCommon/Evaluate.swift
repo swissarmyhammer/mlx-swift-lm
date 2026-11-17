@@ -560,12 +560,11 @@ func makePreparedIterator(
 ///     ``PreparedGenerationState``). A caller that carries `cache` to a later
 ///     turn seeds that turn with the model state; a Qwen VL model keys its
 ///     M-RoPE anchor there and refuses a warm cache without it.
-///   - drafterContinuation: receives, when the generation ends, the drafter
-///     continuation aligned with what `cache` then holds, or `nil` when the
-///     generation did not speculate with a resumable drafter.
-///   - generationCache: receives, when the generation ends, the caches it last
-///     wrote into (see ``GenerationCacheProviding``). A caller that carries
-///     `cache` to a later turn carries these instead.
+///   - handOff: receives, when the generation ends, the drafter continuation
+///     aligned with what `cache` then holds, or `nil` when the generation did
+///     not speculate with a resumable drafter, and the caches the generation
+///     last wrote into (see ``GenerationCacheProviding``). A caller that
+///     carries `cache` to a later turn carries these caches instead.
 /// - Returns: the stream of text and tool calls, and the task that generates
 ///   them. The value of the task is every generated token, in order.
 /// - Throws: an error when the iterator cannot be built.
@@ -578,8 +577,7 @@ package func generateTaskRecordingTokens(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil,
     preparedState: PreparedGenerationState = { _, _ in },
-    drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in },
-    generationCache: @escaping GenerationCacheHandOff = { _ in }
+    handOff: GenerationHandOff = GenerationHandOff()
 ) throws -> (AsyncStream<Generation>, Task<[Int], Never>) {
     // Read the prompt before the iterator queues its prefill, which this would wait for.
     let reasoningPrimedInside = promptPrimesReasoning(
@@ -591,8 +589,7 @@ package func generateTaskRecordingTokens(
     return generateTextStream(
         iterator: iterator, input: input, parameters: parameters, context: context,
         wiredMemoryTicket: wiredMemoryTicket, tools: tools,
-        tokenCollector: RecordingGeneratedTokenList(
-            drafterContinuation: drafterContinuation, generationCache: generationCache),
+        tokenCollector: RecordingGeneratedTokenList(handOff: handOff),
         reasoningPrimedInside: reasoningPrimedInside)
 }
 

@@ -28,6 +28,9 @@ struct ExecutorPromptCacheKey: Hashable, Sendable {
     /// compressed cache to a full-precision turn, if the key did not name the
     /// configuration. Two configurations of one session therefore name two
     /// caches, and neither serves the other.
+    ///
+    /// Read by the synthesized `Hashable` conformance; periphery sees no caller.
+    // periphery:ignore
     let kvCache: KVCacheConfiguration?
 
     /// Creates the key of `sessionID` of `modelID` under `kvCache`.
@@ -2173,58 +2176,76 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     }
 }
 
-/// Holds the MTP drafter continuation a generation hands over when it ends,
-/// until the pass commits its cache.
+/// Holds one value a generation hands over when it ends, until the pass commits
+/// its cache.
 ///
-/// The generation task hands the continuation over and the response task reads
-/// it after it awaited that task, thus a `Mutex` holds it.
+/// The generation task hands the value over and the response task takes it
+/// after it awaited that task, thus a `Mutex` holds it.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-final class ExecutorDrafterStateReceiver: Sendable {
+final class ExecutorHandOffReceiver<Value: Sendable>: Sendable {
 
-    /// The continuation the generation handed over, or nil.
-    private let received = Mutex<MTPDrafterContinuation?>(nil)
+    /// The value the generation handed over, or nil.
+    private let received = Mutex<Value?>(nil)
 
-    /// Creates a receiver that holds no continuation.
+    /// Creates a receiver that holds no value.
     init() {}
 
-    /// The callback a generation hands its continuation to when it ends.
-    var receive: @Sendable (MTPDrafterContinuation?) -> Void {
-        { continuation in self.received.withLock { $0 = continuation } }
+    /// The callback a generation hands its value to when it ends.
+    var receive: @Sendable (Value) -> Void {
+        { value in self.received.withLock { $0 = value } }
     }
 
-    /// The continuation the generation handed over, or nil when it handed
-    /// none or did not end yet.
-    var drafterState: MTPDrafterContinuation? {
-        received.withLock { $0 }
+    /// The value the generation handed over, or nil when it handed none or did
+    /// not end yet. The receiver gives the value up: a second take gives nil.
+    func take() -> Value? {
+        received.withLock { $0.take() }
     }
 }
 
-/// Holds the caches a generation last wrote into, which it hands over when it
-/// ends, until the pass commits its cache.
+/// Holds what the generation of one executor pass hands over when it ends --
+/// the MTP drafter continuation and the caches it last wrote into -- until the
+/// pass commits its cache.
 ///
-/// The generation task hands the caches over and the response task reads them
-/// after it awaited that task, thus a `Mutex` holds them.
+/// Each pass makes one, hands ``generationHandOff`` to its generation, and
+/// commits through ``commit(_:generatedTokens:state:to:)`` once that
+/// generation ended.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-final class ExecutorGenerationCacheReceiver: Sendable {
+struct ExecutorGenerationHandOff: Sendable {
 
-    /// The caches the generation handed over, or nil.
-    private let received = Mutex<SendableBox<[KVCache]>?>(nil)
+    /// Receives the MTP drafter continuation of the generation, which the next
+    /// turn resumes.
+    private let drafterState = ExecutorHandOffReceiver<MTPDrafterContinuation?>()
 
-    /// Creates a receiver that holds no caches.
+    /// Receives the caches the generation last wrote into, which the next turn
+    /// carries in the place of the caches of the plan.
+    private let generationCache = ExecutorHandOffReceiver<SendableBox<[KVCache]>>()
+
+    /// Creates a hand-off that holds nothing yet.
     init() {}
 
-    /// The callback a generation hands its caches to when it ends.
-    var receive: GenerationCacheHandOff {
-        { caches in self.received.withLock { $0 = caches } }
+    /// The hand-off a generation gives what it left to when it ends.
+    var generationHandOff: GenerationHandOff {
+        GenerationHandOff(
+            drafterContinuation: drafterState.receive,
+            generationCache: generationCache.receive)
     }
 
-    /// The caches the generation handed over, or nil when it handed none or
-    /// did not end yet. The receiver gives them up: a second read gives nil.
-    func takeGenerationCache() -> [KVCache]? {
-        received.withLock { box in
-            defer { box = nil }
-            return box?.consume()
-        }
+    /// Commits the cache of the pass to `promptCache`, with the caches and the
+    /// drafter continuation the generation handed over.
+    ///
+    /// - Parameters:
+    ///   - plan: the plan that the pass ran, or nil when the pass had no plan.
+    ///   - generatedTokens: the tokens the generation fed into the caches.
+    ///   - state: the model state the prefill of the pass left.
+    ///   - promptCache: the slot that keeps the cache for the next turn.
+    func commit(
+        _ plan: ExecutorPromptCachePlan?, generatedTokens: [Int], state: LMOutput.State?,
+        to promptCache: ExecutorPromptCacheSlot
+    ) {
+        promptCache.commit(
+            plan?.holding(generationCache: generationCache.take()?.consume()),
+            generatedTokens: generatedTokens, state: state,
+            drafterState: drafterState.take() ?? nil)
     }
 }
 
