@@ -27,7 +27,27 @@ struct ExecutorCommittedGenerationTests {
     @Test("the prefill the generation reports becomes the checkpoint of the committed cache")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePrefillTheGenerationReportsBecomesTheCheckpointOfTheCommittedCache() async throws {
-        let executor = try makeMLXExecutor(for: makeStubModel("committed-generation"))
+        let slot = try await commitScriptedGeneration("committed-generation-checkpoint")
+
+        #expect(slot.entry?.checkpoint?.tokens == Self.promptTokens)
+    }
+
+    @Test("the tokens the generation returns extend the ledger of the committed cache")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func theTokensTheGenerationReturnsExtendTheLedgerOfTheCommittedCache() async throws {
+        let slot = try await commitScriptedGeneration("committed-generation-ledger")
+
+        #expect(slot.entry?.tokens == Self.promptTokens + [Self.generatedToken])
+    }
+
+    /// Runs one scripted pass through ``withCommittedGeneration`` and returns the slot it
+    /// committed into. The generation feeds the prompt, reports the prefill, feeds
+    /// ``generatedToken`` and returns it as the generated tokens of the pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func commitScriptedGeneration(_ modelID: String) async throws
+        -> ExecutorPromptCacheSlot
+    {
+        let executor = try makeMLXExecutor(for: makeStubModel(modelID))
         let slot = ExecutorPromptCacheSlot(nil, report: { _ in })
         let planned = try #require(
             try slot.plan(
@@ -48,8 +68,7 @@ struct ExecutorCommittedGenerationTests {
         } consume: { stream, _ in
             for await _ in stream {}
         }
-
-        #expect(slot.entry?.checkpoint?.tokens == Self.promptTokens)
+        return slot
     }
 }
 

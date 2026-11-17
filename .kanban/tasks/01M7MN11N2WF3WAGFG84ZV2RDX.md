@@ -82,6 +82,33 @@ comments:
     - evidence: Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift (`withPromptCacheCommit` → `withCommittedGeneration(plan:promptCache:generate:consume:)`, three passes reduced to generator call + response loop), new Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift (1 test, RED = missing member, then green). 2/2 findings of the 07:22 section checked. swift build --build-tests: 0 errors, 0 compiler warnings. xcrun xctest: MLXFoundationModelsTests 518 passed; MLXLMTests 2356 Swift Testing passed (3 known issues already there) + 1098 XCTest, 0 failures (4 LFM2 skips ^gcsvy3f). Only MLXFoundationModelsTests links MLXFoundationModels, so the Guided/CXGrammar/Macros bundles are unaffected; IntegrationTesting references none of the changed symbols. swift-format run.
     - next: /review
   timestamp: 2026-11-17T13:33:23.865015+00:00
+- actor: claude-code
+  id: 01m7mvgdz7y8pg3sg3cafw39rr
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (19b12126) — 1 finding (1 confirmed, 0 refuted): Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift:52. Both 07:22 duplication items are addressed: the hand-off wiring now lives once in `withCommittedGeneration`, and the three passes call it; the engine raised nothing on MLXLanguageModelGeneration.swift.
+    - next: implement the 07:33 finding (assert the committed ledger equals promptTokens + [generatedToken]), then re-review.
+  timestamp: 2026-11-17T13:35:26.695815+00:00
+- actor: claude-code
+  id: 01m7mvgpkf8ty4v6x4a47r5kms
+  text: |-
+    ### finish iteration 3 — findings
+    - implement: changed — MLXLanguageModelGeneration.swift, new ExecutorCommittedGenerationTests.swift; 2/2 findings checked
+    - test: green — run in the implement step: FM 518, MLXLMTests 2356+1098, 0 failures
+    - commit: 19b12126 (kv-config)
+    - review: findings — Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift:52
+  timestamp: 2026-11-17T13:35:35.535041+00:00
+- actor: claude-code
+  id: 01m7mvn7b038cyhffm6bxnjd4r
+  text: 'Finding ExecutorCommittedGenerationTests.swift:52 (completeness/inverse-operation-coverage) fixed by adding the read-back, not by dropping the fixture. The scripted pass moved into a private helper `commitScriptedGeneration(_:)` that returns the slot. Two single-assertion tests use it: the existing checkpoint test, and a new one, "the tokens the generation returns extend the ledger of the committed cache", which expects `slot.entry?.tokens == promptTokens + [generatedToken]`. The new test covers behavior that already exists, so it passed on its first run. It would fail if `handOff.commit` stopped passing `generatedTokens` (the ledger would then be `[1, 2, 3]`).'
+  timestamp: 2026-11-17T13:38:03.744449+00:00
+- actor: claude-code
+  id: 01m7mvn94bvtfa56zbthzx3cb6
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift. `swift build --build-tests` built with 0 compiler warnings (the only output was the SwiftPM `missing creator for mutated node` build-system notice). `xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` exited 0: 519 Swift Testing tests in 71 suites passed, 0 failures, 0 warnings. swift-format was run on Tests.
+    - next: review
+  timestamp: 2026-11-17T13:38:05.579601+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'MLXLanguageModel: KV-cache configuration option (kvCache:) applied to generation, warm-up and the prompt-cache key'
@@ -131,3 +158,13 @@ FoundationModelsRouter (Router card ^2fet0gs) asked for KV-cache quantization to
 
 - [x] `Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:850` `duplication/duplication` — The hand-off plumbing is copied verbatim into all three generation pass functions: `let handOff = ExecutorGenerationHandOff()`, passing `handOff.generationHandOff` to the generator, and passing `handOff: handOff` to `withPromptCacheCommit`. This change added the same lines to each copy, so the three copies can drift apart. Extract one helper that owns the prefill recorder, the hand-off, `startTrackedGeneration`, and `withPromptCacheCommit`, and take the generator as a closure that receives `handOff.generationHandOff` and `prefill.record`. Each pass then supplies only its generator call and its response loop. Keep the three call sites as the only per-pass differences.
 - [x] `Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:1372` `duplication/duplication` — Same added hand-off scaffolding in the reasoning pass, the third copy of the block. Fold into the shared helper proposed for line 850, so this copy becomes a call with its own generator closure.
+
+## Review Findings (2026-11-17 07:33)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 2 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7MN11N2WF3WAGFG84ZV2RDX.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7MN11N2WF3WAGFG84ZV2RDX.md` — no validator matches this file
+
+- [x] `Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift:52` `completeness/inverse-operation-coverage` — The test writes `generatedToken` (101) into the caches and returns it from the generation task, but the only assertion checks the checkpoint (`promptTokens`). Nothing reads back the committed ledger to confirm it holds the render plus `generatedToken`, so the `handOff.commit(... generatedTokens:...)` half of the helper is unexercised. The write side is proven and the read-back side is not. Add an assertion on the committed ledger (the tokens the slot holds after commit) that it equals `promptTokens + [generatedToken]`, or drop the unused `generatedToken` fixture if the ledger is out of scope for this test.
