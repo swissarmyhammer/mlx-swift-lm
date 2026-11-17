@@ -40,8 +40,15 @@ comments:
     - evidence: 47729d58 on branch worktree-agent-ad4d5b5cf6e99e767 (worktree .claude/worktrees/agent-ad4d5b5cf6e99e767, based on stable 03a37849); 6 files — Libraries/MLXLMCommon/MTPDrafterModelFactory.swift, Tests/MLXLMTests/{MultiRowProjectionFixture,Qwen35FusedProjectionTests,Qwen35MTPLoadingTests,Qwen35VLMMultiRowProjectionTests,Qwen38Tests}.swift
     - next: the coordinator merges and reviews. Not done here, by instruction: push to stable, and sending the SHA to ACPAgent / Router (card acceptance item 3).
   timestamp: 2026-11-17T18:56:38.926913+00:00
-position_column: doing
-position_ordinal: '8480'
+- actor: claude-code
+  id: 01m7ne5cw3x4khgbkvb4n83ac0
+  text: |-
+    ### review — findings
+    - evidence: review sha 5207deb5..b5fb7567 — 2 findings (2 confirmed, 0 refuted): Tests/MLXLMTests/Qwen35FusedProjectionTests.swift:284, Tests/MLXLMTests/Qwen38Tests.swift:355
+    - next: implement the 2 Review Findings items (both reuse/reuse), then re-review. The push + notify acceptance item is an orchestrator step, not a code finding.
+  timestamp: 2026-11-17T19:01:28.067388+00:00
+position_column: review
+position_ordinal: '80'
 title: 'Qwen3.8: register and verify the 8-bit MTP drafter (mlx-community/Qwen3.8-27B-MTP-8bit) with the 8-bit target'
 ---
 ## Why
@@ -56,3 +63,10 @@ ACPAgent (for the user) wants to run `mlx-community/Qwen3.8-27B-8bit` with the 8
 - [ ] Unit tests first (failing first): registry lookup of the 8-bit id; any 8-bit kernel/fallback routing.
 - [ ] Real model (if downloadable within the ~65 GiB weight ceiling, 8-bit 27B ≈ 29 GB plus drafter): target + drafter load and draft through the VLM Qwen35 path; MTP greedy ids equal plain greedy ids on a short prompt; acceptance rate reported; with kvBits 8 too. Real-model runs take scratchpad bench.lock.
 - [ ] All 5 test bundles green; swift-format; pushed to stable; SHA sent to ACPAgent (foundationmodelsacpagent-22) and Router (foundationmodelsrouter-da). #mtp-8bit
+
+## Review Findings (2026-11-17 12:57)
+
+> Scope: `review sha 5207deb5..b5fb7567` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 0 not reviewed.
+
+- [ ] `Tests/MLXLMTests/Qwen35FusedProjectionTests.swift:284` `reuse/reuse` — `vlmFusionStates(bits:)` rebuilds the vision-language target inline: it decodes the config, runs `seededQuantized` with the `language_model` filter, and calls `prepare()`. That is the same construction as `makeTarget(prepared:matvecOfMLX:bits:)` in `Qwen35VLMMultiRowProjectionTests`, which already takes a `bits` parameter. The copy will drift from the helper it duplicates. Move the target construction into `MultiRowProjectionFixture` (for example `Fixture.visionLanguageTarget(bits:prepared:)`) and have both `makeTarget` and `vlmFusionStates` call it. `vlmFusionStates` then only maps the fusion flags over the modules.
+- [ ] `Tests/MLXLMTests/Qwen38Tests.swift:355` `reuse/reuse` — The two new 8-bit registry tests each check one property of `qwen3_8_27b_mtp_8bit`: `testQwen38EightBitMTPDrafterIsRegistered` checks `shared.contains(id:)` and `testQwen38EightBitMTPRegistryConfigurationNamesTheEightBitDrafter` checks `.name`. The existing `testQwen38MTPRegistryConfiguration` already asserts both properties for the 4-bit config. The 8-bit checks are a parallel copy rather than an extension of that test. Replace the three tests with one `@Test(arguments:)` or XCTest loop over `(MTPDrafterRegistry.qwen3_8_27b_mtp_4bit, MTPDrafterRegistry.qwen3_8_27b_mtp_8bit)` that checks the name and `shared.contains(id:)` for each config.
