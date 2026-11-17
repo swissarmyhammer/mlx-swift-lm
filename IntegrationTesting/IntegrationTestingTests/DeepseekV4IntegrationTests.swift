@@ -463,6 +463,10 @@ struct DeepseekV4IntegrationTests {
             case .info, .steering:
                 // No steering is submitted to this session.
                 break
+            case .steering(let event):
+                // The test submits no steering instruction, so a steering event
+                // means the session applied input the prompt never carried.
+                Issue.record("the session reported steering the test never sent: \(event)")
             }
         }
 

@@ -1,0 +1,1 @@
+{"id":"01M7MN11N3MRHEPQ07S39V0HN6","timestamp":"2026-11-17T11:42:11.107574Z","op":"create","item_id":"01M7MN11N3E31GPN2171AFMS4R","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: 0075ca\n+tag_name: kv-config\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: 0075ca\n-tag_name: kv-config\n","transaction_id":null}

@@ -153,10 +153,55 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     @ModuleInfo(key: "down_proj") var downProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
 
+    /// The gate and up projections as one matmul, once the loader of a
+    /// Qwen3.5 model prepares them.
+    private let fusedGateUp = FusedQuantizedProjectionGroup(keys: ["gate_proj", "up_proj"])
+
+    /// The place of the gate projection among the gate/up outputs.
+    private static let gatePart = 0
+    /// The place of the up projection among the gate/up outputs.
+    private static let upPart = 1
+
     init(dimensions: Int, hiddenDimensions: Int) {
         _gateProj.wrappedValue = Linear(dimensions, hiddenDimensions, bias: false)
         _downProj.wrappedValue = Linear(hiddenDimensions, dimensions, bias: false)
         _upProj.wrappedValue = Linear(dimensions, hiddenDimensions, bias: false)
+    }
+
+    @discardableResult
+    override func update(
+        parameters: ModuleParameters, verify: VerifyUpdate,
+        path: [String] = [], modulePath: [String] = []
+    ) throws -> Self {
+        try fusedGateUp.invalidating(afterUpdating: parameters) {
+            try super.update(
+                parameters: parameters, verify: verify, path: path, modulePath: modulePath)
+        }
+    }
+
+    override func updateModule(key: String, _ value: Any) throws {
+        try fusedGateUp.invalidating(afterReplacing: key) {
+            try super.updateModule(key: key, value)
+        }
+    }
+
+    /// Whether one matmul computes the gate and up projections.
+    var hasFusedProjection: Bool { fusedGateUp.isPrepared }
+
+    /// Fuses the gate and up projections; see
+    /// ``FusedQuantizedProjectionGroup``. The model loader calls this before
+    /// it publishes the model; a forward never does.
+    ///
+    /// - Returns: Whether one matmul computes the two projections.
+    @discardableResult
+    func prepareFusedProjection() throws -> Bool {
+        try fusedGateUp.prepare([gateProj, upProj], in: self)
+    }
+
+    /// The fused projection as compile state of `trace`; see
+    /// ``FusedQuantizedProjectionGroup/traceState(of:)``.
+    func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        fusedGateUp.traceState(of: trace)
     }
 
     /// The MLP of `x`. Each projection runs through
@@ -164,9 +209,9 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     /// speculative verify of a Qwen3.5 model each token row keeps the bits of
     /// a decode step.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let gate = MultiRowQuantizedMatvec.projection(x, by: gateProj)
-        let up = MultiRowQuantizedMatvec.projection(x, by: upProj)
-        return MultiRowQuantizedMatvec.projection(compiledSiluProduct(gate, up), by: downProj)
+        let projected = fusedGateUp(x, [gateProj, upProj])
+        return MultiRowQuantizedMatvec.projection(
+            compiledSiluProduct(projected[Self.gatePart], projected[Self.upPart]), by: downProj)
     }
 }
 

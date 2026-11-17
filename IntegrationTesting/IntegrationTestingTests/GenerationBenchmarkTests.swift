@@ -67,8 +67,7 @@ private actor BenchmarkCheckpoint {
         let load = Task {
             try await factory.loadContainer(
                 from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                configuration: ModelConfiguration(id: id)
-            ) { _ in }
+                configuration: ModelConfiguration(id: id))
         }
         loading = load
         return try await load.value

@@ -78,11 +78,13 @@ package enum DecodeAttentionKernel {
     /// layout of every key cache, and the reads join into wide loads.
     ///
     /// `GroupSoftmax` holds the queries and the online softmax of the heads
-    /// of one head group, and adds one key stream to them.
+    /// of one head group, and adds one key stream to them. The stream reads
+    /// its rows through any reader with the `read` of `LaneRows`, thus
+    /// ``QuantizedKVAttentionKernel`` adds its reader of packed rows.
     ///
     /// MLX writes the kernel signature directly after the header, thus the
-    /// header ends in a line break.
-    private static let header =
+    /// header ends in a line break. ``QuantizedKVAttentionKernel`` shares it.
+    static let header =
         metalSimdWidthDeclaration + """
             constexpr constant int HEAD_GROUPS = \(headGroups);
             constexpr constant int BLOCK_SIMD_GROUPS = \(blockSimdGroups);
@@ -135,8 +137,8 @@ package enum DecodeAttentionKernel {
                     }
                 }
 
-                template <bool UNIT_STEP, typename T>
-                inline void add_stream(LaneRows<T> keys, LaneRows<T> values, int first, int end, int step) {
+                template <bool UNIT_STEP, typename Rows>
+                inline void add_stream(Rows keys, Rows values, int first, int end, int step) {
                     for (int key = first; key < end; key += step) {
                         float keyRow[NUMBERS];
                         float valueRow[NUMBERS];
@@ -149,15 +151,19 @@ package enum DecodeAttentionKernel {
 
             """
 
-    /// The block pass.
+    /// The first part of the block pass, which ``QuantizedKVAttentionKernel``
+    /// shares: the threadgroup layout and the place of this lane.
     ///
     /// SIMD group `g` holds the query heads of group `g % HEAD_GROUPS` and
     /// reads key `first + g / HEAD_GROUPS` of the block, then each key
     /// `BLOCK_SIMD_GROUPS / HEAD_GROUPS` rows further. One lane holds
-    /// `DIM / SIMD_WIDTH` neighbouring numbers of each head. After the keys,
-    /// the threadgroup joins the key streams of each head in threadgroup
-    /// memory and writes one row of block results for each query head.
-    private static let blockSource = """
+    /// `DIM / SIMD_WIDTH` neighbouring numbers of each head, from number
+    /// `laneFirstNumber`.
+    ///
+    /// A rows part follows it, which sets the readers `keyRows` and
+    /// `valueRows` of the KV head of the threadgroup, then
+    /// ``blockSoftmaxSource``.
+    static let blockSetupSource = """
         constexpr int numbersPerLane = DIM / SIMD_WIDTH;
         constexpr int headsPerGroup = GQA / HEAD_GROUPS;
         constexpr int keyStreams = BLOCK_SIMD_GROUPS / HEAD_GROUPS;
@@ -181,6 +187,11 @@ package enum DecodeAttentionKernel {
         uint kvFirstHead = kvHead * GQA;
         uint groupFirstHead = kvFirstHead + headGroup * headsPerGroup;
 
+        """
+
+    /// The rows part of the block pass: readers of the plain keys and values.
+    private static let laneRowsSource = """
+
         LaneRows<T> keyRows = {
             keys + sequence * keys_strides[SEQUENCE_AXIS] + kvHead * keys_strides[HEAD_AXIS]
                 + laneFirstNumber * keys_strides[WIDTH_AXIS],
@@ -189,6 +200,15 @@ package enum DecodeAttentionKernel {
             values + sequence * values_strides[SEQUENCE_AXIS] + kvHead * values_strides[HEAD_AXIS]
                 + laneFirstNumber * values_strides[WIDTH_AXIS],
             values_strides[ROW_AXIS], values_strides[WIDTH_AXIS]};
+
+        """
+
+    /// The last part of the block pass, which ``QuantizedKVAttentionKernel``
+    /// shares: the online softmax of the query heads over the rows of
+    /// `keyRows` and `valueRows`. After the keys, the threadgroup joins the
+    /// key streams of each head in threadgroup memory and writes one row of
+    /// block results for each query head.
+    static let blockSoftmaxSource = """
         const device T* queryRows = queries + sequence * queries_strides[SEQUENCE_AXIS]
             + laneFirstNumber * queries_strides[WIDTH_AXIS];
 
@@ -314,7 +334,7 @@ package enum DecodeAttentionKernel {
         name: "decode_attention_blocks",
         inputNames: ["queries", "keys", "values", "scale", "blockKeys"],
         outputNames: ["partials", "largestScores", "weightTotals"],
-        source: blockSource,
+        source: blockSetupSource + laneRowsSource + blockSoftmaxSource,
         header: header,
         ensureRowContiguous: false)
 
@@ -392,8 +412,15 @@ package enum DecodeAttentionKernel {
 
     /// Tells if one SIMD group holds the queries of one head group in
     /// registers: the query heads make an even number for each KV head, and
-    /// the lanes share the head width evenly.
-    private static func headShapeFits(queryHeads: Int, kvHeads: Int, headDim: Int) -> Bool {
+    /// the lanes share the head width evenly. ``QuantizedKVAttentionKernel``
+    /// shares the rule.
+    ///
+    /// - Parameters:
+    ///   - queryHeads: The number of query heads.
+    ///   - kvHeads: The number of KV heads.
+    ///   - headDim: The width of one head.
+    /// - Returns: True when the registers of one lane hold the queries.
+    static func headShapeFits(queryHeads: Int, kvHeads: Int, headDim: Int) -> Bool {
         guard kvHeads > 0, queryHeads % kvHeads == 0, headDim % metalSimdWidth == 0 else {
             return false
         }
@@ -420,23 +447,45 @@ package enum DecodeAttentionKernel {
             canRun(queries: queries, keys: keys, values: values),
             "the decode attention kernel cannot read queries \(queries.shape) "
                 + "over keys \(keys.shape)")
+        return blockAttention(
+            blockKernel, cache: [keys, values], queries: queries,
+            kvHeads: keys.dim(HeadRowsAxis.head), keyCount: keys.dim(HeadRowsAxis.row),
+            scale: scale)
+    }
+
+    /// The block pass of a kernel built from ``blockSetupSource``, a rows
+    /// part and ``blockSoftmaxSource``, then the combine pass, which
+    /// ``QuantizedKVAttentionKernel`` shares.
+    ///
+    /// - Parameters:
+    ///   - kernel: The block pass kernel. Its inputs are the queries, the
+    ///     arrays of `cache`, the score factor and the keys of one block.
+    ///   - cache: The arrays the rows part reads, in the order of the kernel
+    ///     inputs.
+    ///   - queries: The queries, shape `(batch, queryHeads, 1, headDim)`.
+    ///   - kvHeads: The number of KV heads of the cache.
+    ///   - keyCount: The number of cached keys.
+    ///   - scale: The factor each score takes before the softmax.
+    /// - Returns: The attention output, of the shape and the dtype of
+    ///   `queries`.
+    static func blockAttention(
+        _ kernel: MLXFast.MLXFastKernel, cache: [MLXArray], queries: MLXArray, kvHeads: Int,
+        keyCount: Int, scale: Float
+    ) -> MLXArray {
         let rows = queries.dim(HeadRowsAxis.batch) * queries.dim(HeadRowsAxis.head)
         let headDim = queries.dim(HeadRowsAxis.width)
-        let keyCount = keys.dim(HeadRowsAxis.row)
         let blocks = blockCount(keys: keyCount)
         let blockThreads = blockSimdGroups * metalSimdWidth
-        let results = blockKernel(
-            [
-                queries, keys, values, MLXArray([scale]),
+        let results = kernel(
+            [queries] + cache + [
+                MLXArray([scale]),
                 MLXArray([Int32(keysPerBlock(keys: keyCount, blocks: blocks))]),
             ],
             template: [
                 ("T", queries.dtype), ("DIM", headDim),
-                ("GQA", queries.dim(HeadRowsAxis.head) / keys.dim(HeadRowsAxis.head)),
+                ("GQA", queries.dim(HeadRowsAxis.head) / kvHeads),
             ],
-            grid: (
-                blockThreads, keys.dim(HeadRowsAxis.batch) * keys.dim(HeadRowsAxis.head), blocks
-            ),
+            grid: (blockThreads, queries.dim(HeadRowsAxis.batch) * kvHeads, blocks),
             threadGroup: (blockThreads, 1, 1),
             outputShapes: [[rows, blocks, headDim], [rows, blocks], [rows, blocks]],
             outputDTypes: [.float32, .float32, .float32])

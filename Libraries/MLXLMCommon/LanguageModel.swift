@@ -380,6 +380,17 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     )
         throws -> PrepareResult
 
+    /// The prefill step of this model when the caller sets no
+    /// ``PrefillParameters/stepSize``.
+    ///
+    /// ``prepare(_:cache:state:prefill:)`` prefills in steps of this size, and
+    /// so does every other feed of prompt tokens that does not go through
+    /// `prepare`, such as the feed of a prompt cache up to a checkpoint at a
+    /// message boundary. A step the caller sets wins over it.
+    ///
+    /// The default is ``PrefillParameters/defaultStepSize``.
+    var defaultPrefillStepSize: Int { get }
+
     /// Primary entry point to produce a step (single token) from the model
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
@@ -429,6 +440,10 @@ extension LanguageModel {
 
     /// Most language models have no derived inference state to prepare.
     public func prepare() throws {}
+
+    /// Most language models prefill in the generic step,
+    /// ``PrefillParameters/defaultStepSize``.
+    public var defaultPrefillStepSize: Int { PrefillParameters.defaultStepSize }
 
     @available(
         *, deprecated, renamed: "prepare(_:cache:state:prefill:)",

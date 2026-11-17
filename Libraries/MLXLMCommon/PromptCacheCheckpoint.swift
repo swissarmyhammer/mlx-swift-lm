@@ -191,7 +191,9 @@ package struct PromptCacheCheckpoint {
     ///   - caches: the live caches, one for each layer of the model.
     ///   - state: the model state to seed the first pass with, or nil.
     ///   - model: the model that feeds the caches.
-    ///   - prefill: cuts the tokens into forward passes.
+    ///   - prefill: cuts the tokens into forward passes, in steps of the
+    ///     ``LanguageModel/defaultPrefillStepSize`` of `model` when it sets no
+    ///     step size.
     ///   - drafterFeed: takes the target hidden rows of each forward pass into
     ///     an MTP drafter, or nil. The returned state then holds none of the
     ///     values the model emits for the drafter.
@@ -212,7 +214,9 @@ package struct PromptCacheCheckpoint {
             state = drafterFeed == nil ? output.state : output.state?.withoutMTPExchange
             asyncEval(caches.flatMap(\.state))
         }
-        let chunked = try prefill.forEachChunk(total: tokens.count, reserving: 0, forward)
+        let chunked = try prefill.forEachChunk(
+            total: tokens.count, reserving: 0, defaultStepSize: model.defaultPrefillStepSize,
+            forward)
         if chunked < tokens.count {
             forward(chunked ..< tokens.count)
         }

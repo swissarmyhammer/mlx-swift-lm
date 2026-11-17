@@ -72,8 +72,8 @@ package enum VerifyAttentionKernel {
     /// The largest score of a token row with no key in the block is the
     /// lowest float, thus its block takes no weight in the combine pass. The
     /// online softmax keeps scores in base 2; the combine pass reads them in
-    /// natural-log units.
-    private static let resultSource = """
+    /// natural-log units. ``QuantizedKVAttentionKernel`` shares it.
+    static let resultSource = """
         if (!loader && realRow) {
             uint block = threadgroup_position_in_grid.z;
             size_t row = ((size_t(sequence) * queryHeads + queryHead) * queryCount + token)
@@ -93,8 +93,8 @@ package enum VerifyAttentionKernel {
         """
 
     /// The key range of a threadgroup: block `z` of `blockKeys` keys of the
-    /// keys its token rows read.
-    private static let blockRangeSource = """
+    /// keys its token rows read. ``QuantizedKVAttentionKernel`` shares it.
+    static let blockRangeSource = """
         int loopFirst = int(threadgroup_position_in_grid.z) * blockKeys[0];
         int loopEnd = min(keyEnd, loopFirst + blockKeys[0]);
 
@@ -206,15 +206,42 @@ package enum VerifyAttentionKernel {
             canRun(queries: queries, keys: keys, values: values, mask: causal ? .causal : .none),
             "the verify attention kernel cannot read queries \(queries.shape) "
                 + "over keys \(keys.shape)")
+        return blockResults(
+            blockKernel, queries: queries, keys: keys, cache: [keys, values], scale: scale,
+            causal: causal, blocks: blocks)
+    }
+
+    /// The block pass of a kernel built from the parts of this kernel, which
+    /// ``QuantizedKVAttentionKernel`` shares.
+    ///
+    /// - Parameters:
+    ///   - kernel: The block pass kernel. Its inputs are the queries, the
+    ///     arrays of `cache`, the score factor and the keys of one block.
+    ///   - queries: The queries, shape `(batch, queryHeads, tokens, headDim)`.
+    ///   - keys: The array whose first three axes give the sequences, the KV
+    ///     heads and the keys of the cache.
+    ///   - cache: The arrays the rows part of the kernel reads, in the order
+    ///     of the kernel inputs.
+    ///   - scale: The factor each score takes before the softmax.
+    ///   - causal: True for the causal mask of MLX.
+    ///   - blocks: The block count; ``blockCount(keys:)`` when it is not
+    ///     given.
+    /// - Returns: The weighted values, shape `(rows, blocks, headDim)`, the
+    ///   largest scores and the weight sums, shape `(rows, blocks)`, in
+    ///   float32.
+    static func blockResults(
+        _ kernel: MLXFast.MLXFastKernel, queries: MLXArray, keys: MLXArray, cache: [MLXArray],
+        scale: Float, causal: Bool, blocks: Int?
+    ) -> [MLXArray] {
         let keyCount = keys.dim(HeadRowsAxis.row)
         let blocks = blocks ?? blockCount(keys: keyCount)
         let rows =
             queries.dim(HeadRowsAxis.batch) * queries.dim(HeadRowsAxis.head)
             * queries.dim(HeadRowsAxis.row)
         return PrefillAttentionKernel.run(
-            blockKernel,
-            inputs: [
-                queries, keys, values, MLXArray([scale]),
+            kernel,
+            inputs: [queries] + cache + [
+                MLXArray([scale]),
                 MLXArray([
                     Int32(DecodeAttentionKernel.keysPerBlock(keys: keyCount, blocks: blocks))
                 ]),

@@ -82,6 +82,29 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
     /// The bound of the random weights, about the scale of a trained projection.
     private static let weightScale: Float = 0.02
 
+    /// An output width of whole tiles of 32 rows, the tile of 8 SIMD groups.
+    private static let wideTileOutputs = 4096
+
+    /// An output width of whole tiles of 16 rows and not of 32.
+    private static let mediumTileOutputs = 48
+
+    /// An output width of whole tiles of 8 rows and not of 16.
+    private static let narrowTileOutputs = 40
+
+    /// An input width of three blocks of the 4-bit kernel and six of the
+    /// 8-bit kernel: the prefetch of the next block runs, and the last block
+    /// has no next block.
+    private static let oddBlockInputSize = 1536
+
+    /// Output widths that take each threadgroup width of the kernel: 8, 4 and
+    /// 2 SIMD groups.
+    private static let everyTileOutputs = [64, mediumTileOutputs, narrowTileOutputs]
+
+    /// The seeds before the first layer of the every-format test and of the
+    /// every-threadgroup-width test, far enough apart that no layer shares a seed.
+    private static let everyFormatSeed: UInt64 = 1
+    private static let everyThreadgroupWidthSeed: UInt64 = 200
+
     private func makeLayer(
         _ format: Format, inputs: Int, outputs: Int, dtype: DType, seed: UInt64,
         bias: MLXArray? = nil
@@ -118,21 +141,50 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
         }
     }
 
-    func testEveryRowIsBitIdenticalToItsOwnMatvecForEveryFormat() {
-        var seed: UInt64 = 1
+    /// Checks every row of a layer of each format and dtype, for each output
+    /// width of `outputSizes` and the input width `inputs`. The layer seeds
+    /// count up from one past `seed`.
+    private func assertEveryFormatAndDtypeMatches(
+        outputSizes: [Int], inputs: Int, seed: UInt64,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        var seed = seed
         for format in Self.formats {
             for dtype in Self.dtypes {
-                for outputs in Self.smallOutputSizes {
+                for outputs in outputSizes {
                     seed += 1
                     let layer = makeLayer(
-                        format, inputs: Self.inputSize, outputs: outputs, dtype: dtype,
-                        seed: seed)
+                        format, inputs: inputs, outputs: outputs, dtype: dtype, seed: seed)
                     assertEveryRowMatches(
-                        layer, width: Self.inputSize, dtype: dtype,
-                        label: "\(format) \(dtype) N=\(outputs)")
+                        layer, width: inputs, dtype: dtype,
+                        label: "\(format) \(dtype) N=\(outputs) K=\(inputs)", file: file,
+                        line: line)
                 }
             }
         }
+    }
+
+    func testEveryRowIsBitIdenticalToItsOwnMatvecForEveryFormat() {
+        assertEveryFormatAndDtypeMatches(
+            outputSizes: Self.smallOutputSizes, inputs: Self.inputSize, seed: Self.everyFormatSeed)
+    }
+
+    func testEveryRowIsBitIdenticalToItsOwnMatvecForEveryThreadgroupWidth() {
+        assertEveryFormatAndDtypeMatches(
+            outputSizes: Self.everyTileOutputs, inputs: Self.oddBlockInputSize,
+            seed: Self.everyThreadgroupWidthSeed)
+    }
+
+    func testAnOutputWidthOfWholeWideTilesTakesEightSimdGroups() {
+        XCTAssertEqual(MultiRowQuantizedMatvec.simdGroups(outputs: Self.wideTileOutputs), 8)
+    }
+
+    func testAnOutputWidthOfWholeMediumTilesTakesFourSimdGroups() {
+        XCTAssertEqual(MultiRowQuantizedMatvec.simdGroups(outputs: Self.mediumTileOutputs), 4)
+    }
+
+    func testAnOutputWidthOfWholeNarrowTilesTakesTwoSimdGroups() {
+        XCTAssertEqual(MultiRowQuantizedMatvec.simdGroups(outputs: Self.narrowTileOutputs), 2)
     }
 
     func testVocabularyWidthRowsAreBitIdenticalToTheirOwnMatvec() {

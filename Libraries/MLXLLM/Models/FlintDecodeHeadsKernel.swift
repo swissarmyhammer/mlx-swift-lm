@@ -21,8 +21,10 @@
 //
 //  - `rms_single_row`, for a row of 128 numbers: each of 32 lanes adds the
 //    squares of its 4 neighbouring numbers with `fma`, `simd_sum` adds the
-//    lanes, and the inverse is `precise::rsqrt(sum / width + eps)`. The
-//    output is `weight * T(x * inverse)`, rounded in the dtype `T`.
+//    lanes. The MLX source divides the sum by the width, and its fast math
+//    multiplies by the reciprocal of the width instead, thus the inverse is
+//    `precise::rsqrt(sum * (1 / width) + eps)`. The output is
+//    `weight * T(x * inverse)`, rounded in the dtype `T`.
 //  - `rope_single`, not traditional: position `d` of the first half of a
 //    head turns by `offset * scale * exp2(-d / half * log2(base))`, with
 //    `fma(x1, cos, -(x2 * sin))` for the first half and
@@ -119,7 +121,7 @@ struct FlintDecodeHeadsKernel {
             squares = fma(x[i], x[i], squares);
         }
         squares = simd_sum(squares);
-        float inverse = metal::precise::rsqrt(squares / DIM + eps);
+        float inverse = metal::precise::rsqrt(squares * (1.0f / DIM) + eps);
         T normed[perLane];
         for (int i = 0; i < perLane; i++) {
             normed[i] = weight[i] * static_cast<T>(x[i] * inverse);

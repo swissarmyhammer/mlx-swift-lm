@@ -111,6 +111,9 @@ open class ForwardingLanguageModel: Module, LanguageModel, LoRAModel, Suppressed
         try wrapped.prepare(input, cache: cache, state: state, prefill: prefill)
     }
 
+    /// The prefill step of the wrapped model when the caller sets none.
+    open var defaultPrefillStepSize: Int { wrapped.defaultPrefillStepSize }
+
     open func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
     {

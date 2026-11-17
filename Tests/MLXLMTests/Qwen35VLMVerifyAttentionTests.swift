@@ -250,13 +250,15 @@ struct Qwen35VLMVerifyAttentionTests {
     ) -> Step {
         let x = MLXRandom.normal([1, tokens, hiddenSize], key: MLXRandom.key(tokenSeed))
             .asType(dtype)
-        let (queries, gate, keys, values) = attention.projectPreRope(x)
+        let projection = attention.projectPreNorm(x)
         let positionIds = qwen35MTPPositionIds(
             offset: cache.offset, length: tokens, batchSize: 1, positionDeltas: nil)
-        let (cosValues, sinValues) = attention.rotaryEmbedding(x: values, positionIds: positionIds)
-        let (rotatedQueries, _) = Qwen35Language.applyMultimodalRotaryPosEmb(
-            q: queries, k: keys, cos: cosValues, sin: sinValues)
-        return Step(x: x, positionIds: positionIds, rotatedQueries: rotatedQueries, gate: gate)
+        let rotated = attention.rotatedHeads(
+            queries: projection.queries, keys: projection.keys,
+            rotation: attention.rotaryEmbedding(x: projection.values, positionIds: positionIds))
+        return Step(
+            x: x, positionIds: positionIds, rotatedQueries: rotated.queries,
+            gate: projection.gate)
     }
 
     /// The caches of `model` after `context`, and the state the prompt left.

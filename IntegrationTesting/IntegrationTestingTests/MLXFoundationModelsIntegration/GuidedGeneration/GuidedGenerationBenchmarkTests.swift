@@ -512,7 +512,7 @@ struct GuidedGenerationBenchmarkTests {
         ) { configuration, progress in
             try await LLMModelFactory.shared.loadContainer(
                 from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                configuration: configuration, progressHandler: progress)
+                configuration: configuration, progress: progress)
         }
     }
 

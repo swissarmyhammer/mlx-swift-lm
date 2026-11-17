@@ -289,6 +289,30 @@ private func expectEqual(
         }
     }
 
+    @Test func segmentBodyNormsEachResidualSumInTheResidualNormKernel() {
+        let (segments, layers) = schedule()
+        let x = hiddenStates()
+        let attention = hiddenStates(offset: 5)
+        let gate = hiddenStates(offset: 7)
+
+        let outputs = segments[1].body(
+            x, arguments: [x, attention, gate, hiddenStates(offset: 10), hiddenStates(offset: 20)],
+            layers: layers, finalNorm: RMSNorm(dimensions: hiddenWidth), verify: nil)
+
+        #expect(DeepSeekV4TestArrays.nodeCount(outputs, primitive: "RMSNorm") == 0)
+    }
+
+    @Test func segmentBodyNormsAnInputWithNoResidualSumInTheNorm() {
+        let (segments, layers) = schedule()
+        let x = hiddenStates()
+
+        let outputs = segments[0].body(
+            x, arguments: [x, hiddenStates(offset: 10), hiddenStates(offset: 20)],
+            layers: layers, finalNorm: RMSNorm(dimensions: hiddenWidth), verify: nil)
+
+        #expect(DeepSeekV4TestArrays.nodeCount(outputs, primitive: "RMSNorm") == 1)
+    }
+
     // MARK: - Schedule runner
 
     /// The conv state the GDN cache of layer `layer` holds before a step.

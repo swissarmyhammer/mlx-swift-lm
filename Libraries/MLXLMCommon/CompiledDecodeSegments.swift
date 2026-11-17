@@ -118,35 +118,33 @@ extension CompiledDecodeSegment {
         _ input: MLXArray, arguments: [MLXArray], layers: [Layer], finalNorm: RMSNorm,
         verify: CompiledVerifyShape?
     ) -> [MLXArray] {
-        var hiddenStates = input
+        var hiddenStates = ResidualStream(input)
         if let post = attentionPostLayer {
-            hiddenStates = layers[post].attentionPostBody(
-                x: hiddenStates, attention: arguments[AttentionInput.attention],
+            hiddenStates = layers[post].attentionPostStream(
+                x: input, attention: arguments[AttentionInput.attention],
                 gate: arguments[AttentionInput.gate])
         }
 
         var states: [MLXArray] = []
         for (position, layerIndex) in linearLayers.enumerated() {
             let slot = stateInputOffset + Self.statesPerLinearLayer * position
-            let step = layers[layerIndex].linearLayerBody(
-                x: hiddenStates, convState: arguments[slot], recState: arguments[slot + 1],
+            let layer = layers[layerIndex].linearLayerBody(
+                hiddenStates, convState: arguments[slot], recState: arguments[slot + 1],
                 keepsSnapshots: verify != nil)
-            hiddenStates = step.output
+            hiddenStates = layer.output
             states +=
-                [step.convState, step.recurrentState]
-                + Self.snapshotOutputs(step.snapshots, verify: verify)
+                [layer.mixer.convState, layer.mixer.recurrentState]
+                + Self.snapshotOutputs(layer.mixer.snapshots, verify: verify)
         }
 
         if let pre = attentionPreLayer {
-            let head = layers[pre].attentionPreBody(x: hiddenStates)
+            let head = layers[pre].attentionPreBody(hiddenStates)
             // The next segment needs the attention layer's input for its residual.
-            return [hiddenStates] + states + [head.queries, head.gate, head.keys, head.values]
+            return [head.hidden] + states + [head.queries, head.gate, head.keys, head.values]
         }
 
-        if verify == nil {
-            hiddenStates = finalNorm(hiddenStates)
-        }
-        return [hiddenStates] + states
+        guard verify == nil else { return [hiddenStates.hidden] + states }
+        return [hiddenStates.normed(by: finalNorm).normed] + states
     }
 
     /// The snapshot slots a GDN layer of a verify segment gives back, as

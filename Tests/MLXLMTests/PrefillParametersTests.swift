@@ -234,4 +234,11 @@ struct PrefillParametersTests {
             numDraftTokens: 2)
         #expect(log.events.filter { $0.count == 1 } == [[20]])
     }
+
+    // MARK: - The prefill step of a model
+
+    @Test("a model without a prefill step of its own takes the generic step")
+    func aModelWithoutItsOwnStepTakesTheGenericStep() {
+        #expect(Self.makeModel().defaultPrefillStepSize == PrefillParameters.defaultStepSize)
+    }
 }

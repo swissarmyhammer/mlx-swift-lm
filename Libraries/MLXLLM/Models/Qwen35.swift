@@ -196,10 +196,16 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     @ModuleInfo(key: "in_proj_b") var inProjB: Linear
     @ModuleInfo(key: "in_proj_a") var inProjA: Linear
 
-    // Inference-only physical projection. The four registered modules remain
-    // as views so checkpoint, adapter, and parameter paths do not change.
-    private let fusedInputProjection = FusedQuantizedLinearProjectionCache()
-    var fusedInputProjectionEnabled = qwen35FourGDNEnabled
+    /// The four input projections as one matmul for every call, once the
+    /// loader prepares them; `MLX_QWEN_FOUR_GDN=0` keeps them separate.
+    private let fusedInputProjection = Qwen35GatedDeltaInputProjection.makeGroup()
+
+    /// Whether the four input projections run as one matmul; see
+    /// ``FusedQuantizedProjectionGroup/isEnabled``.
+    var fusedInputProjectionEnabled: Bool {
+        get { fusedInputProjection.isEnabled }
+        set { fusedInputProjection.isEnabled = newValue }
+    }
 
     @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
     @ParameterInfo(key: "A_log") var aLog: MLXArray
@@ -254,96 +260,57 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         parameters: ModuleParameters, verify: VerifyUpdate,
         path: [String] = [], modulePath: [String] = []
     ) throws -> Self {
-        let inputProjectionPrefixes = [
-            "in_proj_qkv.", "in_proj_z.", "in_proj_b.", "in_proj_a.",
-        ]
-        let replacesInputProjection = parameters.flattened().contains { key, _ in
-            inputProjectionPrefixes.contains(where: key.hasPrefix)
+        try fusedInputProjection.invalidating(afterUpdating: parameters) {
+            try super.update(
+                parameters: parameters, verify: verify, path: path, modulePath: modulePath)
         }
-        defer {
-            // Parameter updates are incremental and can throw after changing an
-            // earlier tensor. Invalidate on both success and failure so a stale
-            // physical projection can never remain published.
-            if replacesInputProjection {
-                fusedInputProjection.invalidate()
-            }
-        }
-        return try super.update(
-            parameters: parameters, verify: verify, path: path, modulePath: modulePath)
     }
 
     override func updateModule(key: String, _ value: Any) throws {
-        let replacesInputProjection =
-            key == "in_proj_qkv" || key == "in_proj_z"
-            || key == "in_proj_b" || key == "in_proj_a"
-        defer {
-            // This is conservative when the setter itself rejects the value,
-            // and necessary when a bulk update changed an earlier key first.
-            if replacesInputProjection {
-                fusedInputProjection.invalidate()
-            }
+        try fusedInputProjection.invalidating(afterReplacing: key) {
+            try super.updateModule(key: key, value)
         }
-        try super.updateModule(key: key, value)
     }
 
+    /// Whether one matmul computes the four input projections.
     var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
 
-    /// The fused projection as compile state for a trace that runs this
-    /// layer. It is not a registered child (the checkpoint topology stays the
-    /// four projections), so a trace would otherwise read its arrays as tape
-    /// constants, and MLX keeps such constants alive after the trace is erased.
-    var fusedProjectionTraceState: [Module] {
-        fusedInputProjection.fused.map { [$0] } ?? []
+    /// The fused input projection as compile state of `trace`; see
+    /// ``FusedQuantizedProjectionGroup/traceState(of:)``.
+    func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        fusedInputProjection.traceState(of: trace)
     }
 
-    /// Build one physical quantized projection while retaining the four named
-    /// module paths as storage-sharing views. This runs at most once between
-    /// parameter/module updates; failed eligibility checks are not repeated on
-    /// every token. The model loader calls this before publishing the model;
-    /// forward passes never invoke it.
+    /// Fuses the four input projections; see
+    /// ``FusedQuantizedProjectionGroup``. The model loader calls this before
+    /// it publishes the model; a forward never does.
+    ///
+    /// - Returns: Whether one matmul computes the four projections.
     @discardableResult
     func prepareFusedInputProjection() throws -> Bool {
-        try fusedInputProjection.prepare(
-            enabled: fusedInputProjectionEnabled,
-            linears: [
-                inProjQKV, inProjZ, inProjB, inProjA,
-            ]
-        ) { sourceViews in
-            try update(
-                modules: ModuleChildren(values: [
-                    "in_proj_qkv": .value(sourceViews[0]),
-                    "in_proj_z": .value(sourceViews[1]),
-                    "in_proj_b": .value(sourceViews[2]),
-                    "in_proj_a": .value(sourceViews[3]),
-                ]), verify: [])
-        }
+        try fusedInputProjection.prepare(inputProjections, in: self)
     }
 
+    /// The four input projections, in the order of the fused rows.
+    private var inputProjections: [Linear] {
+        Qwen35GatedDeltaInputProjection.ordered(
+            qkv: inProjQKV, z: inProjZ, b: inProjB, a: inProjA)
+    }
+
+    /// The four input projections of `inputs`, with `z` split into heads.
+    ///
+    /// - Parameters:
+    ///   - inputs: The layer input, shape `(batch, sequence, hiddenSize)`.
+    ///   - batch: The batch size of `inputs`.
+    ///   - sequence: The tokens of `inputs`.
+    /// - Returns: The mixed qkv, `z` of shape `(batch, sequence, heads,
+    ///   headVDim)`, `b` and `a`.
     func projectInputs(_ inputs: MLXArray, batch: Int, sequence: Int) -> (
         qkv: MLXArray, z: MLXArray, b: MLXArray, a: MLXArray
     ) {
-        guard fusedInputProjectionEnabled, let fusedInProj = fusedInputProjection.fused else {
-            return (
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjQKV),
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjZ).reshaped(
-                    batch, sequence, numVHeads, headVDim),
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjB),
-                MultiRowQuantizedMatvec.projection(inputs, by: inProjA)
-            )
-        }
-
-        let projected = MultiRowQuantizedMatvec.projection(inputs, by: fusedInProj)
-        let qkvEnd = keyDim * 2 + valueDim
-        let zEnd = qkvEnd + valueDim
-        let bEnd = zEnd + numVHeads
-        let aEnd = bEnd + numVHeads
-        return (
-            projected[0..., 0..., ..<qkvEnd],
-            projected[0..., 0..., qkvEnd ..< zEnd].reshaped(
-                batch, sequence, numVHeads, headVDim),
-            projected[0..., 0..., zEnd ..< bEnd],
-            projected[0..., 0..., bEnd ..< aEnd]
-        )
+        Qwen35GatedDeltaInputProjection.project(
+            inputs, by: fusedInputProjection, inputProjections, batch: batch,
+            sequence: sequence, heads: numVHeads, headWidth: headVDim)
     }
 
     func callAsFunction(
@@ -546,6 +513,17 @@ final class Qwen35Attention: Module {
 
     let rope: RoPELayer
 
+    /// The query, key and value projections as one matmul, once the loader
+    /// prepares them.
+    private let fusedQKV = FusedQuantizedProjectionGroup(keys: ["q_proj", "k_proj", "v_proj"])
+
+    /// The place of the query projection among the q/k/v outputs.
+    private static let queriesPart = 0
+    /// The place of the key projection among the q/k/v outputs.
+    private static let keysPart = 1
+    /// The place of the value projection among the q/k/v outputs.
+    private static let valuesPart = 2
+
     init(_ args: Qwen35TextConfiguration) {
         let headDim = args.headDim ?? (args.hiddenSize / args.attentionHeads)
         self.attentionHeads = args.attentionHeads
@@ -576,6 +554,42 @@ final class Qwen35Attention: Module {
         super.init()
     }
 
+    @discardableResult
+    override func update(
+        parameters: ModuleParameters, verify: VerifyUpdate,
+        path: [String] = [], modulePath: [String] = []
+    ) throws -> Self {
+        try fusedQKV.invalidating(afterUpdating: parameters) {
+            try super.update(
+                parameters: parameters, verify: verify, path: path, modulePath: modulePath)
+        }
+    }
+
+    override func updateModule(key: String, _ value: Any) throws {
+        try fusedQKV.invalidating(afterReplacing: key) {
+            try super.updateModule(key: key, value)
+        }
+    }
+
+    /// Whether one matmul computes the query, key and value projections.
+    var hasFusedProjection: Bool { fusedQKV.isPrepared }
+
+    /// Fuses the query, key and value projections; see
+    /// ``FusedQuantizedProjectionGroup``. The model loader calls this before
+    /// it publishes the model; a forward never does.
+    ///
+    /// - Returns: Whether one matmul computes the three projections.
+    @discardableResult
+    func prepareFusedProjection() throws -> Bool {
+        try fusedQKV.prepare([qProj, kProj, vProj], in: self)
+    }
+
+    /// The fused projection as compile state of `trace`; see
+    /// ``FusedQuantizedProjectionGroup/traceState(of:)``.
+    func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        fusedQKV.traceState(of: trace)
+    }
+
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
         positionOffset: Int? = nil
@@ -598,7 +612,10 @@ final class Qwen35Attention: Module {
     /// reads a prefill block without the full score tensor, and to
     /// ``DecodeAttentionKernel``, which reads one query over a long cache
     /// faster than the SDPA of MLX. Every other call keeps that SDPA.
-    /// A quantized, TurboQuant or cache-native cache keeps its own route.
+    /// An 8-bit quantized cache gives a decode step and a verify to
+    /// ``QuantizedKVAttentionKernel``, which reads the packed keys without
+    /// the unfused quantized path. A TurboQuant or cache-native cache keeps
+    /// its own route.
     ///
     /// - Parameters:
     ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.
@@ -622,13 +639,14 @@ final class Qwen35Attention: Module {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        let qProjOutput = MultiRowQuantizedMatvec.projection(x, by: qProj)
+        let projected = fusedQKV(x, [qProj, kProj, vProj])
+        let qProjOutput = projected[Self.queriesPart]
         let qSplit = qProjOutput.reshaped(B, L, attentionHeads, -1).split(parts: 2, axis: -1)
         var queries = qSplit[0]
         let gate = qSplit[1].reshaped(B, L, -1)
 
-        var keys = MultiRowQuantizedMatvec.projection(x, by: kProj)
-        var values = MultiRowQuantizedMatvec.projection(x, by: vProj)
+        var keys = projected[Self.keysPart]
+        var values = projected[Self.valuesPart]
 
         queries = qNorm(queries).transposed(0, 2, 1, 3)
         keys = kNorm(keys.reshaped(B, L, kvHeads, -1)).transposed(0, 2, 1, 3)
@@ -722,7 +740,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
 
 // MARK: - Decoder Layer
 
-final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
+final class Qwen35DecoderLayer: Module, FusedProjectionDecodeLayer {
     let isLinear: Bool
 
     @ModuleInfo(key: "self_attn") var selfAttn: Qwen35Attention?
@@ -802,26 +820,56 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
 
     // MARK: - Compiled decode blocks
 
-    // Every body stays inside this layer, so each trace's default state (the
-    // layer's own weights) is complete.
-    private let compiledLinearLayer = CompiledTrace<Qwen35DecoderLayer>(
-        state: { [$0] + ($0.linearAttn?.fusedProjectionTraceState ?? []) },
+    // Every body stays inside this layer, so each trace's state is the layer
+    // and its fused projections (`layerTrace:`).
+    private let compiledLinearLayer: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
+        layerTrace: \.compiledLinearLayer,
         body: { layer, arguments in
             let step = layer.linearLayerBody(
-                x: arguments[0], convState: arguments[1], recState: arguments[2])
+                x: arguments[LinearTraceSlot.hidden],
+                convState: arguments[LinearTraceSlot.convState],
+                recState: arguments[LinearTraceSlot.recurrentState])
             return [step.output, step.convState, step.recurrentState]
         })
 
-    private let compiledAttentionPre = CompiledTrace<Qwen35DecoderLayer> { layer, arguments in
-        let (queries, gate, keys, values) = layer.attentionPreBody(x: arguments[0])
-        return [queries, gate, keys, values]
+    private let compiledAttentionPre: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
+        layerTrace: \.compiledAttentionPre,
+        body: { layer, arguments in
+            let (queries, gate, keys, values) = layer.attentionPreBody(
+                x: arguments[AttentionPreTraceSlot.hidden])
+            return [queries, gate, keys, values]
+        })
+
+    private let compiledAttentionPost: CompiledTrace<Qwen35DecoderLayer> = CompiledTrace(
+        layerTrace: \.compiledAttentionPost,
+        body: { layer, arguments in
+            [
+                layer.attentionPostBody(
+                    x: arguments[AttentionPostTraceSlot.hidden],
+                    attention: arguments[AttentionPostTraceSlot.attention],
+                    gate: arguments[AttentionPostTraceSlot.gate])
+            ]
+        })
+
+    /// Fuses the projections of this layer that read one input: the four
+    /// input projections of the gated delta net, the query, key and value
+    /// projections of the attention, and the gate and up projections of a
+    /// dense MLP. The model loader calls this before it publishes the model.
+    func prepareFusedProjections() throws {
+        _ = try linearAttn?.prepareFusedInputProjection()
+        _ = try selfAttn?.prepareFusedProjection()
+        _ = try (mlp as? Qwen3NextMLP)?.prepareFusedProjection()
     }
 
-    private let compiledAttentionPost = CompiledTrace<Qwen35DecoderLayer> { layer, arguments in
-        [
-            layer.attentionPostBody(
-                x: arguments[0], attention: arguments[1], gate: arguments[2])
-        ]
+    /// The fused projections of this layer as compile state of `trace`. The
+    /// attention and the MLP drop `trace` when their fusion turns off.
+    ///
+    /// - Parameter trace: The trace that runs this layer.
+    /// - Returns: The fused projections the layer holds.
+    func fusedProjectionTraceState(of trace: any CompiledTraceInvalidating) -> [Module] {
+        (linearAttn?.fusedProjectionTraceState(of: trace) ?? [])
+            + (selfAttn?.fusedProjectionTraceState(of: trace) ?? [])
+            + ((mlp as? Qwen3NextMLP)?.fusedProjectionTraceState(of: trace) ?? [])
     }
 
     /// GDN decode layer as one traced function. A compiled function must be
@@ -832,10 +880,10 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
         let recState = cache[1] ?? zero.rec
 
         let out = compiledLinearLayer(self, [x, convState, recState])
-        cache[0] = out[1]
-        cache[1] = out[2]
+        cache[0] = out[LinearTraceSlot.convState]
+        cache[1] = out[LinearTraceSlot.recurrentState]
         cache.advance(1)
-        return out[0]
+        return out[LinearTraceSlot.hidden]
     }
 
     /// Full-attention decode layer: two traced functions around the KV write,
@@ -845,9 +893,12 @@ final class Qwen35DecoderLayer: Module, HybridDecodeLayer {
     ) -> MLXArray {
         let projected = compiledAttentionPre(self, [x])
         let attention = attentionCacheStep(
-            queries: projected[0], keys: projected[2], values: projected[3],
+            queries: projected[AttentionPreTraceSlot.queries],
+            keys: projected[AttentionPreTraceSlot.keys],
+            values: projected[AttentionPreTraceSlot.values],
             cache: cache, mask: mask)
-        return compiledAttentionPost(self, [x, attention, projected[1]])[0]
+        let gate = projected[AttentionPreTraceSlot.gate]
+        return compiledAttentionPost(self, [x, attention, gate])[AttentionPostTraceSlot.hidden]
     }
 
     /// The part of a full-attention decode step that cannot be traced: rope
@@ -935,27 +986,15 @@ public class Qwen35TextModelInner: Module {
         self.faIdx = decodeSchedule.firstAttentionLayer
 
         let segments = decodeSchedule.segments
-        let state: CompiledDecodeSegmentCache<Qwen35TextModelInner>.StateProvider = {
-            model, index in
-            // Everything `segmentBody` reads: the layers it runs (with a
-            // GDN layer's fused projection), the embedding it starts
-            // from, the final norm it ends with.
-            var modules = model.traceState(forLayers: segments[index].layerIndices)
-            if index == 0 {
-                modules.append(model.embedTokens)
-            }
-            if index == segments.count - 1 {
-                modules.append(model.norm)
-            }
-            return modules
-        }
         self.compiledSegments = CompiledDecodeSegmentCache(
-            count: segments.count, state: state,
+            count: segments.count,
+            state: Self.segmentTraceState(of: { $0.compiledSegments }),
             body: { model, index, arguments in
                 model.segmentBody(at: index, arguments, verify: nil)
             })
         self.compiledVerifySegments = KeyedCompiledDecodeSegmentCaches(
-            count: segments.count, state: state,
+            count: segments.count,
+            state: Self.segmentTraceState(of: { $0.compiledVerifySegments }),
             body: { model, shape, index, arguments in
                 model.segmentBody(at: index, arguments, verify: shape)
             })
@@ -1064,13 +1103,45 @@ public class Qwen35TextModelInner: Module {
             layers: layers, finalNorm: norm, verify: verify)
     }
 
-    /// The compile state of a trace that runs `indices`: each layer and, for
-    /// a GDN layer, its fused projection.
-    func traceState(forLayers indices: [Int]) -> [Module] {
-        indices.flatMap { index -> [Module] in
-            let layer = layers[index]
-            return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
+    /// The compile state provider of the segment traces `traces` gives:
+    /// ``segmentTraceState(at:of:)`` for each segment, with those traces.
+    ///
+    /// - Parameter traces: The traces of a model that read the state.
+    /// - Returns: The state provider of those traces.
+    private static func segmentTraceState(
+        of traces: @escaping @Sendable (Qwen35TextModelInner) -> any CompiledTraceInvalidating
+    ) -> CompiledDecodeSegmentCache<Qwen35TextModelInner>.StateProvider {
+        { model, index in model.segmentTraceState(at: index, of: traces(model)) }
+    }
+
+    /// The compile state of segment `index`: everything `segmentBody` reads,
+    /// the layers it runs (with the fused projections of each layer), the
+    /// embedding it starts from and the final norm it ends with.
+    ///
+    /// - Parameters:
+    ///   - index: The segment.
+    ///   - trace: The traces that read this state.
+    /// - Returns: The modules whose weights the segment reads.
+    private func segmentTraceState(
+        at index: Int, of trace: any CompiledTraceInvalidating
+    ) -> [Module] {
+        let segments = decodeSchedule.segments
+        var modules = traceState(forLayers: segments[index].layerIndices, of: trace)
+        if index == segments.indices.first {
+            modules.append(embedTokens)
         }
+        if index == segments.indices.last {
+            modules.append(norm)
+        }
+        return modules
+    }
+
+    /// The compile state of `trace`, which runs `indices`: each layer and its
+    /// fused projections.
+    func traceState(
+        forLayers indices: [Int], of trace: any CompiledTraceInvalidating
+    ) -> [Module] {
+        indices.flatMap { layers[$0].layerTraceState(of: trace) }
     }
 
     /// One step through a compiled schedule, or nil when the step takes the
@@ -1182,6 +1253,31 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         forward(input, cache: cache, state: state, lastTokenOnly: true)
     }
 
+    /// The prefill step when the caller sets none:
+    /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize``.
+    public var defaultPrefillStepSize: Int { Qwen35PrefillPolicy.defaultStepSize }
+
+    /// Prefills the prompt in steps of at most ``defaultPrefillStepSize``
+    /// tokens unless `prefill` sets its own, and leaves the rest for the
+    /// iterator.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt.
+    ///   - cache: The cache of each layer, which the prefill fills.
+    ///   - state: The model state of the first chunk; its MTP keys ask for the
+    ///     drafter state of each chunk.
+    ///   - prefill: The step size, the chunking and the progress observer.
+    /// - Returns: The tokens the iterator still has to read.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   chunks.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        try prepareInChunks(
+            input, cache: cache, state: state, prefill: prefill,
+            defaultStepSize: defaultPrefillStepSize)
+    }
+
     /// The logits of the tokens and, when `state` asks for it, the drafter
     /// state of an MTP round.
     ///
@@ -1275,9 +1371,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
 
     public func prepare() throws {
         for layer in model.layers {
-            if let linearAttn = layer.linearAttn {
-                _ = try linearAttn.prepareFusedInputProjection()
-            }
+            try layer.prepareFusedProjections()
         }
     }
 
@@ -1407,6 +1501,26 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
         languageModel.nextTokenLogits(input, cache: cache, state: state)
+    }
+
+    /// The prefill step of the text model when the caller sets none.
+    public var defaultPrefillStepSize: Int { languageModel.defaultPrefillStepSize }
+
+    /// Prefills the prompt through the prepare of the text model, thus in its
+    /// prefill step unless `prefill` sets its own.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt.
+    ///   - cache: The cache of each layer, which the prefill fills.
+    ///   - state: The model state of the first chunk.
+    ///   - prefill: The step size, the chunking and the progress observer.
+    /// - Returns: The tokens the iterator still has to read.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   chunks.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        try languageModel.prepare(input, cache: cache, state: state, prefill: prefill)
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
