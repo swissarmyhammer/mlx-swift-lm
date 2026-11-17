@@ -95,8 +95,8 @@ extension CompiledDecodeSchedule {
     /// The caches of a step over `input`, or nil when the step takes the general path: the
     /// cache list does not hold one cache for each layer, the step needs an SSM mask, a gated
     /// delta net layer has no state yet (a first token, for which the general path builds the
-    /// zero states), or a full-attention layer has no cache or a cache with a route of its
-    /// own.
+    /// zero states), or a full-attention layer has no cache or a cache that
+    /// ``fitsCompiledDecodeSchedule(_:)`` refuses.
     ///
     /// Cache kinds can change mid-generation (`maybeQuantizeKVCache` swaps array entries), so
     /// a model asks again on every step.
@@ -108,7 +108,7 @@ extension CompiledDecodeSchedule {
     package func caches(_ cache: [KVCache?], over input: MLXArray) -> Caches? {
         guard cache.count == layerCount else { return nil }
         let attentionLayersFit = segments.compactMap(\.attentionPreLayer).allSatisfy {
-            cache[$0].map(usesPlainAttentionCacheRoute) ?? false
+            cache[$0].map(fitsCompiledDecodeSchedule) ?? false
         }
         let linear = segments.compactMap { Self.linearCaches(of: $0, cache) }
         guard attentionLayersFit, linear.count == segments.count,

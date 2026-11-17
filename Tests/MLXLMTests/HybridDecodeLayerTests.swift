@@ -368,11 +368,20 @@ private func expectEqual(
         #expect(schedule.caches(cache, over: hiddenStates()) == nil)
     }
 
-    @Test func scheduleCachesRefuseAnAttentionCacheWithARouteOfItsOwn() {
+    @Test func scheduleCachesRefuseATurboQuantAttentionCache() {
         let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
-        let cache = scheduleCaches(attention: QuantizedKVCache())
+        let cache = scheduleCaches(attention: TurboQuantKVCache(bits: 4, seed: 67))
 
         #expect(schedule.caches(cache, over: hiddenStates()) == nil)
+    }
+
+    /// The attention step writes and reads a quantized cache through its own route, outside
+    /// the traces, so the step keeps the segments.
+    @Test func scheduleCachesAcceptAQuantizedAttentionCache() {
+        let schedule = CompiledDecodeSchedule(linearLayers: [true, false, true])
+        let cache = scheduleCaches(attention: QuantizedKVCache(groupSize: 32, bits: 8))
+
+        #expect(schedule.caches(cache, over: hiddenStates()) != nil)
     }
 
     @Test func scheduleCachesRefuseAMissingAttentionCache() {

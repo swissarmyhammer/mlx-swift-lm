@@ -170,7 +170,9 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         XCTAssertNil(step.snapshots)
     }
 
-    func testQuantizedCacheKeepsExactGeneralFallback() throws {
+    /// A quantized cache keeps the segments: its attention step writes the same packed keys
+    /// and values as the general path, and the step gives the same logits.
+    func testQuantizedCacheMatchesGeneralPathExactlyThroughSegments() throws {
         MLXRandom.seed(37)
         let model = Qwen3NextModel(try Self.configuration(headDim: 32))
         model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
@@ -184,8 +186,30 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
 
         let general = try run(
             model, tokens: tokens, compiled: false, cache: quantizedCache)
-        let fallback = try run(
+        let compiled = try run(
             model, tokens: tokens, compiled: true, cache: quantizedCache)
+
+        XCTAssertEqual(compiled.logits, general.logits)
+        XCTAssertEqual(compiled.cacheState, general.cacheState)
+        XCTAssertEqual(compiled.offsets, general.offsets)
+        XCTAssertGreaterThan(model.model.compiledDecodeSegmentCount, 0)
+    }
+
+    func testTurboQuantCacheKeepsExactGeneralFallback() throws {
+        MLXRandom.seed(41)
+        let model = Qwen3NextModel(try Self.configuration(headDim: 32))
+        model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
+        let tokens = [Int32(2), 4, 6]
+        let turboQuantCache: (Qwen3NextModel) throws -> [KVCache] = { model in
+            try model.newCache(parameters: nil).map { cache in
+                cache is MambaCache ? cache : TurboQuantKVCache(bits: 4, seed: 67)
+            }
+        }
+
+        let general = try run(
+            model, tokens: tokens, compiled: false, cache: turboQuantCache)
+        let fallback = try run(
+            model, tokens: tokens, compiled: true, cache: turboQuantCache)
 
         XCTAssertEqual(fallback.logits, general.logits)
         XCTAssertEqual(fallback.cacheState, general.cacheState)

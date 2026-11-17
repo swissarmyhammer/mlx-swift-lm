@@ -259,16 +259,16 @@ final class Qwen35VLMCompiledDecodeTests: XCTestCase {
         XCTAssertGreaterThan(model.compiledDecodeSegmentCount, 0)
     }
 
-    func testQuantizedCacheUsesExactPerLayerFallback() throws {
+    /// A quantized cache keeps the segments: its attention step writes the same packed keys
+    /// and values as the eager path, and the step gives the same output.
+    func testQuantizedCacheMatchesEagerExactlyThroughSegments() throws {
         let model = try makeModel(numExperts: 4, seed: 43)
 
         let eager = run(model, compiled: false, cache: quantizedCache)
-        let fallback = run(model, compiled: true, cache: quantizedCache)
+        let compiled = run(model, compiled: true, cache: quantizedCache)
 
-        assertEqual(fallback, eager)
-        XCTAssertEqual(model.compiledDecodeSegmentCount, 0)
-        XCTAssertGreaterThan(model.compiledGDNTraceCount, 0)
-        XCTAssertGreaterThan(model.compiledMoETraceCount, 0)
+        assertEqual(compiled, eager)
+        XCTAssertGreaterThan(model.compiledDecodeSegmentCount, 0)
     }
 
     func testWrappedRotatingCacheMatchesEagerExactly() throws {
@@ -304,9 +304,16 @@ final class Qwen35VLMCompiledDecodeTests: XCTestCase {
         assertEqual(compiledSegment, eagerSegment)
         XCTAssertGreaterThan(segmentModel.compiledDecodeSegmentCount, 0)
 
-        let fallbackModel = try makeModel(numExperts: 4, seed: 83, dtype: .bfloat16)
-        let eagerFallback = run(fallbackModel, compiled: false, cache: quantizedCache)
-        let compiledFallback = run(fallbackModel, compiled: true, cache: quantizedCache)
+        let quantizedModel = try makeModel(numExperts: 4, seed: 83, dtype: .bfloat16)
+        let eagerQuantized = run(quantizedModel, compiled: false, cache: quantizedCache)
+        let compiledQuantized = run(quantizedModel, compiled: true, cache: quantizedCache)
+
+        assertEqual(compiledQuantized, eagerQuantized)
+        XCTAssertGreaterThan(quantizedModel.compiledDecodeSegmentCount, 0)
+
+        let fallbackModel = try makeModel(numExperts: 4, seed: 103, dtype: .bfloat16)
+        let eagerFallback = runTurboQuantAfterPrefill(fallbackModel, compiled: false)
+        let compiledFallback = runTurboQuantAfterPrefill(fallbackModel, compiled: true)
 
         assertEqual(compiledFallback, eagerFallback)
         XCTAssertEqual(fallbackModel.compiledDecodeSegmentCount, 0)
@@ -385,9 +392,14 @@ final class Qwen35VLMCompiledDecodeTests: XCTestCase {
             cache: plainCache, usesSegments: true, seed: 47)
     }
 
-    func testQuantizedFallbackTracesObserveParameterUpdates() throws {
+    func testQuantizedCacheSegmentsObserveParameterUpdates() throws {
         try assertWeightUpdatesAreVisible(
-            cache: quantizedCache, usesSegments: false, seed: 53)
+            cache: quantizedCache, usesSegments: true, seed: 53)
+    }
+
+    func testTurboQuantFallbackTracesObserveParameterUpdates() throws {
+        try assertWeightUpdatesAreVisible(
+            cache: turboQuantCache, usesSegments: false, seed: 107)
     }
 
     private func assertModelDeallocates(
@@ -436,7 +448,11 @@ final class Qwen35VLMCompiledDecodeTests: XCTestCase {
         try assertModelDeallocates(cache: plainCache, usesSegments: true, seed: 59)
     }
 
-    func testModelDeallocatesAfterQuantizedFallbackDecode() throws {
-        try assertModelDeallocates(cache: quantizedCache, usesSegments: false, seed: 61)
+    func testModelDeallocatesAfterQuantizedCacheDecode() throws {
+        try assertModelDeallocates(cache: quantizedCache, usesSegments: true, seed: 61)
+    }
+
+    func testModelDeallocatesAfterTurboQuantFallbackDecode() throws {
+        try assertModelDeallocates(cache: turboQuantCache, usesSegments: false, seed: 109)
     }
 }
