@@ -19,6 +19,29 @@ struct ExecutorPromptCacheKey: Hashable, Sendable {
 
     /// The session the cache belongs to.
     let sessionID: String
+
+    /// The KV-cache configuration the caches were built under, or nil for full
+    /// precision.
+    ///
+    /// Generation converts the caches it is handed to the configuration of the
+    /// pass, thus a full-precision cache would be served to an 8-bit turn, or a
+    /// compressed cache to a full-precision turn, if the key did not name the
+    /// configuration. Two configurations of one session therefore name two
+    /// caches, and neither serves the other.
+    let kvCache: KVCacheConfiguration?
+
+    /// Creates the key of `sessionID` of `modelID` under `kvCache`.
+    ///
+    /// - Parameters:
+    ///   - modelID: the model the cache belongs to.
+    ///   - sessionID: the session the cache belongs to.
+    ///   - kvCache: the KV-cache configuration the caches were built under, or
+    ///     nil for full precision.
+    init(modelID: String, sessionID: String, kvCache: KVCacheConfiguration? = nil) {
+        self.modelID = modelID
+        self.sessionID = sessionID
+        self.kvCache = kvCache
+    }
 }
 
 // MARK: - What a session carries
@@ -766,6 +789,18 @@ actor ExecutorPromptCacheStore {
         removeAll { $0.sessionID == sessionID }
     }
 
+    /// Releases the cache of `sessionID` of `modelID` under every KV-cache
+    /// configuration: the entries in memory, the spills whose writes have not
+    /// ended, and the files on disk. The other sessions of the model, and the
+    /// sessions of other models, stay.
+    ///
+    /// - Parameters:
+    ///   - modelID: the model whose session to release.
+    ///   - sessionID: the session to release.
+    func evict(modelID: String, sessionID: String) {
+        removeAll { $0.modelID == modelID && $0.sessionID == sessionID }
+    }
+
     /// Removes `key` from every tier of the store: the entry in memory, the
     /// spill whose write has not ended, and the file on disk. A key that the
     /// store does not hold changes nothing.
@@ -1019,8 +1054,9 @@ enum ExecutorPromptCacheSpillOutcome: CustomStringConvertible {
 /// What one generation pass does with the prompt cache of its session.
 struct ExecutorPromptCachePlan {
 
-    /// The caches to hand to generation.
-    let caches: [KVCache]
+    /// The caches to hand to generation, and, once the generation ended, the
+    /// caches it left (see ``holding(generationCache:)``).
+    private(set) var caches: [KVCache]
 
     /// The input to feed, narrowed to the tokens `caches` does not already hold.
     let input: LMInput
@@ -1160,6 +1196,25 @@ struct ExecutorPromptCachePlan {
             state: nil,
             decision: entry.map { .rebuild(.init(render: promptTokens, ledger: $0.tokens)) }
                 ?? .cold)
+    }
+
+    /// This plan, holding the caches the generation of the pass left in the
+    /// place of the caches it handed over.
+    ///
+    /// A KV-cache configuration replaces each cache it compresses with a new
+    /// cache object while the generation runs, thus the caches the pass handed
+    /// over can stop at the end of the prompt, in full precision, while the
+    /// generation goes on in their compressed replacements. The next turn
+    /// must carry the replacements.
+    ///
+    /// - Parameter generationCache: the caches the generation left, or nil
+    ///   when it handed none over.
+    /// - Returns: the plan with those caches, or this plan when there are none.
+    func holding(generationCache: [KVCache]?) -> ExecutorPromptCachePlan {
+        guard let generationCache else { return self }
+        var plan = self
+        plan.caches = generationCache
+        return plan
     }
 
     /// The decision a reuse of a carried cache stands for.
@@ -2141,6 +2196,35 @@ final class ExecutorDrafterStateReceiver: Sendable {
     /// none or did not end yet.
     var drafterState: MTPDrafterContinuation? {
         received.withLock { $0 }
+    }
+}
+
+/// Holds the caches a generation last wrote into, which it hands over when it
+/// ends, until the pass commits its cache.
+///
+/// The generation task hands the caches over and the response task reads them
+/// after it awaited that task, thus a `Mutex` holds them.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class ExecutorGenerationCacheReceiver: Sendable {
+
+    /// The caches the generation handed over, or nil.
+    private let received = Mutex<SendableBox<[KVCache]>?>(nil)
+
+    /// Creates a receiver that holds no caches.
+    init() {}
+
+    /// The callback a generation hands its caches to when it ends.
+    var receive: GenerationCacheHandOff {
+        { caches in self.received.withLock { $0 = caches } }
+    }
+
+    /// The caches the generation handed over, or nil when it handed none or
+    /// did not end yet. The receiver gives them up: a second read gives nil.
+    func takeGenerationCache() -> [KVCache]? {
+        received.withLock { box in
+            defer { box = nil }
+            return box?.consume()
+        }
     }
 }
 

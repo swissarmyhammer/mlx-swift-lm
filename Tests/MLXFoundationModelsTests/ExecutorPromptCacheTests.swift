@@ -63,10 +63,10 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     func everyTurnOfOneSessionNamesTheSameCache() throws {
         let firstTurn = MLXLanguageModel.Executor.sessionCacheKey(
             for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
-            modelID: Self.modelID)
+            modelID: Self.modelID, kvCache: nil)
         let secondTurn = MLXLanguageModel.Executor.sessionCacheKey(
             for: makeRequest(transcript: transcript(firstEntryID: "session-a", turns: 3)),
-            modelID: Self.modelID)
+            modelID: Self.modelID, kvCache: nil)
 
         #expect(firstTurn == secondTurn)
         #expect(firstTurn?.sessionID == "session-a")
@@ -77,10 +77,10 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     func twoSessionsNeverNameTheSameCache() throws {
         let first = MLXLanguageModel.Executor.sessionCacheKey(
             for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
-            modelID: Self.modelID)
+            modelID: Self.modelID, kvCache: nil)
         let second = MLXLanguageModel.Executor.sessionCacheKey(
             for: makeRequest(transcript: transcript(firstEntryID: "session-b")),
-            modelID: Self.modelID)
+            modelID: Self.modelID, kvCache: nil)
 
         #expect(first != second)
     }
@@ -90,10 +90,10 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     func oneSessionOnTwoModelsNamesTwoCaches() throws {
         let onOneModel = MLXLanguageModel.Executor.sessionCacheKey(
             for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
-            modelID: Self.modelID)
+            modelID: Self.modelID, kvCache: nil)
         let onAnother = MLXLanguageModel.Executor.sessionCacheKey(
             for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
-            modelID: Self.otherModelID)
+            modelID: Self.otherModelID, kvCache: nil)
 
         #expect(onOneModel != onAnother)
     }
@@ -103,7 +103,8 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     func anEmptyTranscriptNamesNoSessionAndCarriesNoCache() throws {
         #expect(
             MLXLanguageModel.Executor.sessionCacheKey(
-                for: makeRequest(transcript: Transcript()), modelID: Self.modelID) == nil)
+                for: makeRequest(transcript: Transcript()), modelID: Self.modelID,
+                kvCache: nil) == nil)
     }
 
     // MARK: - The store

@@ -460,7 +460,8 @@ struct DeepseekV4IntegrationTests {
                 // the parser did not read that markup, thus the test must show
                 // it rather than report an empty call list.
                 Issue.record("the model wrote a tool call the parser rejected: \(rejection)")
-            case .info:
+            case .info, .steering:
+                // No steering is submitted to this session.
                 break
             }
         }

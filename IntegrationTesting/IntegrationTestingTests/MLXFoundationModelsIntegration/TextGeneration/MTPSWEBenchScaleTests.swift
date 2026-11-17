@@ -212,7 +212,7 @@ struct SessionRunner {
         let key = try #require(
             MLXLanguageModel.Executor.sessionCacheKey(
                 for: makeExecutorRequest(transcript: Transcript(entries: entries)),
-                modelID: model.modelID))
+                modelID: model.modelID, kvCache: model.kvCache))
         Memory.peakMemory = 0
         let events = try await stream(
             entries, tokenBudget: tokenBudget, declaresTool: declaresTool)

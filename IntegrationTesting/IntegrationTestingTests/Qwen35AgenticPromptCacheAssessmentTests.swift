@@ -399,7 +399,8 @@ private struct SessionDriver {
             generationOptions: options,
             contextOptions: ContextOptions(reasoningLevel: .moderate))
         let key = try #require(
-            MLXLanguageModel.Executor.sessionCacheKey(for: request, modelID: model.modelID))
+            MLXLanguageModel.Executor.sessionCacheKey(
+                for: request, modelID: model.modelID, kvCache: model.kvCache))
         let store = ExecutorPromptCacheStore.current
         let ledgerBefore = await store.peek(key)?.tokens ?? []
 

@@ -202,6 +202,9 @@ func collect(
                 "a generation pass rejected a tool call: \(rejection)")
         case .info(let info):
             completionInfo = info
+        case .steering:
+            // The assessment submits no steering.
+            break
         }
     }
     guard let completionInfo else {

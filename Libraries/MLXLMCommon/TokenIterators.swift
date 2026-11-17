@@ -43,6 +43,25 @@ protocol GenerationFinalizingTokenIterator: TokenIteratorProtocol {
     mutating func finalizeGeneration()
 }
 
+/// An iterator that names the caches of the model its generation last wrote into.
+///
+/// A KV-cache configuration replaces each cache it compresses with a new cache
+/// object while the generation runs, thus these can be other objects than the
+/// caches the iterator was handed. A caller that keeps the caches for a later
+/// turn takes these in their place.
+package protocol GenerationCacheProviding {
+    /// The caches of the model as the generation left them, one for each layer.
+    var generationCache: [KVCache] { get }
+}
+
+/// Receives the caches a generation last wrote into, when the generation ends
+/// (see ``GenerationCacheProviding``).
+package typealias GenerationCacheHandOff = @Sendable (SendableBox<[KVCache]>) -> Void
+
+extension TokenIterator: GenerationCacheProviding {
+    package var generationCache: [KVCache] { cache }
+}
+
 extension TokenIteratorProtocol {
     /// Default: `nil`, for iterators that keep no model state.
     public var state: LMOutput.State? { nil }

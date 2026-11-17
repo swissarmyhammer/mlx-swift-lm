@@ -1742,6 +1742,10 @@ package protocol MTPDrafterContinuationProviding {
     var mtpDrafterContinuation: MTPDrafterContinuation? { get }
 }
 
+extension MTPSpeculativeTokenIterator: GenerationCacheProviding {
+    package var generationCache: [KVCache] { mainCache }
+}
+
 extension MTPSpeculativeTokenIterator: MTPDrafterContinuationProviding {
     package var mtpDrafterContinuation: MTPDrafterContinuation? {
         finalizedContinuation

@@ -299,6 +299,8 @@ package func generateTokensTask(
 ///     over.
 ///   - drafterContinuation: receives, when the generation ends, the drafter
 ///     continuation aligned with what `cache` then holds, or `nil`.
+///   - generationCache: receives, when the generation ends, the caches it last
+///     wrote into (see ``GenerationCacheProviding``).
 /// - Returns: the stream of raw tokens, and the task that generates them. The
 ///   value of the task is every generated token.
 package func generateProtocolTokensTask(
@@ -313,7 +315,8 @@ package func generateProtocolTokensTask(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     preparedState: PreparedGenerationState = { _, _ in },
-    drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in }
+    drafterContinuation: @escaping @Sendable (MTPDrafterContinuation?) -> Void = { _ in },
+    generationCache: @escaping GenerationCacheHandOff = { _ in }
 ) throws -> (AsyncStream<TokenGeneration>, Task<[Int], Never>) {
     let iterator = try makePreparedIterator(
         input: input, cache: cache, state: state, parameters: parameters, context: context,
@@ -325,7 +328,8 @@ package func generateProtocolTokensTask(
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tokenCollector: RecordingGeneratedTokenList(drafterContinuation: drafterContinuation),
+        tokenCollector: RecordingGeneratedTokenList(
+            drafterContinuation: drafterContinuation, generationCache: generationCache),
         handler: RawTokenLoopHandler(
             additionalStopTokenIDs: decoder?.additionalStopTokenIDs ?? [],
             receivesStopTokens: decoder?.receivesStopTokens ?? false)

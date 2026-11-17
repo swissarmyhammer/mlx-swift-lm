@@ -49,11 +49,14 @@ var fixturesBundle: Bundle { Bundle(for: FixturesBundleToken.self) }
 /// Capabilities default to `[.guidedGeneration, .toolCalling]` (the common
 /// case for tests that do not exercise reasoning). Pass an explicit set for
 /// reasoning models or any other shape: capabilities are authoritative.
+/// `kvCache` is the KV-cache configuration of every generation of the model;
+/// the default of `nil` keeps full-precision caches.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 func makeTestModel(
     _ id: String,
     capabilities: [LanguageModelCapabilities.Capability]? = nil,
-    resolver: (any ModelConfigurationResolver)? = nil
+    resolver: (any ModelConfigurationResolver)? = nil,
+    kvCache: KVCacheConfiguration? = nil
 ) -> MLXLanguageModel {
     let resolved = capabilities ?? defaultTestCapabilities()
     if let resolver {
@@ -61,12 +64,14 @@ func makeTestModel(
             configuration: ModelConfiguration(id: id),
             capabilities: resolved,
             configurationResolver: resolver,
+            kvCache: kvCache,
             weightsLocation: testWeightsLocation(modelID:),
             load: testLoad())
     }
     return MLXLanguageModel(
         configuration: ModelConfiguration(id: id),
         capabilities: resolved,
+        kvCache: kvCache,
         weightsLocation: testWeightsLocation(modelID:),
         load: testLoad())
 }

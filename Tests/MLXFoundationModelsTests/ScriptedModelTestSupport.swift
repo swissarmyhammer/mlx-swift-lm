@@ -127,12 +127,16 @@ enum ScriptedCacheShape {
 /// `caches`, and a new zero state into each recurrent cache, thus the offset of
 /// each cache moves past the tokens of `keyValues`.
 ///
+/// A quantized attention cache, which a KV-cache configuration puts in the
+/// place of a full-precision one, takes the keys and values through its
+/// quantized update.
+///
 /// - Parameters:
 ///   - keyValues: the keys and values, of shape
-///     `(1, ScriptedCacheShape.headCount, tokenCount, ScriptedCacheShape.headDimension)`.
+///     `(1, ScriptedCacheShape.headCount, tokenCount, headDimension)`.
 ///   - caches: the caches to write into.
-/// - Returns: all the keys that the first attention cache holds after the
-///   write, or nil when `caches` holds no attention cache.
+/// - Returns: all the keys that the first full-precision attention cache holds
+///   after the write, or nil when `caches` holds no such cache.
 @discardableResult
 func writeScriptedCaches(keyValues: MLXArray, into caches: [KVCache]) -> MLXArray? {
     let tokenCount = keyValues.dim(ScriptedCacheShape.tokenAxis)
@@ -144,6 +148,8 @@ func writeScriptedCaches(keyValues: MLXArray, into caches: [KVCache]) -> MLXArra
             recurrent[0] = MLXArray.zeros(ScriptedCacheShape.recurrentStateShape)
             recurrent[1] = MLXArray.zeros(ScriptedCacheShape.recurrentStateShape)
             recurrent.advance(tokenCount)
+        } else if let quantized = cache as? QuantizedKVCacheProtocol {
+            _ = quantized.updateQuantized(keys: keyValues, values: keyValues)
         } else {
             let keys = cache.update(keys: keyValues, values: keyValues).0
             firstKeys = firstKeys ?? keys
@@ -162,12 +168,15 @@ func writeScriptedCaches(keyValues: MLXArray, into caches: [KVCache]) -> MLXArra
 /// - Parameters:
 ///   - caches: the caches to feed.
 ///   - tokenCount: the number of tokens to feed.
-func feed(_ caches: [KVCache], tokenCount: Int) {
+///   - headDimension: the width of each key and value. The default is
+///     ``ScriptedCacheShape/headDimension``.
+func feed(
+    _ caches: [KVCache], tokenCount: Int,
+    headDimension: Int = ScriptedCacheShape.headDimension
+) {
     guard tokenCount > 0 else { return }
     writeScriptedCaches(
-        keyValues: MLXArray.zeros([
-            1, ScriptedCacheShape.headCount, tokenCount, ScriptedCacheShape.headDimension,
-        ]),
+        keyValues: MLXArray.zeros([1, ScriptedCacheShape.headCount, tokenCount, headDimension]),
         into: caches)
 }
 
@@ -201,6 +210,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     private let forwardDelay: TimeInterval
     private let cacheLayerCount: Int
     private let recurrentLayerCount: Int
+    private let headDimension: Int
     private let weights: MLXArray?
     private var roundIndex = -1
     private var step = 0
@@ -226,16 +236,23 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// `weights` is an array the model holds for as long as it lives, the way
     /// a real model holds its parameters. No forward pass reads it. The
     /// default of `nil` gives the model no weights.
+    ///
+    /// `headDimension` is the width of each key and value the model writes.
+    /// The default of ``ScriptedCacheShape/headDimension`` keeps the caches
+    /// small; a width the affine group size divides lets a KV-cache
+    /// configuration compress them.
     init(
         rounds: [[Int]], forwardSteps: ForwardStepCounter? = nil,
         forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
-        recurrentLayerCount: Int = 0, weights: MLXArray? = nil
+        recurrentLayerCount: Int = 0, weights: MLXArray? = nil,
+        headDimension: Int = ScriptedCacheShape.headDimension
     ) {
         self.rounds = rounds
         self.forwardSteps = forwardSteps
         self.forwardDelay = forwardDelay
         self.cacheLayerCount = cacheLayerCount
         self.recurrentLayerCount = recurrentLayerCount
+        self.headDimension = headDimension
         self.weights = weights
         super.init()
     }
@@ -265,7 +282,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
             // Blocks the generation thread the way a real forward pass does.
             Thread.sleep(forTimeInterval: forwardDelay)
         }
-        feed(cache ?? [], tokenCount: inputs.size)
+        feed(cache ?? [], tokenCount: inputs.size, headDimension: headDimension)
         let positions = Swift.max(inputs.size, 1)
         var logits = Array(
             repeating: Self.rejectedLogit,
@@ -352,9 +369,9 @@ struct GenerationPromptBytesInputProcessor: UserInputProcessor {
 /// Builds a container over the scripted doubles. No download, and no weights
 /// unless `weights` gives an array.
 ///
-/// `forwardSteps`, `forwardDelay`, `cacheLayerCount`, `recurrentLayerCount` and
-/// `weights` pass through to
-/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:recurrentLayerCount:weights:)``.
+/// `forwardSteps`, `forwardDelay`, `cacheLayerCount`, `recurrentLayerCount`,
+/// `weights` and `headDimension` pass through to
+/// ``ScriptedLanguageModel/init(rounds:forwardSteps:forwardDelay:cacheLayerCount:recurrentLayerCount:weights:headDimension:)``.
 /// `processor` renders the prompt of each pass. The default renders the same
 /// tokens for every prompt. `reasoningConfig` goes into the configuration of
 /// the context. The default of `nil` gives a model that does not reason.
@@ -364,7 +381,8 @@ func makeScriptedContainer(
     forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0, recurrentLayerCount: Int = 0,
     weights: MLXArray? = nil,
     processor: any UserInputProcessor = FixedPromptInputProcessor(),
-    reasoningConfig: ReasoningConfig? = nil
+    reasoningConfig: ReasoningConfig? = nil,
+    headDimension: Int = ScriptedCacheShape.headDimension
 ) -> ModelContainer {
     let context = ModelContext(
         configuration: ModelConfiguration(id: modelID, reasoningConfig: reasoningConfig),
@@ -374,7 +392,8 @@ func makeScriptedContainer(
             forwardDelay: forwardDelay,
             cacheLayerCount: cacheLayerCount,
             recurrentLayerCount: recurrentLayerCount,
-            weights: weights),
+            weights: weights,
+            headDimension: headDimension),
         processor: processor,
         tokenizer: ScriptedByteTokenizer())
     return ModelContainer(context: context)
@@ -473,23 +492,27 @@ enum ScriptedSessionModel {
     ///   - reasoningConfig: the reasoning protocol of the model. When it is set, the model
     ///     declares `.reasoning`.
     ///   - recurrentLayerCount: the recurrent layers of the model beside its KV cache layers.
+    ///   - kvCache: the KV-cache configuration of the model, or `nil` for full precision.
+    ///   - headDimension: the width of each key and value the model writes.
     /// - Returns: the model.
     static func make(
         modelID: String, weights: URL, scripts: [String], cacheLayerCount: Int,
         processor: any UserInputProcessor, reasoningConfig: ReasoningConfig? = nil,
-        recurrentLayerCount: Int = 0
+        recurrentLayerCount: Int = 0, kvCache: KVCacheConfiguration? = nil,
+        headDimension: Int = ScriptedCacheShape.headDimension
     ) -> MLXLanguageModel {
         let capabilities: [LanguageModelCapabilities.Capability] =
             reasoningConfig == nil ? [] : [.reasoning]
         return MLXLanguageModel(
             configuration: ModelConfiguration(id: modelID, reasoningConfig: reasoningConfig),
             capabilities: capabilities,
+            kvCache: kvCache,
             weightsLocation: { _ in weights },
             load: { _, _ in
                 makeScriptedContainer(
                     modelID: modelID, rounds: scripts, cacheLayerCount: cacheLayerCount,
                     recurrentLayerCount: recurrentLayerCount, processor: processor,
-                    reasoningConfig: reasoningConfig)
+                    reasoningConfig: reasoningConfig, headDimension: headDimension)
             })
     }
 

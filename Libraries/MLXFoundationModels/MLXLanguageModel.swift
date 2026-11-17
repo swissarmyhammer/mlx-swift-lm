@@ -377,6 +377,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Releases the cache of one session of this model: in memory, while it
     /// spills, and on disk. A no-op for an unknown session.
     ///
+    /// The session is released under every KV-cache configuration, not only
+    /// under ``kvCache``: a session whose turns ran under two configurations
+    /// holds one cache for each, and the release frees both.
+    ///
     /// The sessions of other models, and the other sessions of this model,
     /// stay. A spill of the session whose write has not ended deletes its
     /// file when the write ends.
@@ -386,8 +390,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   host binds no scope, it is the identifier of the first transcript
     ///   entry of the session.
     public func releasePromptCache(sessionID: String) async {
-        await ExecutorPromptCacheStore.current.remove(
-            ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID))
+        await ExecutorPromptCacheStore.current.evict(modelID: modelID, sessionID: sessionID)
     }
 
     /// The bytes the prompt cache holds now, for a host that sizes its pool.
@@ -447,6 +450,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Prompt prefill step size; `nil` lets the model prefill with its own default step size.
     public let prefillStepSize: Int?
 
+    /// The KV-cache configuration every generation of this model runs under: each pass of
+    /// `respond`, each guided pass, and the warm-up. `nil` keeps the model's own full-precision
+    /// caches.
+    ///
+    /// The prompt cache of a session is keyed on it, thus a cache built under one configuration
+    /// never serves a turn under another.
+    public let kvCache: KVCacheConfiguration?
+
     /// Configuration the framework uses to create and cache executors.
     public var executorConfiguration: Executor.Configuration {
         Executor.Configuration(modelID: modelID)
@@ -497,6 +508,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         self.configurationResolver = configurationResolver
         self.speculativeDecoding = speculativeDecoding
         self.prefillStepSize = prefillStepSize
+        self.kvCache = nil
         self.weightsLocation = weightsLocation
         self.load = { configuration, progress in
             try await load(configuration, progress.download ?? { _ in })
@@ -510,6 +522,21 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Use this initializer when the loader forwards `LoadProgressHandlers` to
     /// `loadModelContainer`. The deprecated `load:` initializer remains available
     /// for source compatibility with download-only loaders.
+    ///
+    /// - Parameters:
+    ///   - configuration: Identifies and parameterizes the model.
+    ///   - capabilities: The capabilities this model supports. Stored verbatim.
+    ///   - configurationResolver: Patches a per-call `ModelConfiguration` for this instance.
+    ///   - speculativeDecoding: The MTP drafter the text, reasoning and tool turns speculate
+    ///     with, or `nil` for plain decode.
+    ///   - prefillStepSize: Prompt prefill step size. `nil` lets the model prefill with its own
+    ///     default step size.
+    ///   - kvCache: The KV-cache configuration every generation of this model runs under, for
+    ///     example affine 8-bit compression. `nil` keeps full-precision caches.
+    ///   - weightsLocation: Resolves a model identifier to its on-disk weights directory, for
+    ///     the availability checks.
+    ///   - progress: Receives the download and weight-loading progress of each load.
+    ///   - load: Loads the model container for a configuration.
     public init(
         configuration: ModelConfiguration,
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
@@ -517,6 +544,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             DefaultConfigurationResolver(),
         speculativeDecoding: MLXSpeculativeDecoding? = nil,
         prefillStepSize: Int? = nil,
+        kvCache: KVCacheConfiguration? = nil,
         weightsLocation: @Sendable @escaping (String) -> URL,
         progress: LoadProgressHandlers = .init(),
         load: @escaping ProgressContainerLoader
@@ -526,6 +554,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         self.configurationResolver = configurationResolver
         self.speculativeDecoding = speculativeDecoding
         self.prefillStepSize = prefillStepSize
+        self.kvCache = kvCache
         self.weightsLocation = weightsLocation
         self.load = load
         self.progress = progress
@@ -618,17 +647,51 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             defer { Stream.gpu.synchronize() }
             let input = try await context.processor.prepare(
                 input: UserInput(chat: [.user("warmup")]))
-            let parameters = GenerateParameters(
-                maxTokens: 1, prefill: .init(stepSize: prefillStepSize))
+            let parameters = Self.warmUpParameters(
+                prefillStepSize: prefillStepSize, kvCache: kvCache)
             for await _ in try MLXLMCommon.generate(
                 input: input, parameters: parameters, context: context
             ) {
                 // Drain to completion.
             }
             if let speculation {
-                try await Self.warmUp(speculation, input: input, context: context)
+                try await Self.warmUp(
+                    speculation, input: input, context: context, kvCache: kvCache)
             }
         }
+    }
+
+    /// The tokens the plain warm-up generates: one, which is enough to compile the kernels.
+    private static let warmUpTokenCount = 1
+
+    /// The parameters of the plain warm-up generate: one token, with the prefill step and the
+    /// KV-cache configuration of the model, thus the warm-up compiles the kernels a `respond`
+    /// runs.
+    ///
+    /// - Parameters:
+    ///   - prefillStepSize: the prefill step size of the model, or `nil` for its own default.
+    ///   - kvCache: the KV-cache configuration of the model, or `nil` for full precision.
+    /// - Returns: the parameters.
+    static func warmUpParameters(
+        prefillStepSize: Int?, kvCache: KVCacheConfiguration?
+    ) -> GenerateParameters {
+        GenerateParameters(
+            maxTokens: warmUpTokenCount, kvCache: kvCache, prefill: .init(stepSize: prefillStepSize)
+        )
+    }
+
+    /// The parameters of the speculative warm-up stream: greedy, for the prefill bonus and one
+    /// full round, with the KV-cache configuration of the model.
+    ///
+    /// - Parameters:
+    ///   - blockSize: the round size of the drafter.
+    ///   - kvCache: the KV-cache configuration of the model, or `nil` for full precision.
+    /// - Returns: the parameters.
+    static func speculativeWarmUpParameters(
+        blockSize: Int, kvCache: KVCacheConfiguration?
+    ) -> GenerateParameters {
+        GenerateParameters(
+            maxTokens: prefillBonusTokenCount + blockSize, kvCache: kvCache, temperature: 0)
     }
 
     /// The token the prefill of an MTP stream samples before its first round.
@@ -644,12 +707,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   - speculation: the drafter of the model.
     ///   - input: the warm-up prompt.
     ///   - context: the loaded model context.
+    ///   - kvCache: the KV-cache configuration of the model, or `nil` for full precision.
     /// - Throws: the error of the iterator.
     private static func warmUp(
-        _ speculation: MTPSpeculation, input: LMInput, context: ModelContext
+        _ speculation: MTPSpeculation, input: LMInput, context: ModelContext,
+        kvCache: KVCacheConfiguration?
     ) async throws {
-        let parameters = GenerateParameters(
-            maxTokens: prefillBonusTokenCount + speculation.blockSize, temperature: 0)
+        let parameters = speculativeWarmUpParameters(
+            blockSize: speculation.blockSize, kvCache: kvCache)
         let (stream, task) = try generateTokensTask(
             input: input, parameters: parameters, context: context, speculation: speculation)
         for await _ in stream {
@@ -945,20 +1010,25 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Parameters:
         ///   - request: the request whose session is named.
         ///   - modelID: the model the cache belongs to.
+        ///   - kvCache: the KV-cache configuration the session's caches are built
+        ///     under, or nil for full precision.
         /// - Returns: the key, or nil when the scope is `.uncached` or, with no
         ///   scope, for an empty transcript. A request that names no session
         ///   carries no cache.
         static func sessionCacheKey(
-            for request: LanguageModelExecutorGenerationRequest, modelID: String
+            for request: LanguageModelExecutorGenerationRequest, modelID: String,
+            kvCache: KVCacheConfiguration?
         ) -> ExecutorPromptCacheKey? {
             switch MLXLanguageModel.promptCacheScope {
             case .some(.session(let sessionID)):
-                return ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
+                return ExecutorPromptCacheKey(
+                    modelID: modelID, sessionID: sessionID, kvCache: kvCache)
             case .some(.uncached):
                 return nil
             case nil:
                 guard let firstEntry = request.transcript.first else { return nil }
-                return ExecutorPromptCacheKey(modelID: modelID, sessionID: firstEntry.id)
+                return ExecutorPromptCacheKey(
+                    modelID: modelID, sessionID: firstEntry.id, kvCache: kvCache)
             }
         }
 
@@ -1025,16 +1095,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// one `respond` reads it without a parameter through every call.
         @TaskLocal static var prefillStepSize: Int?
 
+        /// The KV-cache configuration of the model that the current `respond`
+        /// serves, from ``MLXLanguageModel/kvCache``; `nil` keeps full-precision
+        /// caches.
+        ///
+        /// A task-local, as ``prefillStepSize``, so each generation pass inside
+        /// one `respond` -- the sampler-backed passes and the guided passes --
+        /// reads it without a parameter through every call.
+        @TaskLocal static var kvCache: KVCacheConfiguration?
+
         /// Build `GenerateParameters` for a sampler-backed generation pass. The shared
         /// resolver owns temperature and mode precedence; this helper preserves the
-        /// optional seed directly on the backend request, and the prompt prefill
+        /// optional seed directly on the backend request, the prompt prefill
         /// step size, which defaults to the one of the model that the current
-        /// `respond` serves (``prefillStepSize``).
+        /// `respond` serves (``prefillStepSize``), and the KV-cache configuration,
+        /// which defaults to the one of that model (``kvCache``).
         static func makeParameters(
             maxTokens: Int,
             requestedTemperature: Double?,
             samplingConfiguration: MLXSamplingConfiguration?,
-            prefillStepSize: Int? = Executor.prefillStepSize
+            prefillStepSize: Int? = Executor.prefillStepSize,
+            kvCache: KVCacheConfiguration? = Executor.kvCache
         ) -> GenerateParameters {
             var parameters = GenerateParameters(maxTokens: maxTokens)
             resolveSamplingParameters(
@@ -1043,6 +1124,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             ).apply(to: &parameters)
             parameters.seed = samplingConfiguration?.seed
             parameters.prefill.stepSize = prefillStepSize
+            parameters.kvCache = kvCache
             return parameters
         }
 
@@ -1180,9 +1262,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             try await withTaskCancellationHandler {
                 try await Self.$drainCoordinator.withValue(coordinator) {
                     try await Self.$prefillStepSize.withValue(model.prefillStepSize) {
-                        try await SpeculativeDecodingOutcome.$current.withValue(speculationOutcome)
-                        {
-                            try await runRespond(to: request, model: model, streamingInto: channel)
+                        try await Self.$kvCache.withValue(model.kvCache) {
+                            try await SpeculativeDecodingOutcome.$current.withValue(
+                                speculationOutcome
+                            ) {
+                                try await runRespond(
+                                    to: request, model: model, streamingInto: channel)
+                            }
                         }
                     }
                 }
@@ -1275,7 +1361,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // checked back in below, thus one response owns it for its whole
             // run and a second response on the same session starts cold rather
             // than writing the same caches.
-            let promptCacheKey = Self.sessionCacheKey(for: request, modelID: modelID)
+            let promptCacheKey = Self.sessionCacheKey(
+                for: request, modelID: modelID, kvCache: model.kvCache)
             let checkout = await Self.checkOutPromptCache(promptCacheKey)
             // A cache on disk is now the file of this response alone. The slot
             // reads it before the first plan, inside the container. The file is
