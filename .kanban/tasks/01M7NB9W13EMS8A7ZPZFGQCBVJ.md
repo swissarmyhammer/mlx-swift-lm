@@ -1,8 +1,8 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '80'
+position_column: doing
+position_ordinal: '8480'
 title: 'Qwen3.8: register and verify the 8-bit MTP drafter (mlx-community/Qwen3.8-27B-MTP-8bit) with the 8-bit target'
 ---
 ## Why

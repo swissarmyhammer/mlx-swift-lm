@@ -109,8 +109,15 @@ comments:
     - evidence: swift-format over IntegrationTesting; `xcodebuild build-for-testing ... -scheme IntegrationTesting` → TEST BUILD SUCCEEDED, no warnings in the 2 changed files (the only IntegrationTesting warning is the existing DeepseekV4IntegrationTests.swift:466 "case is already handled", untouched). LFM2 checkpoints not run (not cached locally).
     - next: /review
   timestamp: 2026-11-17T18:00:59.545989+00:00
-position_column: doing
-position_ordinal: '8480'
+- actor: claude-code
+  id: 01m7nbg3zqdq6s0b8dbrmfnmcf
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (03a37849) — 0 findings (attempted 7, confirmed 0, refuted 0); 2 Swift files reviewed, 6 .kanban files have no validator. The 2026-11-17 11:55 item is fixed: `timed` was removed, and LFM2CheckpointIntegrationTests.swift now uses GPUWallTime.measure, milliseconds and ratePerSecond.
+    - next: none — task moved to done
+  timestamp: 2026-11-17T18:14:53.687119+00:00
+position_column: done
+position_ordinal: ffffc580
 title: 'MLXLMTests: 4 LFM2 real-checkpoint XCTests skip behind environment variables (from upstream merge 6dc1e4e7)'
 ---
 Found while working ^6gkhfah. `xcrun xctest .build/out/Products/Debug/MLXLMTests.xctest` on qwen-perf (and on stable: the files are identical) reports `Executed 1134 tests, with 4 tests skipped`. CLAUDE.md says that no test is skipped.
