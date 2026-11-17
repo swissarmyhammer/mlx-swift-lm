@@ -193,7 +193,8 @@ package struct PromptCacheCheckpoint {
     ///   - model: the model that feeds the caches.
     ///   - prefill: cuts the tokens into forward passes, in steps of the
     ///     ``LanguageModel/defaultPrefillStepSize`` of `model` when it sets no
-    ///     step size.
+    ///     step size, and never above the
+    ///     ``LanguageModel/maximumPrefillStepSize`` of `model`.
     ///   - drafterFeed: takes the target hidden rows of each forward pass into
     ///     an MTP drafter, or nil. The returned state then holds none of the
     ///     values the model emits for the drafter.
@@ -216,7 +217,7 @@ package struct PromptCacheCheckpoint {
         }
         let chunked = try prefill.forEachChunk(
             total: tokens.count, reserving: 0, defaultStepSize: model.defaultPrefillStepSize,
-            forward)
+            maximumStepSize: model.maximumPrefillStepSize, forward)
         if chunked < tokens.count {
             forward(chunked ..< tokens.count)
         }

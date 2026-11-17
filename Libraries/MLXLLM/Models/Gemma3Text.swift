@@ -519,8 +519,8 @@ public class Gemma3TextModel: Module, LLMModel {
         let y = input.text
         let processed = try prefill.forEachChunk(
             total: y.tokens.size,
-            defaultStepSize: Self.defaultPrefillChunkSize,
-            maximumStepSize: config.slidingWindow
+            defaultStepSize: defaultPrefillStepSize,
+            maximumStepSize: maximumPrefillStepSize
         ) { range in
             _ = model(y[.newAxis, range].tokens, mask: nil, cache: cache)
             asyncEval(cache)
@@ -528,8 +528,15 @@ public class Gemma3TextModel: Module, LLMModel {
         return .tokens(y[processed...])
     }
 
-    /// Prefill chunk size when the caller sets none, tuned for this path on Apple Silicon.
-    private static let defaultPrefillChunkSize = 128
+    /// The prefill step when the caller sets none, tuned for this path on Apple Silicon.
+    ///
+    /// The prepare and the checkpoint feeds of a prompt cache both read in this step, so a
+    /// prompt fed up to a message boundary reads in the same step as the rest of it.
+    public let defaultPrefillStepSize = 128
+
+    /// The sliding window: no prefill step reads more tokens than the window holds, the
+    /// step a caller sets included.
+    public var maximumPrefillStepSize: Int? { config.slidingWindow }
 }
 
 /// Message generator for TranslateGemma, Google's translation fine-tunes of Gemma 3.

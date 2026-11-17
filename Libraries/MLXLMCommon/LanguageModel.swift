@@ -391,6 +391,18 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// The default is ``PrefillParameters/defaultStepSize``.
     var defaultPrefillStepSize: Int { get }
 
+    /// The largest prefill step of this model, or nil when it has none.
+    ///
+    /// Every feed of prompt tokens caps its step at this size, both
+    /// ``defaultPrefillStepSize`` and a ``PrefillParameters/stepSize`` the
+    /// caller sets: ``prepare(_:cache:state:prefill:)`` and the feed of a
+    /// prompt cache up to a checkpoint at a message boundary alike. A model
+    /// with a sliding window caps the step at the window, so no forward reads
+    /// more tokens than the window holds.
+    ///
+    /// The default is nil.
+    var maximumPrefillStepSize: Int? { get }
+
     /// Primary entry point to produce a step (single token) from the model
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
@@ -444,6 +456,9 @@ extension LanguageModel {
     /// Most language models prefill in the generic step,
     /// ``PrefillParameters/defaultStepSize``.
     public var defaultPrefillStepSize: Int { PrefillParameters.defaultStepSize }
+
+    /// Most language models cap no prefill step.
+    public var maximumPrefillStepSize: Int? { nil }
 
     @available(
         *, deprecated, renamed: "prepare(_:cache:state:prefill:)",

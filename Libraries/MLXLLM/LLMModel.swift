@@ -43,7 +43,8 @@ extension LLMModel {
     ///
     /// Evaluates the prompt into the cache in chunks of at most
     /// `PrefillParameters.stepSize`, or of the model's
-    /// `defaultPrefillStepSize` when the caller sets none, leaving one token for the
+    /// `defaultPrefillStepSize` when the caller sets none, and never above the
+    /// model's `maximumPrefillStepSize`, leaving one token for the
     /// `TokenIterator`'s first forward. With `PrefillParameters.Chunking.balanced`
     /// (the default) the chunks are equal-sized, so no forward is a small
     /// remainder paying full attention cost against the whole prompt.
@@ -58,11 +59,12 @@ extension LLMModel {
     {
         try prepareInChunks(
             input, cache: cache, state: state, prefill: prefill,
-            defaultStepSize: defaultPrefillStepSize)
+            defaultStepSize: defaultPrefillStepSize, maximumStepSize: maximumPrefillStepSize)
     }
 
     /// The prepare step of ``prepare(_:cache:state:prefill:)``, in chunks of at
-    /// most `defaultStepSize` tokens when `prefill` sets no step size.
+    /// most `defaultStepSize` tokens when `prefill` sets no step size, and of at
+    /// most `maximumStepSize` tokens in any case.
     ///
     /// A model with a prefill step of its own calls this from its own
     /// `prepare`, because a conforming type cannot call the default of the
@@ -75,15 +77,17 @@ extension LLMModel {
     ///     drafter state of each chunk.
     ///   - prefill: The step size, the chunking and the progress observer.
     ///   - defaultStepSize: The step size when `prefill` sets none.
+    ///   - maximumStepSize: The cap on every step, or nil for none.
     /// - Returns: The tokens the iterator still has to read: the whole prompt
     ///   when it fits in one step, else the tokens after the last chunk.
     /// - Throws: `CancellationError` when the task is cancelled between two
     ///   chunks.
     func prepareInChunks(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters,
-        defaultStepSize: Int
+        defaultStepSize: Int, maximumStepSize: Int? = nil
     ) throws -> PrepareResult {
-        let stepSize = prefill.resolvedStepSize(defaultStepSize: defaultStepSize)
+        let stepSize = prefill.resolvedStepSize(
+            defaultStepSize: defaultStepSize, maximumStepSize: maximumStepSize)
         let y = input.text
         let total = y.tokens.size
 
@@ -101,7 +105,7 @@ extension LLMModel {
             var chunkState: LMOutput.State? = state
             processed = try prefill.forEachChunk(
                 total: total, reserving: prefill.chunking == .remainder ? stepSize : 1,
-                defaultStepSize: defaultStepSize
+                defaultStepSize: defaultStepSize, maximumStepSize: maximumStepSize
             ) { range in
                 let input = y[.newAxis, range]
                 let output = self(input, cache: cache.isEmpty ? nil : cache, state: chunkState)
