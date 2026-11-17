@@ -126,6 +126,12 @@ comments:
     - review: clean — 0 findings; card moved to done
     - next: merge kv-config + qwen-perf into stable (user request), Router pushes and the SHA goes to Router + Extras
   timestamp: 2026-11-17T13:39:04.359077+00:00
+- actor: claude-code
+  id: 01m7mzah5khmeyacyks77ty5rx
+  text: |-
+    ### post-push — done
+    - origin/stable pushed at 59a2ec21 (user said "push"); SHA sent to FoundationModelsRouter and foundationmodelsextras-2b. Router confirmed 59a2ec21 fast-forwards 87460a3f and includes 811e4da7; Router will not push. Last acceptance item satisfied.
+  timestamp: 2026-11-17T14:42:07.667878+00:00
 position_column: done
 position_ordinal: ffffb280
 title: 'MLXLanguageModel: KV-cache configuration option (kvCache:) applied to generation, warm-up and the prompt-cache key'
