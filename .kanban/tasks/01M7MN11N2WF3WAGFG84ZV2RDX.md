@@ -109,8 +109,25 @@ comments:
     - evidence: 1 file — Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift. `swift build --build-tests` built with 0 compiler warnings (the only output was the SwiftPM `missing creator for mutated node` build-system notice). `xcrun xctest .build/out/Products/Debug/MLXFoundationModelsTests.xctest` exited 0: 519 Swift Testing tests in 71 suites passed, 0 failures, 0 warnings. swift-format was run on Tests.
     - next: review
   timestamp: 2026-11-17T13:38:05.579601+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7mvpq93fzq1s3c4wn15m8g4
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (d6968025) — 0 findings (1 file reviewed: Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift; 7 attempted, 0 failed). All prior Review Findings items checked, including the 07:33 completeness/inverse-operation-coverage item.
+    - next: moved to done. The open acceptance item "Reply to FoundationModelsRouter with the stable SHA once pushed" is a post-push coordination step for the orchestrator, not a code finding.
+  timestamp: 2026-11-17T13:38:52.835140+00:00
+- actor: claude-code
+  id: 01m7mvq2h7br3c3et1zjwsc3kt
+  text: |-
+    ### finish iteration 4 — clean
+    - implement: changed — ExecutorCommittedGenerationTests.swift (ledger read-back)
+    - test: green — MLXFoundationModelsTests 519, 0 failures
+    - commit: d6968025 (kv-config)
+    - review: clean — 0 findings; card moved to done
+    - next: merge kv-config + qwen-perf into stable (user request), Router pushes and the SHA goes to Router + Extras
+  timestamp: 2026-11-17T13:39:04.359077+00:00
+position_column: done
+position_ordinal: ffffb280
 title: 'MLXLanguageModel: KV-cache configuration option (kvCache:) applied to generation, warm-up and the prompt-cache key'
 ---
 ## Why
