@@ -124,6 +124,16 @@ count its tokens one time. After a merge from `upstream/main`:
    Qwen3.8 suites of `IntegrationTesting`: `Qwen35SessionPromptCacheTests`,
    `Qwen35AgenticPromptCacheAssessmentTests` and
    `PromptCacheSpoolCostAssessmentTests`.
+4. Search the merged tests in `Tests/` for tests that an environment variable
+   gates (`ProcessInfo.processInfo.environment[`, `XCTSkip`, `.enabled(if:`,
+   or an early `return` from a `guard` on the environment). Upstream gates
+   real-checkpoint tests this way, and such a test is skipped in each run.
+   Move each one to `IntegrationTesting`, where it downloads a pinned
+   checkpoint through `#hubDownloader()` and runs without a gate. The merge
+   6dc1e4e7 brought six LFM2 tests of this kind; they are now in
+   `LFM2CheckpointIntegrationTests`. A profile or benchmark that needs no
+   checkpoint moves there also, without its gate
+   (`VerifyAttentionBlockPassProfileTests`).
 
 ## Before you commit
 

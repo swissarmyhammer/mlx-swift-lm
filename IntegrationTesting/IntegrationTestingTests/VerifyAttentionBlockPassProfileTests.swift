@@ -11,15 +11,21 @@
 //  - one decode step through ``DecodeAttentionKernel``, the floor of one read
 //    of the cache.
 //
-// The profile holds nothing of the times. It runs only when the environment
-// sets `MLX_VERIFY_ATTENTION_PROFILE=1`; `MLX_VERIFY_ATTENTION_PROFILE_KEYS` picks the key
-// counts:
+// The profile holds nothing of the times. It came from `MLXLMTests`, where an
+// environment variable gated it; here it runs in each run of the
+// `IntegrationTesting` scheme. To run it alone:
 //
-//     MLX_VERIFY_ATTENTION_PROFILE=1 xcrun xctest \
-//         -XCTest MLXLMTests.VerifyAttentionBlockPassProfileTests \
-//         .build/out/Products/Debug/MLXLMTests.xctest
+//     xcodebuild test -skipPackagePluginValidation \
+//         -project IntegrationTesting/IntegrationTesting.xcodeproj \
+//         -scheme IntegrationTesting -destination 'platform=macOS' \
+//         -only-testing:IntegrationTestingTests/VerifyAttentionBlockPassProfileTests
 //
 // Each measurement line starts with `VERIFY BLOCK PASS PROFILE:`.
+//
+// `swift test` is BLIND to this file. No SwiftPM target holds
+// `IntegrationTesting/`. Use
+// `xcodebuild build-for-testing -skipPackagePluginValidation -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS'`
+// as the compile evidence for any change to it.
 
 import Foundation
 import MLX
@@ -27,20 +33,24 @@ import Testing
 
 @testable import MLXLMCommon
 
-@Suite(
-    .serialized,
-    .enabled(if: ProcessInfo.processInfo.environment["MLX_VERIFY_ATTENTION_PROFILE"] == "1"))
+@Suite(.serialized)
 struct VerifyAttentionBlockPassProfileTests {
+
+    /// The number of query heads of Qwen3.8.
+    private static let queryHeads = 24
+
+    /// The number of key and value heads of Qwen3.8.
+    private static let kvHeads = 4
+
+    /// The width of one attention head of Qwen3.8.
+    private static let headDim = 256
 
     /// The full-attention layers of Qwen3.8, each with its own cache, thus no
     /// layer reads a cache another layer left in the GPU caches.
     private static let layers = 16
 
-    /// The key counts of the profile: `MLX_VERIFY_ATTENTION_PROFILE_KEYS`, a list of counts
-    /// split by commas, or 2k, 32k and 100k when the environment does not set it.
-    private static let keyCounts =
-        ProcessInfo.processInfo.environment["MLX_VERIFY_ATTENTION_PROFILE_KEYS"]?
-        .split(separator: ",").compactMap { Int($0) } ?? [2048, 32_768, 100_000]
+    /// The key counts of the profile: 2k, 32k and 100k.
+    private static let keyCounts = [2048, 32_768, 100_000]
 
     /// The verify row counts of the profile.
     private static let rowCounts = [2, 3, 4, 5]
@@ -76,7 +86,7 @@ struct VerifyAttentionBlockPassProfileTests {
     private static func caches(keys: Int) -> [(keys: MLXArray, values: MLXArray)] {
         (0 ..< layers).map { layer in
             let shape = [
-                1, AttentionKernelCase.qwen38KVHeads, keys, AttentionKernelCase.qwen38HeadDim,
+                1, kvHeads, keys, headDim,
             ]
             let pair = (
                 MLXRandom.normal(shape, key: MLXRandom.key(UInt64(2 * layer))).asType(.bfloat16),
@@ -91,7 +101,7 @@ struct VerifyAttentionBlockPassProfileTests {
     /// The queries of `rows` tokens, as the model gives them.
     private static func queries(rows: Int) -> MLXArray {
         let queries = MLXRandom.normal(
-            [1, rows, AttentionKernelCase.qwen38QueryHeads, AttentionKernelCase.qwen38HeadDim],
+            [1, rows, queryHeads, headDim],
             key: MLXRandom.key(99)
         ).asType(.bfloat16).swappedAxes(1, 2)
         eval(queries)
@@ -99,7 +109,7 @@ struct VerifyAttentionBlockPassProfileTests {
     }
 
     @Test func profileTheVerifyBlockPass() {
-        let scale = 1 / Float(AttentionKernelCase.qwen38HeadDim).squareRoot()
+        let scale = 1 / Float(Self.headDim).squareRoot()
         for keyCount in Self.keyCounts {
             let caches = Self.caches(keys: keyCount)
             let bytes = Double(caches.count * 2 * caches[0].keys.nbytes)
@@ -110,7 +120,7 @@ struct VerifyAttentionBlockPassProfileTests {
                         queries: decode, keys: $0.keys, values: $0.values, scale: scale)
                 }
             }
-            // swiftlint:disable:next no_direct_standard_out_logs — an opt-in profile; its output is the measurement.
+            // swiftlint:disable:next no_direct_standard_out_logs — a profile; its output is the measurement.
             print(
                 Self.prefix,
                 "keys \(keyCount) decode step \(String(format: "%.2f", decodeTime)) ms",
@@ -146,7 +156,7 @@ struct VerifyAttentionBlockPassProfileTests {
                         ", b\(blocks) \(String(format: "%.2f", whole))"
                         + " (block \(String(format: "%.2f", blockPass)))"
                 }
-                // swiftlint:disable:next no_direct_standard_out_logs — an opt-in profile; its output is the measurement.
+                // swiftlint:disable:next no_direct_standard_out_logs — a profile; its output is the measurement.
                 print(Self.prefix, line, "ms")
             }
         }

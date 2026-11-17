@@ -4,18 +4,11 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import MLXScriptedLM
 import XCTest
 
 @testable import MLXLLM
 
 final class LFM2Tests: XCTestCase {
-    private struct TokenizerLoaderStub: MLXLMCommon.TokenizerLoader {
-        func load(from directory: URL) async throws -> any Tokenizer {
-            PseudoWordTokenizer(vocabularySize: 65_536)
-        }
-    }
-
     private static let tinyConfigJSON = """
         {
           "model_type": "lfm2",
@@ -190,83 +183,5 @@ final class LFM2Tests: XCTestCase {
         eval(rewound, cold)
 
         XCTAssertLessThanOrEqual(abs(rewound - cold).max().item(Float.self), 1e-4)
-    }
-
-    /// Opt-in integration test. Set `MLX_LFM2_MODEL_PATH` to a downloaded
-    /// LFM2.5 checkpoint to verify every real tensor name and shape.
-    func testDownloadedCheckpointLoadsThroughFactory() async throws {
-        guard let path = ProcessInfo.processInfo.environment["MLX_LFM2_MODEL_PATH"] else {
-            throw XCTSkip("Set MLX_LFM2_MODEL_PATH to run the real-checkpoint test.")
-        }
-        let directory = URL(filePath: path, directoryHint: .isDirectory)
-        let generationData = try Data(
-            contentsOf: directory.appending(component: "generation_config.json"))
-        let generationConfig = try JSONDecoder.json5().decode(
-            GenerationConfigFile.self, from: generationData)
-        let context = try await LLMModelFactory.shared.load(
-            from: directory, using: TokenizerLoaderStub())
-        let model = try XCTUnwrap(context.model as? LFM2Model)
-        let config = model.configuration
-
-        let tokens = MLXArray([Int32(1), 2, 3]).reshaped(1, 3)
-        let logits = model(tokens, cache: try model.newCache(parameters: nil))
-        eval(logits)
-        XCTAssertEqual(logits.shape, [1, 3, config.vocabularySize])
-        XCTAssertEqual(context.configuration.toolCallFormat, .lfm2)
-        XCTAssertEqual(context.configuration.reasoningConfig?.promptStrategy, .alwaysOn)
-        XCTAssertNotNil(context.configuration.generationConfig)
-        XCTAssertEqual(generationConfig.temperature, 0.1)
-    }
-
-    /// Opt-in device benchmark for the real checkpoint. This deliberately
-    /// measures model forward throughput without tokenizer or UI overhead.
-    func testDownloadedCheckpointPerformance() async throws {
-        guard ProcessInfo.processInfo.environment["MLX_LFM2_BENCHMARK"] == "1" else {
-            throw XCTSkip("Set MLX_LFM2_BENCHMARK=1 to run the device benchmark.")
-        }
-        guard let path = ProcessInfo.processInfo.environment["MLX_LFM2_MODEL_PATH"] else {
-            throw XCTSkip("Set MLX_LFM2_MODEL_PATH to run the device benchmark.")
-        }
-        let directory = URL(filePath: path, directoryHint: .isDirectory)
-        let data = try Data(contentsOf: directory.appending(component: "config.json"))
-        let config = try JSONDecoder().decode(LFM2Configuration.self, from: data)
-        let model = LFM2Model(config)
-        try await loadWeights(modelDirectory: directory, model: model)
-
-        // Warm Metal kernels and allocator state outside the timed samples.
-        let warmCache = try model.newCache(parameters: nil)
-        let warm = model(
-            MLXArray([Int32](repeating: 42, count: 16)).reshaped(1, 16), cache: warmCache)
-        eval(warm)
-        for _ in 0 ..< 4 {
-            eval(model(MLXArray([Int32(43)]).reshaped(1, 1), cache: warmCache))
-        }
-
-        Memory.peakMemory = 0
-        let promptTokens = 256
-        let decodeTokens = 32
-        let cache = try model.newCache(parameters: nil)
-        let prompt = MLXArray([Int32](repeating: 42, count: promptTokens)).reshaped(1, promptTokens)
-
-        let prefillStart = Date.timeIntervalSinceReferenceDate
-        eval(model(prompt, cache: cache))
-        let prefillSeconds = Date.timeIntervalSinceReferenceDate - prefillStart
-
-        let decodeStart = Date.timeIntervalSinceReferenceDate
-        for _ in 0 ..< decodeTokens {
-            eval(model(MLXArray([Int32(43)]).reshaped(1, 1), cache: cache))
-        }
-        let decodeSeconds = Date.timeIntervalSinceReferenceDate - decodeStart
-
-        let prefillTPS = Double(promptTokens) / prefillSeconds
-        let decodeTPS = Double(decodeTokens) / decodeSeconds
-        let peakGiB = Double(Memory.peakMemory) / 1_073_741_824
-        print(
-            String(
-                format: "LFM2.5-2.6B bf16: prefill %.2f tok/s, decode %.2f tok/s, peak %.2f GiB",
-                prefillTPS, decodeTPS, peakGiB))
-
-        XCTAssertTrue(prefillTPS.isFinite && prefillTPS > 0)
-        XCTAssertTrue(decodeTPS.isFinite && decodeTPS > 0)
     }
 }

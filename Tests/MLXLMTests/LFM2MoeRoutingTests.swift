@@ -2,18 +2,11 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import MLXScriptedLM
 import XCTest
 
 @testable import MLXLLM
 
 final class LFM2MoeRoutingTests: XCTestCase {
-
-    private struct TokenizerLoaderStub: MLXLMCommon.TokenizerLoader {
-        func load(from directory: URL) async throws -> any Tokenizer {
-            PseudoWordTokenizer(vocabularySize: 128_000)
-        }
-    }
 
     private func makeConfig(useExpertBias: Bool, normTopkProb: Bool = false) throws
         -> LFM2MoEConfiguration
@@ -280,94 +273,5 @@ final class LFM2MoeRoutingTests: XCTestCase {
         let untouched = model.sanitize(weights: native)
         XCTAssertNotNil(untouched["model.layers.0.conv.in_proj.weight"])
         XCTAssertNotNil(untouched["language_model.metadata"])
-    }
-
-    /// Opt-in strict integration test for the released mixed-precision model.
-    /// Factory loading verifies every checkpoint tensor, then this asserts that
-    /// the checkpoint's 8-bit router override coexists with its 4-bit modules.
-    func testDownloadedCheckpointLoadsWithMixedPrecisionRouting() async throws {
-        guard let path = ProcessInfo.processInfo.environment["MLX_LFM2_MOE_MODEL_PATH"] else {
-            throw XCTSkip("Set MLX_LFM2_MOE_MODEL_PATH to run the real-checkpoint test.")
-        }
-        let directory = URL(filePath: path, directoryHint: .isDirectory)
-        let context = try await LLMModelFactory.shared.load(
-            from: directory, using: TokenizerLoaderStub())
-        let model = try XCTUnwrap(context.model as? LFM2MoEModel)
-        let modules = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
-        let router = try XCTUnwrap(
-            modules["model.layers.2.feed_forward.gate"] as? QuantizedLinear)
-        let convolution = try XCTUnwrap(
-            modules["model.layers.0.conv.in_proj"] as? QuantizedLinear)
-
-        XCTAssertEqual(router.bits, 8)
-        XCTAssertEqual(router.groupSize, 64)
-        XCTAssertEqual(convolution.bits, 4)
-        XCTAssertEqual(convolution.groupSize, 64)
-        XCTAssertEqual(context.configuration.toolCallFormat, .lfm2)
-        XCTAssertEqual(context.configuration.reasoningConfig?.promptStrategy, .alwaysOn)
-        XCTAssertEqual(context.configuration.reasoningConfig?.isSpecialToken, false)
-
-        let cache = try model.newCache(parameters: nil)
-        let logits = model(MLXArray([Int32(1), 2, 3]).reshaped(1, 3), cache: cache)
-        eval(logits)
-        XCTAssertEqual(logits.shape, [1, 3, 128_000])
-        XCTAssertEqual(cache.count, 24)
-    }
-
-    /// Opt-in device benchmark of model forward throughput. Tokenization and UI
-    /// work are intentionally excluded so this measures the MLX integration.
-    func testDownloadedCheckpointPerformance() async throws {
-        guard ProcessInfo.processInfo.environment["MLX_LFM2_MOE_BENCHMARK"] == "1" else {
-            throw XCTSkip("Set MLX_LFM2_MOE_BENCHMARK=1 to run the device benchmark.")
-        }
-        guard let path = ProcessInfo.processInfo.environment["MLX_LFM2_MOE_MODEL_PATH"] else {
-            throw XCTSkip("Set MLX_LFM2_MOE_MODEL_PATH to run the device benchmark.")
-        }
-        let directory = URL(filePath: path, directoryHint: .isDirectory)
-        let configData = try Data(contentsOf: directory.appending(component: "config.json"))
-        let config = try JSONDecoder().decode(LFM2MoEConfiguration.self, from: configData)
-        let baseConfig = try JSONDecoder.json5().decode(BaseConfiguration.self, from: configData)
-        let model = LFM2MoEModel(config)
-        try await loadWeights(
-            modelDirectory: directory,
-            model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
-
-        let warmCache = try model.newCache(parameters: nil)
-        eval(
-            model(
-                MLXArray([Int32](repeating: 42, count: 16)).reshaped(1, 16),
-                cache: warmCache))
-        for _ in 0 ..< 4 {
-            eval(model(MLXArray([Int32(43)]).reshaped(1, 1), cache: warmCache))
-        }
-
-        Memory.peakMemory = 0
-        let promptTokens = 256
-        let decodeTokens = 32
-        let cache = try model.newCache(parameters: nil)
-        let prompt = MLXArray([Int32](repeating: 42, count: promptTokens)).reshaped(1, promptTokens)
-
-        let prefillStart = Date.timeIntervalSinceReferenceDate
-        eval(model(prompt, cache: cache))
-        let prefillSeconds = Date.timeIntervalSinceReferenceDate - prefillStart
-
-        let decodeStart = Date.timeIntervalSinceReferenceDate
-        for _ in 0 ..< decodeTokens {
-            eval(model(MLXArray([Int32(43)]).reshaped(1, 1), cache: cache))
-        }
-        let decodeSeconds = Date.timeIntervalSinceReferenceDate - decodeStart
-
-        let prefillTPS = Double(promptTokens) / prefillSeconds
-        let decodeTPS = Double(decodeTokens) / decodeSeconds
-        let peakGiB = Double(Memory.peakMemory) / 1_073_741_824
-        print(
-            String(
-                format:
-                    "LFM2.5-8B-A1B mixed 4/8-bit: prefill %.2f tok/s, decode %.2f tok/s, peak %.2f GiB",
-                prefillTPS, decodeTPS, peakGiB))
-
-        XCTAssertTrue(prefillTPS.isFinite && prefillTPS > 0)
-        XCTAssertTrue(decodeTPS.isFinite && decodeTPS > 0)
     }
 }
