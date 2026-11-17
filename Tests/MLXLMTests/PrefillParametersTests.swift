@@ -4,6 +4,8 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXLMTestSupport
+import MLXNN
 import Testing
 
 /// Unit tests for ``PrefillParameters``: the chunk-length arithmetic, the
@@ -240,5 +242,51 @@ struct PrefillParametersTests {
     @Test("a model without a prefill step of its own takes the generic step")
     func aModelWithoutItsOwnStepTakesTheGenericStep() {
         #expect(Self.makeModel().defaultPrefillStepSize == PrefillParameters.defaultStepSize)
+    }
+
+    @Test("a model without a cap of its own caps no prefill step")
+    func aModelWithoutItsOwnCapCapsNoStep() {
+        #expect(Self.makeModel().maximumPrefillStepSize == nil)
+    }
+
+    @Test("the default prepare caps the step of the caller at the cap of the model")
+    func theDefaultPrepareCapsTheStepOfTheCaller() throws {
+        let model = CappedPrefillLlama(Self.makeModel())
+        let promptTokens = 3 * CappedPrefillLlama.maximumStep + 1
+        let log = PrefillProgressLog()
+        _ = try model.prepare(
+            LMInput(tokens: MLXArray((0 ..< promptTokens).map { Int32($0) })),
+            cache: try model.newCache(parameters: nil), state: nil,
+            prefill: log.recordingPrefill(stepSize: PrefillParameters.defaultStepSize))
+        let capped = stride(
+            from: CappedPrefillLlama.maximumStep, through: promptTokens - 1,
+            by: CappedPrefillLlama.maximumStep)
+        #expect(log.processed == Array(capped))
+    }
+}
+
+/// A Llama model with a cap on its prefill step, which keeps the default
+/// `LLMModel.prepare`.
+private final class CappedPrefillLlama: Module, LLMModel {
+    /// The cap on every prefill step of the model.
+    static let maximumStep = 4
+
+    /// The model that runs every forward pass.
+    let wrapped: LlamaModel
+    var loraLayers: [Module] { wrapped.loraLayers }
+    var vocabularySize: Int { wrapped.vocabularySize }
+    var maximumPrefillStepSize: Int? { Self.maximumStep }
+
+    /// - Parameter wrapped: the model that runs every forward pass.
+    init(_ wrapped: LlamaModel) { self.wrapped = wrapped }
+
+    func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try wrapped.newCache(parameters: parameters)
+    }
+
+    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
+        -> LMOutput
+    {
+        wrapped(input, cache: cache, state: state)
     }
 }
