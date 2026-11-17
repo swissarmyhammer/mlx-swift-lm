@@ -87,10 +87,17 @@ comments:
     - note: the first qwencheck attempt was killed by the coordinator. Its wrapper held bench.lock around qwencheck.sh, which takes the same lock, so the two runs deadlocked. Run qwencheck.sh bare; it locks itself.
     - next: /review
   timestamp: 2026-11-17T15:25:13.599442+00:00
+- actor: claude-code
+  id: 01m7n1vwpvreknvj93w3znw3aq
+  text: |-
+    ### review — clean
+    - evidence: review sha b1ae8ddf~1..b1ae8ddf — 0 findings (3 files reviewed, 7 attempted, 0 failed; .kanban files not reviewed). Prior item (VerifyAttentionKernel duplication) addressed: VerifyAttentionKernel.blockResults and DecodeAttentionKernel.blockAttention both build through DecodeAttentionKernel.BlockPass; covered by Tests/MLXLMTests/AttentionBlockPassTests.swift.
+    - next: none — moved to done
+  timestamp: 2026-11-17T15:26:33.691840+00:00
 depends_on:
 - 01M7J84FZ3SJF8MB599CDEN2RC
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffc480
 title: 'Qwen3.8: fused 8-bit-KV decode and verify attention kernel for head dim 256 (candidate, needs sign-off)'
 ---
 ## Why
