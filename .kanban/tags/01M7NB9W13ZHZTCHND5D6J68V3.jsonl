@@ -1,0 +1,1 @@
+{"id":"01M7NB9W172AW0JSXBXRBEGXBZ","timestamp":"2026-11-17T18:11:28.935772Z","op":"create","item_id":"01M7NB9W13ZHZTCHND5D6J68V3","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: e4e669\n+tag_name: mtp-8bit\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: e4e669\n-tag_name: mtp-8bit\n","transaction_id":null}

@@ -85,13 +85,6 @@ private func batch(_ tokens: [Int32]) -> MLXArray {
     MLXArray(tokens).reshaped(1, tokens.count)
 }
 
-/// Runs `body` and returns its value with the wall-clock seconds it took.
-private func timed<T>(_ body: () throws -> T) rethrows -> (value: T, seconds: Double) {
-    let start = Date.timeIntervalSinceReferenceDate
-    let value = try body()
-    return (value, Date.timeIntervalSinceReferenceDate - start)
-}
-
 /// Drains `iterator` and returns the tokens it emitted. `iterator` keeps its
 /// final state, thus a caller can read its draft counts afterwards.
 private func drain<Iterator: TokenIteratorProtocol>(_ iterator: inout Iterator) -> [Int] {
@@ -170,16 +163,18 @@ private func measureForwardThroughput(_ model: any LanguageModel) throws -> Forw
     let cache = try model.newCache(parameters: nil)
     let timedPrompt = prompt(count: promptTokens)
 
-    let prefillSeconds = timed { eval(model(timedPrompt, cache: cache)) }.seconds
-    let decodeSeconds = timed {
+    let prefillMilliseconds = GPUWallTime.milliseconds { eval(model(timedPrompt, cache: cache)) }
+    let decodeMilliseconds = GPUWallTime.milliseconds {
         for _ in 0 ..< decodeTokens {
             eval(model(decodeStep, cache: cache))
         }
-    }.seconds
+    }
 
     return ForwardThroughput(
-        prefillTokensPerSecond: Double(promptTokens) / prefillSeconds,
-        decodeTokensPerSecond: Double(decodeTokens) / decodeSeconds,
+        prefillTokensPerSecond: GPUWallTime.ratePerSecond(
+            promptTokens, milliseconds: prefillMilliseconds),
+        decodeTokensPerSecond: GPUWallTime.ratePerSecond(
+            decodeTokens, milliseconds: decodeMilliseconds),
         peakGiB: Double(Memory.peakMemory) / BenchmarkShape.bytesPerGiB)
 }
 
@@ -345,10 +340,10 @@ struct LFM2CheckpointIntegrationTests {
 
         /// One timed sample of a decode path.
         struct Sample {
-            /// The seconds of iterator initialization, including prompt prefill.
-            let prefillSeconds: Double
-            /// The seconds of token consumption.
-            let decodeSeconds: Double
+            /// The milliseconds of iterator initialization, including prompt prefill.
+            let prefillMilliseconds: Double
+            /// The milliseconds of token consumption.
+            let decodeMilliseconds: Double
             /// The draft tokens the verifier accepted; 0 for the baseline.
             let accepted: Int
             /// The draft tokens the drafter proposed; 0 for the baseline.
@@ -363,17 +358,15 @@ struct LFM2CheckpointIntegrationTests {
             drafts: (Iterator) -> (accepted: Int, proposed: Int)
         ) throws -> Sample {
             let parameters = GenerateParameters(maxTokens: tokens, temperature: 0)
-            let (initialized, prefillSeconds) = try timed { try makeIterator(parameters) }
-            var iterator = initialized
-            let (count, decodeSeconds) = timed {
-                let count = drain(&iterator).count
-                Stream.defaultStream.synchronize()
-                return count
+            let (initialized, prefillMilliseconds) = try GPUWallTime.measure {
+                try makeIterator(parameters)
             }
+            var iterator = initialized
+            let (count, decodeMilliseconds) = GPUWallTime.measure { drain(&iterator).count }
             #expect(count == tokens)
             let (accepted, proposed) = drafts(iterator)
             return Sample(
-                prefillSeconds: prefillSeconds, decodeSeconds: decodeSeconds,
+                prefillMilliseconds: prefillMilliseconds, decodeMilliseconds: decodeMilliseconds,
                 accepted: accepted, proposed: proposed)
         }
 
@@ -418,26 +411,25 @@ struct LFM2CheckpointIntegrationTests {
         let baselineSamples = samples.map(\.baseline)
         let speculativeSamples = samples.map(\.speculative)
 
-        func median(_ values: [Double]) -> Double {
-            values.sorted()[values.count / 2]
-        }
-
-        let baselineSeconds = median(baselineSamples.map(\.decodeSeconds))
-        let speculativeSeconds = median(speculativeSamples.map(\.decodeSeconds))
-        let baselinePrefill = median(baselineSamples.map(\.prefillSeconds))
-        let speculativePrefill = median(speculativeSamples.map(\.prefillSeconds))
+        let baselineMilliseconds = SampleMedian.of(baselineSamples.map(\.decodeMilliseconds))
+        let speculativeMilliseconds = SampleMedian.of(
+            speculativeSamples.map(\.decodeMilliseconds))
+        let baselinePrefill = SampleMedian.of(baselineSamples.map(\.prefillMilliseconds))
+        let speculativePrefill = SampleMedian.of(speculativeSamples.map(\.prefillMilliseconds))
         let representative = try #require(
             speculativeSamples.min {
-                abs($0.decodeSeconds - speculativeSeconds)
-                    < abs($1.decodeSeconds - speculativeSeconds)
+                abs($0.decodeMilliseconds - speculativeMilliseconds)
+                    < abs($1.decodeMilliseconds - speculativeMilliseconds)
             })
-        let baselineTokensPerSecond = Double(measuredTokens) / baselineSeconds
-        let speculativeTokensPerSecond = Double(measuredTokens) / speculativeSeconds
+        let baselineTokensPerSecond = GPUWallTime.ratePerSecond(
+            measuredTokens, milliseconds: baselineMilliseconds)
+        let speculativeTokensPerSecond = GPUWallTime.ratePerSecond(
+            measuredTokens, milliseconds: speculativeMilliseconds)
         // swiftlint:disable:next no_direct_standard_out_logs — a benchmark; its output is the measurement.
         print(
             String(
                 format:
-                    "LFM2 DSpark benchmark (block %d, median of %d): baseline %.2f tok/s, DSpark %.2f tok/s, speedup %.2fx, prefill %.3fs -> %.3fs, acceptance %d/%d",
+                    "LFM2 DSpark benchmark (block %d, median of %d): baseline %.2f tok/s, DSpark %.2f tok/s, speedup %.2fx, prefill %.1f ms -> %.1f ms, acceptance %d/%d",
                 lfm25DSparkBlockSize, repetitions, baselineTokensPerSecond,
                 speculativeTokensPerSecond,
                 speculativeTokensPerSecond / baselineTokensPerSecond, baselinePrefill,

@@ -17,11 +17,32 @@ enum GPUWallTime {
     /// - Parameter body: The work; it evaluates what it times.
     /// - Returns: The milliseconds from the first sync to the end of the second.
     static func milliseconds<Result>(_ body: () -> Result) -> Double {
+        measure(body).milliseconds
+    }
+
+    /// The value of `body` and its wall milliseconds, with a GPU sync before and after it.
+    ///
+    /// - Parameter body: The work; it evaluates what it times.
+    /// - Returns: The value of `body`, and the milliseconds from the first sync to the end of
+    ///   the second.
+    static func measure<Result>(
+        _ body: () throws -> Result
+    ) rethrows -> (value: Result, milliseconds: Double) {
         Stream.gpu.synchronize()
         let start = Date()
-        _ = body()
+        let value = try body()
         Stream.gpu.synchronize()
-        return Date().timeIntervalSince(start) * millisecondsPerSecond
+        return (value, Date().timeIntervalSince(start) * millisecondsPerSecond)
+    }
+
+    /// The rate per second of `count` items done in `milliseconds`.
+    ///
+    /// - Parameters:
+    ///   - count: The items done, for example tokens.
+    ///   - milliseconds: The wall milliseconds the items took, more than 0.
+    /// - Returns: The items per second.
+    static func ratePerSecond(_ count: Int, milliseconds: Double) -> Double {
+        Double(count) * millisecondsPerSecond / milliseconds
     }
 
     /// The median of `repeats` runs of `sample`.
