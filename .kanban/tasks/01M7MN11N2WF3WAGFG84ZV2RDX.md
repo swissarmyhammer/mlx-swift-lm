@@ -55,6 +55,33 @@ comments:
     - evidence: Libraries/MLXFoundationModels/{ExecutorPromptCache,MLXLanguageModelGeneration}.swift, Libraries/MLXLMCommon/{GenerationLoop,GenerateTokens,Evaluate}.swift, Tests/MLXLMTests/{GenerationCacheHandOffTests,MTPSpeculationTests}.swift, new Tests/MLXFoundationModelsTests/ExecutorHandOffReceiverTests.swift (3 tests, RED = missing type, then green). 9/9 findings checked. swift build --build-tests: 0 compiler warnings (only the pre-existing SwiftPM "missing creator for mutated node" notice). xcrun xctest: MLXFoundationModelsTests 517 passed, MLXLMTests 2356 Swift Testing + 1098 XCTest passed (4 LFM2 skips ^gcsvy3f, 3 known issues already there), MLXGuidedGenerationTests 78, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11 — 0 failures. IntegrationTesting xcodebuild build-for-testing: TEST BUILD SUCCEEDED. swift-format run. Hand-off semantics unchanged (same commit order, same values), so no real-model rerun.
     - next: /review
   timestamp: 2026-11-17T13:21:35.045545+00:00
+- actor: claude-code
+  id: 01m7mtvr7y7gt2xv6wfp1fgtxr
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (a0d5bff2) — 2 findings (2 confirmed, 1 refuted): Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:850, Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:1372. All 9 items of the 07:00 section are addressed (generic ExecutorHandOffReceiver<Value> with take(), ExecutorGenerationHandOff bundle, package GenerationHandOff + RecordingGeneratedTokenList(handOff:), periphery:ignore on kvCache key, no @unchecked Sendable in GenerationCacheHandOffTests).
+    - next: implement the shared helper that owns prefill recorder, ExecutorGenerationHandOff, startTrackedGeneration and withPromptCacheCommit across the three pass functions; re-review.
+  timestamp: 2026-11-17T13:24:09.086527+00:00
+- actor: claude-code
+  id: 01m7mtw2fccc85s74snf87nxx8
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: changed — 8 files, 9/9 findings checked
+    - test: green — run in the implement step: FM 517, MLXLMTests 2356+1098, Guided 78, CXGrammar 7, Macros 11, 0 failures; IntegrationTesting builds
+    - commit: a0d5bff2 (kv-config)
+    - review: findings — MLXLanguageModelGeneration.swift:850, MLXLanguageModelGeneration.swift:1372
+  timestamp: 2026-11-17T13:24:19.564419+00:00
+- actor: claude-code
+  id: 01m7mv8rjp1qyxjtmrm0wajgw4
+  text: 'Implement (review findings 2026-11-17 07:22): `withPromptCacheCommit` (sole callers: the three passes) replaced by one instance helper `withCommittedGeneration(plan:promptCache:generate:consume:)` in MLXLanguageModelGeneration.swift. It owns the `ExecutorPrefillRecorder`, the `ExecutorGenerationHandOff`, `startTrackedGeneration`, the error-exit `cancelAndDrain`, and the commit with `prefill.state`. `generate` receives `(preparedState: PreparedGenerationState, handOff: GenerationHandOff)` and returns the stream + task; `consume` receives `(stream, task)` (task needed by the allowed-tool and reasoning passes for `task.cancel()` on early stop). runAllowedToolGeneration / runUnconstrained / runReasoning now supply only their generator call and response loop. Order of operations unchanged: recorder + hand-off created, generation started in the drain section, stream read, error exit cancels and drains, good exit awaits tokens then commits. New test Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift (RED = missing member compile error, then green): the prefill a generation reports through the helper becomes the checkpoint of the committed cache.'
+  timestamp: 2026-11-17T13:31:15.414897+00:00
+- actor: claude-code
+  id: 01m7mvcp0st261mgmjv9s5xwk2
+  text: |-
+    ### implement — changed
+    - evidence: Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift (`withPromptCacheCommit` → `withCommittedGeneration(plan:promptCache:generate:consume:)`, three passes reduced to generator call + response loop), new Tests/MLXFoundationModelsTests/ExecutorCommittedGenerationTests.swift (1 test, RED = missing member, then green). 2/2 findings of the 07:22 section checked. swift build --build-tests: 0 errors, 0 compiler warnings. xcrun xctest: MLXFoundationModelsTests 518 passed; MLXLMTests 2356 Swift Testing passed (3 known issues already there) + 1098 XCTest, 0 failures (4 LFM2 skips ^gcsvy3f). Only MLXFoundationModelsTests links MLXFoundationModels, so the Guided/CXGrammar/Macros bundles are unaffected; IntegrationTesting references none of the changed symbols. swift-format run.
+    - next: /review
+  timestamp: 2026-11-17T13:33:23.865015+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'MLXLanguageModel: KV-cache configuration option (kvCache:) applied to generation, warm-up and the prompt-cache key'
@@ -93,3 +120,14 @@ FoundationModelsRouter (Router card ^2fet0gs) asked for KV-cache quantization to
 - [x] `Libraries/MLXLMCommon/Evaluate.swift:594` `duplication/duplication` — This collector construction copies the one in `generateProtocolTokensTask` in GenerateTokens.swift, so the two entry points can diverge. Use the shared factory proposed for GenerateTokens.swift:331 so both entry points call one construction.
 - [x] `Libraries/MLXLMCommon/GenerateTokens.swift:331` `duplication/duplication` — The `RecordingGeneratedTokenList(drafterContinuation:generationCache:)` construction is copied verbatim from `generateTaskRecordingTokens` in Evaluate.swift, so two entry points build the same collector the same way. Add one factory, for example `RecordingGeneratedTokenList.forHandOff(drafterContinuation:generationCache:)`, or make the collector's default parameters do the work. Both entry points then call the same code.
 - [x] `Tests/MLXLMTests/GenerationCacheHandOffTests.swift:13` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
+
+## Review Findings (2026-11-17 07:22)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 8 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7MN11N2WF3WAGFG84ZV2RDX.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7MN11N2WF3WAGFG84ZV2RDX.md` — no validator matches this file
+
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:850` `duplication/duplication` — The hand-off plumbing is copied verbatim into all three generation pass functions: `let handOff = ExecutorGenerationHandOff()`, passing `handOff.generationHandOff` to the generator, and passing `handOff: handOff` to `withPromptCacheCommit`. This change added the same lines to each copy, so the three copies can drift apart. Extract one helper that owns the prefill recorder, the hand-off, `startTrackedGeneration`, and `withPromptCacheCommit`, and take the generator as a closure that receives `handOff.generationHandOff` and `prefill.record`. Each pass then supplies only its generator call and its response loop. Keep the three call sites as the only per-pass differences.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:1372` `duplication/duplication` — Same added hand-off scaffolding in the reasoning pass, the third copy of the block. Fold into the shared helper proposed for line 850, so this copy becomes a call with its own generator closure.

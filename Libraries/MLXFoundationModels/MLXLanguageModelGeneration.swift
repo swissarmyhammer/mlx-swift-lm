@@ -744,7 +744,14 @@ extension MLXLanguageModel.Executor {
         _ = await task.value
     }
 
-    /// Reads a generation stream and keeps its cache for the next turn.
+    /// Runs the generation of one pass, reads its stream, and keeps its cache
+    /// for the next turn.
+    ///
+    /// The generation starts inside a drain-coordinator section (see
+    /// ``startTrackedGeneration(_:)``). It takes the prefill recorder of the
+    /// pass, which reports the end of the prompt to `promptCache`, and the
+    /// hand-off that receives the MTP drafter continuation and the caches it
+    /// last wrote into when it ends.
     ///
     /// Both exits wait for the generation task, thus the GPU loop never
     /// stays in operation. A good exit gives the prompt cache the tokens
@@ -754,27 +761,32 @@ extension MLXLanguageModel.Executor {
     /// on, and keeps no cache.
     ///
     /// - Parameters:
-    ///   - task: the generation task that feeds the caches.
-    ///   - plan: the plan that the pass ran, or nil when the pass had no
+    ///   - plan: the plan that the pass runs, or nil when the pass has no
     ///     plan.
-    ///   - state: the model state the prefill of the pass left, which the
-    ///     next turn seeds its iterator with.
-    ///   - handOff: receives the MTP drafter continuation of the generation
-    ///     and the caches it last wrote into when it ends, which the next turn
-    ///     resumes and carries in the place of the caches of `plan`.
     ///   - promptCache: the slot that keeps the cache for the next turn.
-    ///   - body: reads the token stream of the same generation.
-    /// - Throws: the error that `body` throws.
-    func withPromptCacheCommit(
-        task: Task<[Int], Never>,
+    ///   - generate: starts the generation of the pass. It hands the generation
+    ///     its `preparedState` callback, which records what the prefill left,
+    ///     and its `handOff`, which receives what the generation left. It
+    ///     returns the stream and the task of that generation.
+    ///   - consume: reads the stream of the same generation. It takes the task
+    ///     as well, to stop the generation when the pass needs no more tokens.
+    /// - Throws: `CancellationError` when the respond task is already
+    ///   cancelled, and the error that `generate` or `consume` throws.
+    func withCommittedGeneration<Element: Sendable>(
         plan: ExecutorPromptCachePlan?,
-        state: LMOutput.State?,
-        handOff: ExecutorGenerationHandOff,
         promptCache: ExecutorPromptCacheSlot,
-        body: () async throws -> Void
-    ) async rethrows {
+        generate: (
+            _ preparedState: PreparedGenerationState, _ handOff: GenerationHandOff
+        ) throws -> (AsyncStream<Element>, Task<[Int], Never>),
+        consume: (_ stream: AsyncStream<Element>, _ task: Task<[Int], Never>) async throws -> Void
+    ) async throws {
+        let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
+        let handOff = ExecutorGenerationHandOff()
+        let (stream, task) = try Self.startTrackedGeneration {
+            try generate(prefill.record, handOff.generationHandOff)
+        }
         do {
-            try await body()
+            try await consume(stream, task)
         } catch {
             await cancelAndDrain(task)
             throw error
@@ -782,7 +794,8 @@ extension MLXLanguageModel.Executor {
         // The generation hands its drafter state and its caches over before
         // the task returns its tokens, thus the hand-off holds them here.
         let generatedTokens = await task.value
-        handOff.commit(plan, generatedTokens: generatedTokens, state: state, to: promptCache)
+        handOff.commit(
+            plan, generatedTokens: generatedTokens, state: prefill.state, to: promptCache)
     }
 
     /// Reads the cache of the session back from disk when it went there,
@@ -846,9 +859,8 @@ extension MLXLanguageModel.Executor {
             stopStrings: context.configuration.effectiveStopStrings)
         var detokenizer = context.tokenizer.makeStreamingDetokenizer()
         var result = AllowedToolGenerationResult()
-        let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
-        let handOff = ExecutorGenerationHandOff()
-        let (stream, task) = try Self.startTrackedGeneration {
+        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
+            preparedState, handOff in
             try generateProtocolTokensTask(
                 input: plan?.input ?? input,
                 cache: plan?.caches,
@@ -858,14 +870,9 @@ extension MLXLanguageModel.Executor {
                 decoder: protocolDecoder,
                 speculation: speculation,
                 mtpContinuation: plan?.drafterState,
-                preparedState: prefill.record,
-                handOff: handOff.generationHandOff)
-        }
-
-        try await withPromptCacheCommit(
-            task: task, plan: plan, state: prefill.state,
-            handOff: handOff, promptCache: promptCache
-        ) {
+                preparedState: preparedState,
+                handOff: handOff)
+        } consume: { stream, task in
             generationLoop: for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
@@ -1216,9 +1223,8 @@ extension MLXLanguageModel.Executor {
         // cache behind: the ledger of that cache names the render plus the
         // tokens generation fed into it, and the text stream alone does not
         // carry those token identifiers.
-        let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
-        let handOff = ExecutorGenerationHandOff()
-        let (stream, task) = try Self.startTrackedGeneration {
+        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
+            preparedState, handOff in
             try generateTaskRecordingTokens(
                 input: plan?.input ?? input,
                 cache: plan?.caches,
@@ -1227,14 +1233,9 @@ extension MLXLanguageModel.Executor {
                 context: context,
                 speculation: speculation,
                 mtpContinuation: plan?.drafterState,
-                preparedState: prefill.record,
-                handOff: handOff.generationHandOff)
-        }
-
-        try await withPromptCacheCommit(
-            task: task, plan: plan, state: prefill.state,
-            handOff: handOff, promptCache: promptCache
-        ) {
+                preparedState: preparedState,
+                handOff: handOff)
+        } consume: { stream, _ in
             for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
@@ -1368,9 +1369,8 @@ extension MLXLanguageModel.Executor {
         // paths: this path passes no tools, so a tool-call-shaped output is
         // never executable.
         var decodedEvents = ReasoningDecodedEvents()
-        let prefill = ExecutorPrefillRecorder(promptCache: promptCache)
-        let handOff = ExecutorGenerationHandOff()
-        let (stream, task) = try Self.startTrackedGeneration {
+        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
+            preparedState, handOff in
             try generateProtocolTokensTask(
                 input: plan?.input ?? input,
                 cache: plan?.caches,
@@ -1380,14 +1380,9 @@ extension MLXLanguageModel.Executor {
                 decoder: protocolDecoder,
                 speculation: speculation,
                 mtpContinuation: plan?.drafterState,
-                preparedState: prefill.record,
-                handOff: handOff.generationHandOff)
-        }
-
-        try await withPromptCacheCommit(
-            task: task, plan: plan, state: prefill.state,
-            handOff: handOff, promptCache: promptCache
-        ) {
+                preparedState: preparedState,
+                handOff: handOff)
+        } consume: { stream, task in
             generationLoop: for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
