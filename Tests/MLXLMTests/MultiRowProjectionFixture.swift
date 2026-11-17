@@ -5,10 +5,12 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import XCTest
 
 @testable import MLXLMCommon
+@testable import MLXVLM
 
 /// The configuration, the quantization and the row check shared by the
 /// multi-row projection tests of the Qwen3.5 text model and of the Qwen3.5
@@ -131,6 +133,35 @@ enum MultiRowProjectionFixture {
         module.train(false)
         eval(module)
         return module
+    }
+
+    /// A vision-language target of the fixture text configuration on weights
+    /// seeded with `seed`, cast to bfloat16, its language model quantized.
+    ///
+    /// - Parameters:
+    ///   - seed: The seed of the weights.
+    ///   - matvecOfMLX: True to give every projection the matvec of MLX.
+    ///   - bits: The bits of each quantized weight.
+    ///   - prepared: True to prepare the target as the model loader does,
+    ///     which fuses its projections.
+    /// - Returns: The quantized target, ready to run.
+    static func visionLanguageTarget(
+        seed: UInt64, matvecOfMLX: Bool = false, bits: Int = MultiRowProjectionFixture.bits,
+        prepared: Bool
+    ) throws -> MLXVLM.Qwen35 {
+        let configuration = try JSONDecoder().decode(
+            MLXVLM.Qwen35Configuration.self,
+            from: Data(Qwen35FixtureJSON.visionLanguage(textConfigJSON: textConfigurationJSON).utf8)
+        )
+        return try seededQuantized(
+            seed: seed, matvecOfMLX: matvecOfMLX, bits: bits,
+            filter: { path, _ in path.hasPrefix("language_model") },
+            prepare: { target in
+                if prepared {
+                    try target.prepare()
+                }
+            },
+            { MLXVLM.Qwen35(configuration) })
     }
 
     /// Runs `project` inside a speculative verify over ``rows`` seeded rows

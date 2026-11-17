@@ -47,8 +47,8 @@ comments:
     - evidence: review sha 5207deb5..b5fb7567 — 2 findings (2 confirmed, 0 refuted): Tests/MLXLMTests/Qwen35FusedProjectionTests.swift:284, Tests/MLXLMTests/Qwen38Tests.swift:355
     - next: implement the 2 Review Findings items (both reuse/reuse), then re-review. The push + notify acceptance item is an orchestrator step, not a code finding.
   timestamp: 2026-11-17T19:01:28.067388+00:00
-position_column: review
-position_ordinal: '80'
+position_column: doing
+position_ordinal: '8480'
 title: 'Qwen3.8: register and verify the 8-bit MTP drafter (mlx-community/Qwen3.8-27B-MTP-8bit) with the 8-bit target'
 ---
 ## Why
@@ -68,5 +68,5 @@ ACPAgent (for the user) wants to run `mlx-community/Qwen3.8-27B-8bit` with the 8
 
 > Scope: `review sha 5207deb5..b5fb7567` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 0 not reviewed.
 
-- [ ] `Tests/MLXLMTests/Qwen35FusedProjectionTests.swift:284` `reuse/reuse` — `vlmFusionStates(bits:)` rebuilds the vision-language target inline: it decodes the config, runs `seededQuantized` with the `language_model` filter, and calls `prepare()`. That is the same construction as `makeTarget(prepared:matvecOfMLX:bits:)` in `Qwen35VLMMultiRowProjectionTests`, which already takes a `bits` parameter. The copy will drift from the helper it duplicates. Move the target construction into `MultiRowProjectionFixture` (for example `Fixture.visionLanguageTarget(bits:prepared:)`) and have both `makeTarget` and `vlmFusionStates` call it. `vlmFusionStates` then only maps the fusion flags over the modules.
-- [ ] `Tests/MLXLMTests/Qwen38Tests.swift:355` `reuse/reuse` — The two new 8-bit registry tests each check one property of `qwen3_8_27b_mtp_8bit`: `testQwen38EightBitMTPDrafterIsRegistered` checks `shared.contains(id:)` and `testQwen38EightBitMTPRegistryConfigurationNamesTheEightBitDrafter` checks `.name`. The existing `testQwen38MTPRegistryConfiguration` already asserts both properties for the 4-bit config. The 8-bit checks are a parallel copy rather than an extension of that test. Replace the three tests with one `@Test(arguments:)` or XCTest loop over `(MTPDrafterRegistry.qwen3_8_27b_mtp_4bit, MTPDrafterRegistry.qwen3_8_27b_mtp_8bit)` that checks the name and `shared.contains(id:)` for each config.
+- [x] `Tests/MLXLMTests/Qwen35FusedProjectionTests.swift:284` `reuse/reuse` — `vlmFusionStates(bits:)` rebuilds the vision-language target inline: it decodes the config, runs `seededQuantized` with the `language_model` filter, and calls `prepare()`. That is the same construction as `makeTarget(prepared:matvecOfMLX:bits:)` in `Qwen35VLMMultiRowProjectionTests`, which already takes a `bits` parameter. The copy will drift from the helper it duplicates. Move the target construction into `MultiRowProjectionFixture` (for example `Fixture.visionLanguageTarget(bits:prepared:)`) and have both `makeTarget` and `vlmFusionStates` call it. `vlmFusionStates` then only maps the fusion flags over the modules.
+- [x] `Tests/MLXLMTests/Qwen38Tests.swift:355` `reuse/reuse` — The two new 8-bit registry tests each check one property of `qwen3_8_27b_mtp_8bit`: `testQwen38EightBitMTPDrafterIsRegistered` checks `shared.contains(id:)` and `testQwen38EightBitMTPRegistryConfigurationNamesTheEightBitDrafter` checks `.name`. The existing `testQwen38MTPRegistryConfiguration` already asserts both properties for the 4-bit config. The 8-bit checks are a parallel copy rather than an extension of that test. Replace the three tests with one `@Test(arguments:)` or XCTest loop over `(MTPDrafterRegistry.qwen3_8_27b_mtp_4bit, MTPDrafterRegistry.qwen3_8_27b_mtp_8bit)` that checks the name and `shared.contains(id:)` for each config.

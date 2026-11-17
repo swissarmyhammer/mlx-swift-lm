@@ -53,20 +53,8 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
     private func makeTarget(
         prepared: Bool = true, matvecOfMLX: Bool = false, bits: Int = Fixture.bits
     ) throws -> Qwen35 {
-        let configuration = try JSONDecoder().decode(
-            Qwen35Configuration.self,
-            from: Data(
-                Qwen35FixtureJSON.visionLanguage(textConfigJSON: Fixture.textConfigurationJSON)
-                    .utf8))
-        return try Fixture.seededQuantized(
-            seed: Self.weightSeed, matvecOfMLX: matvecOfMLX, bits: bits,
-            filter: { path, _ in path.hasPrefix("language_model") },
-            prepare: { target in
-                if prepared {
-                    try target.prepare()
-                }
-            },
-            { Qwen35(configuration) })
+        try Fixture.visionLanguageTarget(
+            seed: Self.weightSeed, matvecOfMLX: matvecOfMLX, bits: bits, prepared: prepared)
     }
 
     /// The seeded tokens of a call, shape `[1, count]`.

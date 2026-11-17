@@ -282,15 +282,8 @@ final class Qwen35FusedProjectionTests: XCTestCase {
     /// projection of a vision-language model quantized to `bits`, after the
     /// loader prepares it.
     private func vlmFusionStates(bits: Int) throws -> [Bool] {
-        let configuration = try JSONDecoder().decode(
-            MLXVLM.Qwen35Configuration.self,
-            from: Data(
-                Qwen35FixtureJSON.visionLanguage(textConfigJSON: Fixture.textConfigurationJSON)
-                    .utf8))
-        let model = try Fixture.seededQuantized(
-            seed: Self.weightSeed, bits: bits,
-            filter: { path, _ in path.hasPrefix("language_model") },
-            prepare: { try $0.prepare() }, { Qwen35(configuration) })
+        let model = try Fixture.visionLanguageTarget(
+            seed: Self.weightSeed, bits: bits, prepared: true)
         let modules = model.modules()
         return modules.compactMap { ($0 as? Qwen35Language.Attention)?.hasFusedProjection }
             + modules.compactMap { ($0 as? Qwen35Language.MLP)?.hasFusedProjection }
@@ -457,25 +450,15 @@ final class Qwen35FusedProjectionTests: XCTestCase {
         assertBitIdentical(got, try run(false), label, file: file, line: line)
     }
 
-    /// The compiled decode and verify segments of the whole-step schedule,
-    /// which a model over plain attention caches runs.
-    private static func compiledSegmentCounts(of model: Qwen35Language.Model) -> [Int] {
-        [model.compiledDecodeSegmentCount, model.compiledVerifySegmentCount]
-    }
-
-    /// The compiled gated delta net layers of the per-layer decode, which a
-    /// model over quantized attention caches runs.
-    private static func compiledLayerCounts(of model: Qwen35Language.Model) -> [Int] {
-        [model.compiledGDNTraceCount]
-    }
-
     private func assertVLMCompiledStepsKeepTheBits(
-        bits: Int, cache: @escaping () -> [KVCache?], promptLength: Int,
-        compiledCounts: (Qwen35Language.Model) -> [Int] = compiledSegmentCounts
+        bits: Int, cache: @escaping () -> [KVCache?], promptLength: Int
     ) throws {
         let fused = try vlmModel(prepared: true, bits: bits)
         try assertCompiledStepsKeepTheBits(
-            "VLM \(bits)-bit step", compiledSegmentCounts: { compiledCounts(fused) }
+            "VLM \(bits)-bit step",
+            compiledSegmentCounts: {
+                [fused.compiledDecodeSegmentCount, fused.compiledVerifySegmentCount]
+            }
         ) { isFused in
             try vlmDecodeThenVerify(
                 isFused ? fused : vlmModel(prepared: false, bits: bits), cache: cache(),
@@ -514,14 +497,14 @@ final class Qwen35FusedProjectionTests: XCTestCase {
     }
 
     /// The prompt is long enough for the fused quantized-KV decode kernel to
-    /// read the cache, thus the steps run the kernels of a `kvBits` 8 run.
+    /// read the cache, thus the steps run the kernels of a `kvBits` 8 run. A
+    /// quantized cache keeps the segments of the compiled decode schedule.
     func testEightBitVLMCompiledStepsOverAnEightBitKVCacheHaveTheBitsOfTheUnfusedModel()
         throws
     {
         try assertVLMCompiledStepsKeepTheBits(
             bits: Fixture.eightBits, cache: eightBitKVCaches,
-            promptLength: DecodeAttentionKernel.fewestKeys, compiledCounts: Self.compiledLayerCounts
-        )
+            promptLength: DecodeAttentionKernel.fewestKeys)
     }
 
     /// Scales the `k_proj` scales of the attention layer of `model`.

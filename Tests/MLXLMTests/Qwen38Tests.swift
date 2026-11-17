@@ -346,19 +346,15 @@ final class Qwen38Tests: XCTestCase {
         XCTAssertTrue(VLMRegistry.shared.contains(id: "mlx-community/Qwen3.8-27B-8bit"))
     }
 
-    func testQwen38MTPRegistryConfiguration() {
-        let config = MTPDrafterRegistry.qwen3_8_27b_mtp_4bit
-        XCTAssertEqual(config.name, "mlx-community/Qwen3.8-27B-MTP-4bit")
-        XCTAssertTrue(MTPDrafterRegistry.shared.contains(id: config.name))
-    }
-
-    func testQwen38EightBitMTPDrafterIsRegistered() {
-        XCTAssertTrue(MTPDrafterRegistry.shared.contains(id: "mlx-community/Qwen3.8-27B-MTP-8bit"))
-    }
-
-    func testQwen38EightBitMTPRegistryConfigurationNamesTheEightBitDrafter() {
-        XCTAssertEqual(
-            MTPDrafterRegistry.qwen3_8_27b_mtp_8bit.name, "mlx-community/Qwen3.8-27B-MTP-8bit")
+    func testQwen38MTPRegistryConfigurationsNameTheirRegisteredDrafters() {
+        let expectedNames = [
+            (MTPDrafterRegistry.qwen3_8_27b_mtp_4bit, "mlx-community/Qwen3.8-27B-MTP-4bit"),
+            (MTPDrafterRegistry.qwen3_8_27b_mtp_8bit, "mlx-community/Qwen3.8-27B-MTP-8bit"),
+        ]
+        for (config, name) in expectedNames {
+            XCTAssertEqual(config.name, name)
+            XCTAssertTrue(MTPDrafterRegistry.shared.contains(id: config.name), name)
+        }
     }
 
     // MARK: - Weight Sanitization Tests
