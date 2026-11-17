@@ -41,8 +41,9 @@ package enum PrefillAttentionKernel {
     /// ``DecodeAttentionKernel``.
     static let fewestQueries = 64
 
-    /// The only head width the kernel reads.
-    private static let headWidth = 256
+    /// The only head width the kernel reads, which
+    /// ``QuantizedKVAttentionKernel`` shares.
+    static let headWidth = 256
 
     /// The number of query heads of one KV head that one threadgroup reads.
     private static let threadgroupHeads = 3
@@ -72,8 +73,9 @@ package enum PrefillAttentionKernel {
     /// times the threadgroup memory of one 2-byte tile.
     private static let float32TileKeys = 8
 
-    /// The dtypes the kernel reads.
-    private static let floatTypes: [DType] = [.float32, .float16, .bfloat16]
+    /// The dtypes the kernel reads, which ``QuantizedKVAttentionKernel``
+    /// shares.
+    static let floatTypes: [DType] = [.float32, .float16, .bfloat16]
 
     /// The Metal header.
     ///
@@ -189,7 +191,18 @@ package enum PrefillAttentionKernel {
     ///
     /// A key range part follows it, which sets `loopFirst` and `loopEnd`, the
     /// keys the threadgroup reads, then ``loopSource``.
-    static let setupSource = """
+    ///
+    /// It joins ``layoutSource``, the readers of the plain keys and values,
+    /// and ``querySource``.
+    static let setupSource = layoutSource + tileRowsSource + querySource
+
+    /// The first part of ``setupSource``, which
+    /// ``QuantizedKVAttentionKernel`` shares: the layout of the threadgroup.
+    ///
+    /// A rows part follows it, which sets the tile readers `keyRows` and
+    /// `valueRows` of the KV head of the threadgroup and the flag `wide` of
+    /// their loads, then ``querySource``.
+    static let layoutSource = """
         constexpr int partDim = DIM / HEAD_PARTS;
         constexpr int dimFrags = partDim / matrixSide;
         constexpr int keyFrags = BK / matrixSide;
@@ -229,6 +242,12 @@ package enum PrefillAttentionKernel {
         bool realRow = head < THREADGROUP_HEADS && token < queryCount;
         uint queryHead = kvHead * GQA + (place % headGroups) * THREADGROUP_HEADS + head;
 
+        """
+
+    /// The rows part of ``setupSource``: tile readers of the plain keys and
+    /// values.
+    private static let tileRowsSource = """
+
         TileRows<T> keyRows = {
             keys + sequence * keys_strides[SEQUENCE_AXIS] + kvHead * keys_strides[HEAD_AXIS],
             keys_strides[ROW_AXIS], keys_strides[WIDTH_AXIS]};
@@ -236,6 +255,13 @@ package enum PrefillAttentionKernel {
             values + sequence * values_strides[SEQUENCE_AXIS] + kvHead * values_strides[HEAD_AXIS],
             values_strides[ROW_AXIS], values_strides[WIDTH_AXIS]};
         bool wide = wide_rows<T>(keys_strides) && wide_rows<T>(values_strides);
+
+        """
+
+    /// The last part of ``setupSource``, which ``QuantizedKVAttentionKernel``
+    /// shares: the queries of the token row of this SIMD group and an empty
+    /// online softmax.
+    static let querySource = """
         const device T* queryRows = queries + sequence * queries_strides[SEQUENCE_AXIS]
             + queryHead * queries_strides[HEAD_AXIS];
 
@@ -471,8 +497,13 @@ package enum PrefillAttentionKernel {
     }
 
     /// Tells if the query heads of each KV head make whole threadgroup head
-    /// groups.
-    private static func headGroupsFit(queryHeads: Int, kvHeads: Int) -> Bool {
+    /// groups, a rule ``QuantizedKVAttentionKernel`` shares.
+    ///
+    /// - Parameters:
+    ///   - queryHeads: The number of query heads.
+    ///   - kvHeads: The number of KV heads.
+    /// - Returns: True when each KV head has whole head groups.
+    static func headGroupsFit(queryHeads: Int, kvHeads: Int) -> Bool {
         guard kvHeads > 0, queryHeads % kvHeads == 0 else { return false }
         return (queryHeads / kvHeads) % threadgroupHeads == 0
     }
@@ -611,8 +642,13 @@ package enum PrefillAttentionKernel {
     /// to ``scaledDotProductAttention(queries:keys:values:scale:mask:)``,
     /// which reads a prefill block with this kernel, the few tokens of a
     /// speculative verify with ``VerifyAttentionKernel``, and one query over
-    /// a long cache with ``DecodeAttentionKernel``. A quantized, TurboQuant
-    /// or cache-native cache, and a call with no cache, keep the route of
+    /// a long cache with ``DecodeAttentionKernel``. A quantized cache gives
+    /// its packed keys to
+    /// ``QuantizedKVAttentionKernel/scaledDotProductAttention(queries:quantizedKeys:quantizedValues:scale:mask:groupSize:bits:mode:)``,
+    /// which reads a decode step and a verify over an 8-bit cache in its
+    /// kernels and keeps the quantized path of MLX for every other call. A
+    /// TurboQuant or cache-native cache, and a call with no cache, keep the
+    /// route of
     /// ``MLXLMCommon/attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:sinks:)``.
     ///
     /// The kernels read a causal mask mode or no mask; a mask array keeps the
@@ -630,12 +666,19 @@ package enum PrefillAttentionKernel {
         queries: MLXArray, keys: MLXArray, values: MLXArray, cache: KVCache?, scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
-        guard let cache, usesPlainAttentionCacheRoute(cache),
-            !(cache is KVCacheAttentionProtocol)
+        guard let cache, !(cache is TurboQuantKVCache), !(cache is KVCacheAttentionProtocol)
         else {
             return MLXLMCommon.attentionWithCacheUpdate(
                 queries: queries, keys: keys, values: values, cache: cache, scale: scale,
                 mask: mask)
+        }
+        if let quantizedCache = cache as? QuantizedKVCacheProtocol {
+            let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
+                keys: keys, values: values)
+            return QuantizedKVAttentionKernel.scaledDotProductAttention(
+                queries: queries, quantizedKeys: quantizedKeys, quantizedValues: quantizedValues,
+                scale: scale, mask: mask, groupSize: quantizedCache.groupSize,
+                bits: quantizedCache.bits, mode: quantizedCache.mode)
         }
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
         return scaledDotProductAttention(

@@ -612,7 +612,10 @@ final class Qwen35Attention: Module {
     /// reads a prefill block without the full score tensor, and to
     /// ``DecodeAttentionKernel``, which reads one query over a long cache
     /// faster than the SDPA of MLX. Every other call keeps that SDPA.
-    /// A quantized, TurboQuant or cache-native cache keeps its own route.
+    /// An 8-bit quantized cache gives a decode step and a verify to
+    /// ``QuantizedKVAttentionKernel``, which reads the packed keys without
+    /// the unfused quantized path. A TurboQuant or cache-native cache keeps
+    /// its own route.
     ///
     /// - Parameters:
     ///   - queries: The rotated queries, shape `(batch, heads, tokens, headDim)`.

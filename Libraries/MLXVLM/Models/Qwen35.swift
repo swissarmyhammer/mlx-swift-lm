@@ -875,7 +875,8 @@ public enum Qwen35Language {
         /// ``PrefillAttentionKernel/attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:)``:
         /// over a plain key cache, the causal mask mode or no mask reaches the
         /// prefill, verify and decode attention kernels, and a mask array
-        /// keeps the SDPA of MLX.
+        /// keeps the SDPA of MLX. Over an 8-bit quantized cache, a decode
+        /// step and a verify reach ``QuantizedKVAttentionKernel``.
         ///
         /// The attention layers of a model share their rotation tables, so a
         /// step can compute the rotation of its tokens once and give it to
