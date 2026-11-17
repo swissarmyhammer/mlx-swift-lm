@@ -64,6 +64,18 @@ struct VerifyAttentionBlockPassProfileTests {
     /// The timed passes of one measurement; the median counts.
     private static let timedPasses = 9
 
+    /// The cached tensors of one layer: its keys and its values.
+    private static let tensorsPerLayer = 2
+
+    /// The random seed of the queries.
+    private static let querySeed: UInt64 = 99
+
+    /// The nanoseconds of one millisecond.
+    private static let nanosecondsPerMillisecond = 1e6
+
+    /// The bytes per millisecond of one GB/s.
+    private static let bytesPerMillisecondPerGBPerSecond = 1e6
+
     /// The prefix of each measurement line.
     private static let prefix = "VERIFY BLOCK PASS PROFILE:"
 
@@ -77,7 +89,8 @@ struct VerifyAttentionBlockPassProfileTests {
         for _ in 0 ..< timedPasses {
             let start = DispatchTime.now().uptimeNanoseconds
             eval(pass())
-            times.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+            times.append(
+                Double(DispatchTime.now().uptimeNanoseconds - start) / nanosecondsPerMillisecond)
         }
         return times.sorted()[times.count / 2]
     }
@@ -89,9 +102,11 @@ struct VerifyAttentionBlockPassProfileTests {
                 1, kvHeads, keys, headDim,
             ]
             let pair = (
-                MLXRandom.normal(shape, key: MLXRandom.key(UInt64(2 * layer))).asType(.bfloat16),
-                MLXRandom.normal(shape, key: MLXRandom.key(UInt64(2 * layer + 1))).asType(
-                    .bfloat16)
+                MLXRandom.normal(shape, key: MLXRandom.key(UInt64(tensorsPerLayer * layer))).asType(
+                    .bfloat16),
+                MLXRandom.normal(shape, key: MLXRandom.key(UInt64(tensorsPerLayer * layer + 1)))
+                    .asType(
+                        .bfloat16)
             )
             eval(pair.0, pair.1)
             return pair
@@ -102,7 +117,7 @@ struct VerifyAttentionBlockPassProfileTests {
     private static func queries(rows: Int) -> MLXArray {
         let queries = MLXRandom.normal(
             [1, rows, queryHeads, headDim],
-            key: MLXRandom.key(99)
+            key: MLXRandom.key(querySeed)
         ).asType(.bfloat16).swappedAxes(1, 2)
         eval(queries)
         return queries
@@ -112,7 +127,7 @@ struct VerifyAttentionBlockPassProfileTests {
         let scale = 1 / Float(Self.headDim).squareRoot()
         for keyCount in Self.keyCounts {
             let caches = Self.caches(keys: keyCount)
-            let bytes = Double(caches.count * 2 * caches[0].keys.nbytes)
+            let bytes = Double(caches.count * Self.tensorsPerLayer * caches[0].keys.nbytes)
             let decode = Self.queries(rows: 1)
             let decodeTime = Self.milliseconds {
                 caches.map {
@@ -124,7 +139,7 @@ struct VerifyAttentionBlockPassProfileTests {
             print(
                 Self.prefix,
                 "keys \(keyCount) decode step \(String(format: "%.2f", decodeTime)) ms",
-                "(\(String(format: "%.0f", bytes / decodeTime / 1e6)) GB/s of K/V),",
+                "(\(String(format: "%.0f", bytes / decodeTime / Self.bytesPerMillisecondPerGBPerSecond)) GB/s of K/V),",
                 "default verify blocks \(VerifyAttentionKernel.blockCount(keys: keyCount)),",
                 "decode blocks \(DecodeAttentionKernel.blockCount(keys: keyCount))")
             for rows in Self.rowCounts {
