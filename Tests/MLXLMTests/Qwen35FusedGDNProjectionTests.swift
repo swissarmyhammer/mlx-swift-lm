@@ -450,7 +450,7 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
 
     func testVLMFallbackTraceReleasesFusedProjectionWithTheModel() throws {
         try assertVLMCompiledDecodeReleasesFusedProjection(
-            cache: { [MambaCache(), QuantizedKVCache(groupSize: 32, bits: 8)] },
+            cache: { [MambaCache(), TurboQuantKVCache(bits: 4, seed: 67)] },
             usesSegments: false)
     }
 
@@ -542,7 +542,7 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
 
     func testVLMFallbackTraceObservesDecoderParameterUpdate() throws {
         try assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
-            cache: { [MambaCache(), QuantizedKVCache(groupSize: 32, bits: 8)] },
+            cache: { [MambaCache(), TurboQuantKVCache(bits: 4, seed: 67)] },
             usesSegments: false,
             updateModule: { model in
                 try XCTUnwrap(
@@ -561,7 +561,7 @@ final class Qwen35FusedGDNProjectionTests: XCTestCase {
 
     func testVLMFallbackTraceObservesGDNParameterUpdate() throws {
         try assertVLMCompiledDecodeDropsPreparedFusionAfterParameterUpdate(
-            cache: { [MambaCache(), QuantizedKVCache(groupSize: 32, bits: 8)] },
+            cache: { [MambaCache(), TurboQuantKVCache(bits: 4, seed: 67)] },
             usesSegments: false,
             updateModule: { model in
                 try XCTUnwrap(model.modules().first { $0 is Qwen35Language.GatedDeltaNet })

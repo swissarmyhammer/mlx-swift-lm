@@ -78,10 +78,17 @@ final class Qwen35CompiledDecodeLifecycleTests: XCTestCase {
         try assertBlocksDeallocate(headDim: 8)
     }
 
-    func testBlocksDeallocateAfterQuantizedCacheDecode() throws {
-        // A quantized KV cache forces the fallback that installs the MoE
+    func testBlocksDeallocateAfterTurboQuantCacheDecode() throws {
+        // A TurboQuant KV cache forces the fallback that installs the MoE
         // block's own compiled closure; GDN layers still take per-layer
         // traces.
+        try assertBlocksDeallocate(headDim: 32) { caches in
+            caches.map { $0 is MambaCache ? $0 : TurboQuantKVCache(bits: 4, seed: 67) }
+        }
+    }
+
+    func testBlocksDeallocateAfterQuantizedCacheDecode() throws {
+        // A quantized KV cache keeps the compiled segments.
         try assertBlocksDeallocate(headDim: 32) { caches in
             caches.map { $0 is MambaCache ? $0 : QuantizedKVCache(groupSize: 32, bits: 8) }
         }

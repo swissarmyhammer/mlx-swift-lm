@@ -69,9 +69,26 @@ package enum AttentionKVState {
 /// Whether attention can be split around a plain `KVCache.update` call.
 ///
 /// Quantized and TurboQuant caches own their complete attention operation, so
-/// compiled model segments must leave those cache routes on the general path.
+/// a per-layer trace that splits the attention at the KV write must leave
+/// those cache routes on the general path. The compiled decode schedule does
+/// not split there; see ``fitsCompiledDecodeSchedule(_:)``.
 package func usesPlainAttentionCacheRoute(_ cache: KVCache) -> Bool {
     !(cache is QuantizedKVCacheProtocol) && !(cache is TurboQuantKVCache)
+}
+
+/// Whether the compiled decode schedule (``CompiledDecodeSchedule``) can run
+/// the attention of a full-attention layer over `cache` between two of its
+/// segments.
+///
+/// The schedule never splits the attention around `KVCache.update`: the
+/// attention step of each model writes the new keys and values and attends
+/// through the whole route of the cache, outside the traces. A quantized
+/// cache thus fits, and its step keeps the segment traces of the plain cache.
+/// Without them an 8-bit cache of Qwen3.8-27B took the per-layer general path,
+/// about 0.4 ms slower at each decode step. A TurboQuant cache keeps the
+/// general path.
+package func fitsCompiledDecodeSchedule(_ cache: KVCache) -> Bool {
+    !(cache is TurboQuantKVCache)
 }
 
 /// Attention utilities that match Python mlx-lm's interface

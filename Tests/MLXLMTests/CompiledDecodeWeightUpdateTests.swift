@@ -95,10 +95,19 @@ final class CompiledDecodeWeightUpdateTests: XCTestCase {
         try assertQwen35TracksWeights(numExperts: 4)
     }
 
-    /// A quantized KV cache falls back to the per-layer traces, which are the
+    /// A TurboQuant KV cache falls back to the per-layer traces, which are the
     /// other place Qwen 3.5 compiles module weights.
     func testQwen35PerLayerTracesTrackWeightUpdates() throws {
         try assertQwen35TracksWeights(numExperts: 4, headDim: 32, usesSegments: false) { model in
+            try model.newCache(parameters: nil).map { cache in
+                cache is MambaCache ? cache : TurboQuantKVCache(bits: 4, seed: 67)
+            }
+        }
+    }
+
+    /// A quantized KV cache keeps the segment traces.
+    func testQwen35QuantizedCacheSegmentsTrackWeightUpdates() throws {
+        try assertQwen35TracksWeights(numExperts: 4, headDim: 32) { model in
             try model.newCache(parameters: nil).map { cache in
                 cache is MambaCache ? cache : QuantizedKVCache(groupSize: 32, bits: 8)
             }

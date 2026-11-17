@@ -73,6 +73,12 @@ struct Qwen35VLMCompiledVerifyTests {
     /// The bits of a quantized key cache.
     private static let quantizedCacheBits = 8
 
+    /// The bits of a TurboQuant key cache.
+    private static let turboQuantCacheBits = 4
+
+    /// The rotation seed of a TurboQuant key cache.
+    private static let turboQuantSeed: UInt64 = 67
+
     /// The positions an image moved each token after it: nonzero, so a verify that took the
     /// positions after the cache offset would not match.
     private static let positionDelta: Int32 = 3
@@ -363,20 +369,44 @@ struct Qwen35VLMCompiledVerifyTests {
         #expect(model.compiledVerifySegmentCount == 0)
     }
 
-    @Test("a verify over a cache that owns its attention takes the general path")
-    func quantizedCacheCompilesNoVerifySegment() throws {
+    @Test("a verify over a TurboQuant cache takes the general path")
+    func turboQuantCacheCompilesNoVerifySegment() throws {
         let model = try Self.kernelModel()
         let prefilled = Self.prefilled(model)
         let cache = prefilled.indices.map { index -> KVCache in
             Self.isLinearLayer(index)
                 ? prefilled[index]
-                : QuantizedKVCache(
-                    groupSize: Self.quantizedCacheGroupSize, bits: Self.quantizedCacheBits)
+                : TurboQuantKVCache(bits: Self.turboQuantCacheBits, seed: Self.turboQuantSeed)
         }
         eval(
             Self.forward(
                 model, tokenCount: CompiledVerifyShape.fewestTokens, cache: cache, compiled: true))
         #expect(model.compiledVerifySegmentCount == 0)
+    }
+
+    @Test("a compiled verify over a quantized cache stays within tolerance of the general path")
+    func quantizedCacheCompiledVerifyMatchesGeneralPath() throws {
+        let model = try Self.kernelModel()
+        let tokenCount = CompiledVerifyShape.fewestTokens
+        let quantizedPrefill = {
+            try Self.prefilled(model).map { cache -> KVCache in
+                guard let simple = cache as? KVCacheSimple else { return cache }
+                return try simple.toQuantized(
+                    groupSize: Self.quantizedCacheGroupSize, bits: Self.quantizedCacheBits)
+            }
+        }
+
+        let generalCache = try quantizedPrefill()
+        let general = Self.forward(
+            model, tokenCount: tokenCount, cache: generalCache, compiled: false)
+        let compiledCache = try quantizedPrefill()
+        let compiled = Self.forward(
+            model, tokenCount: tokenCount, cache: compiledCache, compiled: true)
+
+        let gap = AttentionKernelTolerance.worstGap(compiled, general)
+        #expect(gap <= Self.tolerance, "worst gap \(gap)")
+        #expect(compiledCache.map(\.offset) == generalCache.map(\.offset))
+        #expect(model.compiledVerifySegmentCount > 0)
     }
 
     @Test("a verify without GDN states takes the general path")
