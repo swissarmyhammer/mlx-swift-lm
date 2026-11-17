@@ -50,6 +50,15 @@ comments:
     - evidence: 7 files — new Libraries/MLXLMCommon/QuantizedKVAttentionKernel.swift, Tests/MLXLMTests/QuantizedKVAttentionKernelTests.swift; edited Libraries/MLXLMCommon/{DecodeAttentionKernel,VerifyAttentionKernel,PrefillAttentionKernel}.swift, doc comments in Libraries/MLXLLM/Models/Qwen35.swift and Libraries/MLXVLM/Models/Qwen35.swift. swift build --build-tests: 0 warnings. Tests: MLXLMTests 2379 ST + 1134 XCTest 0 failures; MLXGuidedGenerationTests 78, MLXFoundationModelsTests 496, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11 — all pass. qwencheck 8/8 identical to mn44v3n; KV8 agree 99.6% vs old KV8 path, session/toolchat/restore PASS. Bench: KV8 plain 17.52/20.12/22.61, MTP 10.17/13.23/14.43 ms/tok vs bf16 17.14/19.86/22.84, 9.51/12.52/13.61 -> measured NO-GO (KV8 2.4-3.3x faster MTP than the old KV8 path). swift-format run. Not committed.
     - next: /review; the user decides whether the KV8 kernels ship given the NO-GO vs bf16; follow-up candidate ^2h5wtct (fixed per-step updateQuantized cost).
   timestamp: 2026-11-17T12:26:23.620568+00:00
+- actor: claude-code
+  id: 01m7mqkzrc161hd0v8abzyp350
+  text: |-
+    ### finish iteration 1 — changed (paused before review)
+    - implement: changed — 7 files; measured NO-GO vs bf16 KV (KV8 MTP +5.7/+6.0% at 32k/64k), 2.4–3.3x faster than the old KV8 path
+    - test: green — run inside the implement step: all 5 bundles, 0 failures, 0 warnings (4 pre-existing LFM2 skips, ^gcsvy3f)
+    - commit: e6eb2737 (qwen-perf, local)
+    - review: not yet — paused so ^4zv2rdx (Router chain) goes first; resume with /review 6xcb05k e6eb2737~1..e6eb2737
+  timestamp: 2026-11-17T12:27:28.908542+00:00
 depends_on:
 - 01M7J84FZ3SJF8MB599CDEN2RC
 position_column: doing
