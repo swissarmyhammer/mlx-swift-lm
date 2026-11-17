@@ -2,7 +2,9 @@
 //
 // The quantized projections of a speculative verify of the Qwen3.5
 // vision-language model run through ``MultiRowQuantizedMatvec``, as those of
-// the text model do. Every other call of 3 to 8 rows keeps the matvec of MLX.
+// the text model do, for 4-bit weights and for the 8-bit weights of
+// `mlx-community/Qwen3.8-27B-8bit`. Every other call of 3 to 8 rows keeps the
+// matvec of MLX.
 
 import Foundation
 import MLX
@@ -29,6 +31,10 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
     /// The prompt tokens the cache holds before the verify or the tail.
     private static let promptLength = 8
 
+    /// The `intermediate_size` of the fixture configuration: the outputs of
+    /// the gate and up projections of a dense MLP.
+    private static let intermediateSize = 1024
+
     /// The text configuration of every module of these tests.
     private func textConfiguration() throws -> Qwen35Configuration.TextConfiguration {
         try JSONDecoder().decode(
@@ -43,14 +49,17 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
     ///   - prepared: True to fuse the input projections of each gated delta
     ///     net, as the model loader does.
     ///   - matvecOfMLX: True to give every projection the matvec of MLX.
-    private func makeTarget(prepared: Bool = true, matvecOfMLX: Bool = false) throws -> Qwen35 {
+    ///   - bits: The bits of each quantized weight.
+    private func makeTarget(
+        prepared: Bool = true, matvecOfMLX: Bool = false, bits: Int = Fixture.bits
+    ) throws -> Qwen35 {
         let configuration = try JSONDecoder().decode(
             Qwen35Configuration.self,
             from: Data(
                 Qwen35FixtureJSON.visionLanguage(textConfigJSON: Fixture.textConfigurationJSON)
                     .utf8))
         return try Fixture.seededQuantized(
-            seed: Self.weightSeed, matvecOfMLX: matvecOfMLX,
+            seed: Self.weightSeed, matvecOfMLX: matvecOfMLX, bits: bits,
             filter: { path, _ in path.hasPrefix("language_model") },
             prepare: { target in
                 if prepared {
@@ -85,54 +94,65 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
         return output
     }
 
-    func testMLPRowsOfAVerifyMatchSingleRowDecode() throws {
-        let mlp = try Fixture.seededQuantized(seed: Self.weightSeed) {
-            Qwen35Language.MLP(dimensions: Fixture.hiddenSize, hiddenDimensions: 1024)
+    /// The dense MLP of the fixture on seeded weights quantized to `bits`.
+    private func makeMLP(bits: Int) throws -> Qwen35Language.MLP {
+        try Fixture.seededQuantized(seed: Self.weightSeed, bits: bits) {
+            Qwen35Language.MLP(
+                dimensions: Fixture.hiddenSize, hiddenDimensions: Self.intermediateSize)
         }
-        Fixture.assertVerifyRowsMatchSingleRows(width: Fixture.hiddenSize, "mlp") { [mlp($0)] }
     }
 
-    func testGatedDeltaInputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+    private func assertMLPRowsMatchSingleRows(bits: Int) throws {
+        let mlp = try makeMLP(bits: bits)
+        Fixture.assertVerifyRowsMatchSingleRows(width: Fixture.hiddenSize, "\(bits)-bit mlp") {
+            [mlp($0)]
+        }
+    }
+
+    private func assertGatedDeltaInputRowsMatchSingleRows(bits: Int) throws {
         let configuration = try textConfiguration()
-        let gdn = try Fixture.seededQuantized(seed: Self.weightSeed) {
+        let gdn = try Fixture.seededQuantized(seed: Self.weightSeed, bits: bits) {
             Qwen35Language.GatedDeltaNet(configuration)
         }
         XCTAssertTrue(try gdn.prepareFusedInputProjection())
         Fixture.assertVerifyRowsMatchSingleRows(
-            width: Fixture.hiddenSize, "gdn input projection"
+            width: Fixture.hiddenSize, "\(bits)-bit gdn input projection"
         ) { x in
             let projected = gdn.projectInputs(x, batch: 1, sequence: x.dim(1))
             return [projected.qkv, projected.z, projected.b, projected.a]
         }
     }
 
-    func testGatedDeltaOutputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+    private func assertGatedDeltaOutputRowsMatchSingleRows(bits: Int) throws {
         let configuration = try textConfiguration()
-        let gdn = try Fixture.seededQuantized(seed: Self.weightSeed) {
+        let gdn = try Fixture.seededQuantized(seed: Self.weightSeed, bits: bits) {
             Qwen35Language.GatedDeltaNet(configuration)
         }
-        Fixture.assertVerifyRowsMatchSingleRows(width: gdn.valueDim, "gdn out_proj") {
+        Fixture.assertVerifyRowsMatchSingleRows(width: gdn.valueDim, "\(bits)-bit gdn out_proj") {
             [gdn.projectOutput($0)]
         }
     }
 
-    func testAttentionProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+    private func assertAttentionRowsMatchSingleRows(bits: Int) throws {
         let configuration = try textConfiguration()
-        let attention = try Fixture.seededQuantized(seed: Self.weightSeed) {
+        let attention = try Fixture.seededQuantized(seed: Self.weightSeed, bits: bits) {
             Qwen35Language.Attention(configuration)
         }
         Fixture.assertVerifyRowsMatchSingleRows(
-            width: Fixture.hiddenSize, axis: Fixture.headTokenAxis, "attention q/k/v"
+            width: Fixture.hiddenSize, axis: Fixture.headTokenAxis, "\(bits)-bit attention q/k/v"
         ) { x in
             let projection = attention.projectPreNorm(x)
             let normed = attention.normedHeads(queries: projection.queries, keys: projection.keys)
             return [normed.queries, normed.keys, projection.values]
         }
-        Fixture.assertVerifyRowsMatchSingleRows(width: Fixture.hiddenSize, "attention gate") {
+        Fixture.assertVerifyRowsMatchSingleRows(
+            width: Fixture.hiddenSize, "\(bits)-bit attention gate"
+        ) {
             [attention.projectPreNorm($0).gate]
         }
         let width = Fixture.attentionHeads * Fixture.headDimension
-        Fixture.assertVerifyRowsMatchSingleRows(width: width, "attention o_proj") { gate in
+        Fixture.assertVerifyRowsMatchSingleRows(width: width, "\(bits)-bit attention o_proj") {
+            gate in
             let heads = gate.reshaped(
                 1, gate.dim(1), Fixture.attentionHeads, Fixture.headDimension
             ).transposed(0, 2, 1, 3)
@@ -140,9 +160,55 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
         }
     }
 
-    func testPrefillTailOutsideAVerifyKeepsTheMatvecOfMLX() throws {
-        let target = try makeTarget(prepared: false)
-        let reference = try makeTarget(prepared: false, matvecOfMLX: true)
+    func testMLPRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertMLPRowsMatchSingleRows(bits: Fixture.bits)
+    }
+
+    func testGatedDeltaInputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertGatedDeltaInputRowsMatchSingleRows(bits: Fixture.bits)
+    }
+
+    func testGatedDeltaOutputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertGatedDeltaOutputRowsMatchSingleRows(bits: Fixture.bits)
+    }
+
+    func testAttentionProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertAttentionRowsMatchSingleRows(bits: Fixture.bits)
+    }
+
+    func testEightBitMLPProjectionsRunTheMultiRowKernelInAVerify() throws {
+        let mlp = try makeMLP(bits: Fixture.eightBits)
+        let rows = MLXArray.zeros([1, Fixture.rows, Fixture.hiddenSize], dtype: .bfloat16)
+        let hidden = MLXArray.zeros([1, Fixture.rows, Self.intermediateSize], dtype: .bfloat16)
+
+        let runs = [
+            MultiRowQuantizedMatvec.canRun(rows, mlp.gateProj),
+            MultiRowQuantizedMatvec.canRun(rows, mlp.upProj),
+            MultiRowQuantizedMatvec.canRun(hidden, mlp.downProj),
+        ]
+
+        XCTAssertEqual(runs, [true, true, true])
+    }
+
+    func testEightBitMLPRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertMLPRowsMatchSingleRows(bits: Fixture.eightBits)
+    }
+
+    func testEightBitGatedDeltaInputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertGatedDeltaInputRowsMatchSingleRows(bits: Fixture.eightBits)
+    }
+
+    func testEightBitGatedDeltaOutputProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertGatedDeltaOutputRowsMatchSingleRows(bits: Fixture.eightBits)
+    }
+
+    func testEightBitAttentionProjectionRowsOfAVerifyMatchSingleRowDecode() throws {
+        try assertAttentionRowsMatchSingleRows(bits: Fixture.eightBits)
+    }
+
+    private func assertPrefillTailKeepsTheMatvecOfMLX(bits: Int) throws {
+        let target = try makeTarget(prepared: false, bits: bits)
+        let reference = try makeTarget(prepared: false, matvecOfMLX: true, bits: bits)
 
         for (label, flags) in [("plain", []), ("MTP prefill", [mtpEmitFlagKey])] {
             let got = try callAfterPrompt(target, count: Fixture.rows, flags: flags).logits
@@ -150,12 +216,21 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
             XCTAssertEqual(got.shape, want.shape, label)
             XCTAssertEqual(
                 BitwiseComparison.mismatchCount(got, want), 0,
-                "\(label): a prompt tail of \(Fixture.rows) tokens left the matvec of MLX")
+                "\(bits)-bit \(label): a prompt tail of \(Fixture.rows) tokens left the matvec of MLX"
+            )
         }
     }
 
-    func testVerifyRowsGetTheLogitsOfSingleRowDecode() throws {
-        let target = try makeTarget()
+    func testPrefillTailOutsideAVerifyKeepsTheMatvecOfMLX() throws {
+        try assertPrefillTailKeepsTheMatvecOfMLX(bits: Fixture.bits)
+    }
+
+    func testEightBitPrefillTailOutsideAVerifyKeepsTheMatvecOfMLX() throws {
+        try assertPrefillTailKeepsTheMatvecOfMLX(bits: Fixture.eightBits)
+    }
+
+    private func assertVerifyLogitsMatchSingleRowDecode(bits: Int) throws {
+        let target = try makeTarget(bits: bits)
         let lmHead = try XCTUnwrap(target.languageModel.lmHead)
 
         for tokenCount in Fixture.kernelVerifyTokenCounts {
@@ -163,7 +238,16 @@ final class Qwen35VLMMultiRowProjectionTests: XCTestCase {
                 target, count: tokenCount, flags: [mtpEmitFlagKey, mtpVerifyKeepsSnapshotsKey])
             let hidden = try XCTUnwrap(verify.state?[mtpLastHiddenStatesKey])
             Fixture.assertLogitsMatchSingleRowProjections(
-                verify.logits, hidden: hidden, lmHead: lmHead, "\(tokenCount) tokens")
+                verify.logits, hidden: hidden, lmHead: lmHead,
+                "\(bits)-bit, \(tokenCount) tokens")
         }
+    }
+
+    func testVerifyRowsGetTheLogitsOfSingleRowDecode() throws {
+        try assertVerifyLogitsMatchSingleRowDecode(bits: Fixture.bits)
+    }
+
+    func testEightBitVerifyRowsGetTheLogitsOfSingleRowDecode() throws {
+        try assertVerifyLogitsMatchSingleRowDecode(bits: Fixture.eightBits)
     }
 }

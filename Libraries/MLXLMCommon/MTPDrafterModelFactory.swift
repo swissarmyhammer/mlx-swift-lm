@@ -41,6 +41,10 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
     public static let qwen3_8_27b_mtp_4bit = ModelConfiguration(
         id: "mlx-community/Qwen3.8-27B-MTP-4bit"
     )
+    /// The 8-bit MTP head of `mlx-community/Qwen3.8-27B-8bit`.
+    public static let qwen3_8_27b_mtp_8bit = ModelConfiguration(
+        id: "mlx-community/Qwen3.8-27B-MTP-8bit"
+    )
     public static let lfm2_1_2B_instruct_dspark = ModelConfiguration(
         id: "LiquidAI/LFM2.5-1.2B-Instruct-DSpark"
     )
@@ -56,6 +60,7 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma4_26B_assistant_bf16,
             gemma4_31B_assistant_bf16,
             qwen3_8_27b_mtp_4bit,
+            qwen3_8_27b_mtp_8bit,
             lfm2_1_2B_instruct_dspark,
             lfm2_2_6B_dspark,
             lfm2_8B_A1B_dspark,

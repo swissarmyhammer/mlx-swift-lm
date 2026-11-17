@@ -17,8 +17,9 @@ import XCTest
 enum MultiRowProjectionFixture {
 
     /// A tiny dense Qwen3.5 text configuration whose projections fit the
-    /// kernel after a 4-bit quantization in groups of 64: each input width is
-    /// a multiple of 512 and each output width a multiple of 8, but for the 4
+    /// kernel after a 4-bit or an 8-bit quantization in groups of 64: each
+    /// input width is a multiple of 512 and each output width a multiple of 8,
+    /// but for the 4
     /// outputs of the unfused `in_proj_b` and `in_proj_a`. Layer 0 is a gated
     /// delta net layer, layer 1 a full-attention layer.
     static let textConfigurationJSON = """
@@ -63,8 +64,12 @@ enum MultiRowProjectionFixture {
     /// The group size of the quantized weights.
     static let groupSize = 64
 
-    /// The bits of each quantized weight.
+    /// The bits of each quantized weight, unless a test asks for others.
     static let bits = 4
+
+    /// The bits of each quantized weight of an 8-bit checkpoint, such as
+    /// `mlx-community/Qwen3.8-27B-8bit` and its MTP drafter.
+    static let eightBits = 8
 
     /// The rows of a prompt tail and of each projection check: the fewest
     /// the kernel runs.
@@ -85,10 +90,11 @@ enum MultiRowProjectionFixture {
     ///   - model: The model to quantize.
     ///   - matvecOfMLX: True to quantize each linear layer as an
     ///     ``MLXMatvecQuantizedLinear``.
+    ///   - bits: The bits of each quantized weight.
     ///   - filter: Tells, from its path and the module, if a layer is
     ///     quantized.
     static func quantize(
-        _ model: Module, matvecOfMLX: Bool,
+        _ model: Module, matvecOfMLX: Bool, bits: Int = MultiRowProjectionFixture.bits,
         filter: (String, Module) -> Bool = { _, _ in true }
     ) {
         if matvecOfMLX {
@@ -105,6 +111,7 @@ enum MultiRowProjectionFixture {
     /// - Parameters:
     ///   - seed: The seed of the weights.
     ///   - matvecOfMLX: True to give every projection the matvec of MLX.
+    ///   - bits: The bits of each quantized weight.
     ///   - filter: Tells, from its path and the module, if a layer is
     ///     quantized.
     ///   - prepare: Runs on the quantized module before it is evaluated, as
@@ -112,14 +119,14 @@ enum MultiRowProjectionFixture {
     ///   - make: Builds the module.
     /// - Returns: The quantized module, ready to run.
     static func seededQuantized<M: Module>(
-        seed: UInt64, matvecOfMLX: Bool = false,
+        seed: UInt64, matvecOfMLX: Bool = false, bits: Int = MultiRowProjectionFixture.bits,
         filter: (String, Module) -> Bool = { _, _ in true },
         prepare: (M) throws -> Void = { _ in },
         _ make: () throws -> M
     ) throws -> M {
         let module = try withRandomState(MLXRandom.RandomState(seed: seed), body: make)
         module.update(parameters: module.parameters().mapValues { $0.asType(.bfloat16) })
-        quantize(module, matvecOfMLX: matvecOfMLX, filter: filter)
+        quantize(module, matvecOfMLX: matvecOfMLX, bits: bits, filter: filter)
         try prepare(module)
         module.train(false)
         eval(module)

@@ -352,6 +352,15 @@ final class Qwen38Tests: XCTestCase {
         XCTAssertTrue(MTPDrafterRegistry.shared.contains(id: config.name))
     }
 
+    func testQwen38EightBitMTPDrafterIsRegistered() {
+        XCTAssertTrue(MTPDrafterRegistry.shared.contains(id: "mlx-community/Qwen3.8-27B-MTP-8bit"))
+    }
+
+    func testQwen38EightBitMTPRegistryConfigurationNamesTheEightBitDrafter() {
+        XCTAssertEqual(
+            MTPDrafterRegistry.qwen3_8_27b_mtp_8bit.name, "mlx-community/Qwen3.8-27B-MTP-8bit")
+    }
+
     // MARK: - Weight Sanitization Tests
 
     func testQwen38TextModelSanitizeStripsVisualPrefixes() throws {

@@ -469,6 +469,20 @@ struct Qwen35CheckpointLoadingTests {
         #expect(context.model.parameters().flattened().count == 31)
     }
 
+    /// The layout of `mlx-community/Qwen3.8-27B-MTP-8bit`: a standalone
+    /// Qwen3.8 head whose every projection holds 8-bit weights.
+    @Test
+    func standaloneVLMRegistrationLoadsAnEightBitQwen38Drafter() async throws {
+        await Qwen35VLMMTPRegistration.register()
+        let fixture = try await Qwen35MTPCheckpointFixture(
+            vision: true, standalone: true, bits: 8, family: "qwen3_8")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let context = try await MTPDrafterModelFactory.visionLanguage.load(
+            from: fixture.directory, using: UnusedTokenizerLoader())
+        let bits = Set(context.model.modules().compactMap { ($0 as? QuantizedLinear)?.bits })
+        #expect(bits == [8])
+    }
+
     @Test(arguments: [false, true], ["mtp.", "language_model.mtp."])
     func embeddedFactoryLoadsComponentWithoutTargetWeights(vision: Bool, prefix: String)
         async throws

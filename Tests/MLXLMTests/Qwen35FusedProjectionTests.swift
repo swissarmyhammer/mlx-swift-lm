@@ -4,8 +4,10 @@
 // gate/up projections of each dense MLP of a quantized Qwen3.5 model into one
 // matmul each, when it prepares the model. The fused model gives the bits of
 // the unfused one on the general path, in the compiled decode and in the
-// compiled verify. It keeps the checkpoint keys, and it falls back to the
-// separate projections when an adapter or another quantization replaces one.
+// compiled verify, for 4-bit weights and for the 8-bit weights of
+// `mlx-community/Qwen3.8-27B-8bit`. It keeps the checkpoint keys, and it falls
+// back to the separate projections when an adapter or another quantization
+// replaces one.
 
 import Foundation
 import MLX
@@ -47,6 +49,12 @@ final class Qwen35FusedProjectionTests: XCTestCase {
     /// depends on the output width.
     private static let projectionTokenCounts = [1, 7, 64]
 
+    /// The token counts of a projection check of the gated delta net input
+    /// projection: a decode row and a verify. Its group fuses a prefill too
+    /// (`FusedRows.everyCall`), which may sum in another order than the
+    /// separate projections, at any bit width.
+    private static let vectorCallTokenCounts = [1, 7]
+
     /// The bits of a projection quantized apart from its siblings.
     private static let otherBits = 8
 
@@ -67,6 +75,11 @@ final class Qwen35FusedProjectionTests: XCTestCase {
     /// The vocabulary of the fixture configuration.
     private static let vocabularySize = Qwen35MTPFixture.vocabularySize
 
+    /// The modules of the fixture whose projections the loader fuses: one
+    /// attention, the dense MLP of each of the two layers, and one gated
+    /// delta net.
+    private static let fusedModuleCount = 4
+
     // MARK: - Models
 
     private func llmConfiguration() throws -> Qwen35TextConfiguration {
@@ -80,12 +93,12 @@ final class Qwen35FusedProjectionTests: XCTestCase {
             from: Data(Fixture.textConfigurationJSON.utf8))
     }
 
-    /// The text model on seeded weights, quantized, prepared as the loader
-    /// prepares it when `prepared` is true.
-    private func llmModel(prepared: Bool) throws -> Qwen35TextModel {
+    /// The text model on seeded weights, quantized to `bits`, prepared as the
+    /// loader prepares it when `prepared` is true.
+    private func llmModel(prepared: Bool, bits: Int = Fixture.bits) throws -> Qwen35TextModel {
         let configuration = try llmConfiguration()
         return try Fixture.seededQuantized(
-            seed: Self.weightSeed,
+            seed: Self.weightSeed, bits: bits,
             prepare: { model in
                 if prepared {
                     try model.prepare()
@@ -95,11 +108,13 @@ final class Qwen35FusedProjectionTests: XCTestCase {
     }
 
     /// The language model of the vision-language model on seeded weights,
-    /// quantized, with its projections fused when `prepared` is true.
-    private func vlmModel(prepared: Bool) throws -> Qwen35Language.Model {
+    /// quantized to `bits`, with its projections fused when `prepared` is true.
+    private func vlmModel(prepared: Bool, bits: Int = Fixture.bits) throws
+        -> Qwen35Language.Model
+    {
         let configuration = try vlmConfiguration()
         return try Fixture.seededQuantized(
-            seed: Self.weightSeed,
+            seed: Self.weightSeed, bits: bits,
             prepare: { model in
                 if prepared {
                     try model.prepareFusedProjections()
@@ -136,59 +151,119 @@ final class Qwen35FusedProjectionTests: XCTestCase {
 
     // MARK: - One projection
 
-    func testLLMFusedAttentionProjectionHasTheBitsOfTheSeparateProjections() throws {
-        let attention = try XCTUnwrap(
-            try llmModel(prepared: false).modules().compactMap { $0 as? Qwen35Attention }.first)
-        let inputs = Self.projectionTokenCounts.map(rows)
-        let separate = inputs.map { attention.projectPreRope($0) }
+    /// Asserts that `prepare` fuses the projections, and that the outputs of
+    /// `project` keep their bits for every token count of `tokenCounts`.
+    ///
+    /// - Parameters:
+    ///   - label: The projection in a failure.
+    ///   - prepare: Fuses the projections, and tells if it did.
+    ///   - tokenCounts: The token counts of the inputs.
+    ///   - project: The outputs of the projections of one input.
+    private func assertFusionKeepsTheBits(
+        _ label: String, prepare: () throws -> Bool,
+        tokenCounts: [Int] = Qwen35FusedProjectionTests.projectionTokenCounts,
+        project: (MLXArray) -> [MLXArray],
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let inputs = tokenCounts.map(rows)
+        let separate = inputs.map(project)
 
-        XCTAssertTrue(try attention.prepareFusedProjection())
+        XCTAssertTrue(try prepare(), "\(label): not fused", file: file, line: line)
 
         for (input, want) in zip(inputs, separate) {
-            let got = attention.projectPreRope(input)
             assertBitIdentical(
-                [got.0, got.1, got.2, got.3], [want.0, want.1, want.2, want.3],
-                "LLM q/k/v of \(input.dim(1)) tokens")
+                project(input), want, "\(label) of \(input.dim(1)) tokens", file: file,
+                line: line)
         }
+    }
+
+    private func assertLLMFusedAttentionKeepsTheBits(bits: Int) throws {
+        let attention = try XCTUnwrap(
+            try llmModel(prepared: false, bits: bits).modules()
+                .compactMap { $0 as? Qwen35Attention }.first)
+        try assertFusionKeepsTheBits(
+            "LLM \(bits)-bit q/k/v", prepare: attention.prepareFusedProjection
+        ) { input in
+            let projected = attention.projectPreRope(input)
+            return [projected.0, projected.1, projected.2, projected.3]
+        }
+    }
+
+    private func assertLLMFusedMLPKeepsTheBits(bits: Int) throws {
+        let mlp = try XCTUnwrap(
+            try llmModel(prepared: false, bits: bits).modules()
+                .compactMap { $0 as? Qwen3NextMLP }.first)
+        try assertFusionKeepsTheBits(
+            "LLM \(bits)-bit MLP", prepare: mlp.prepareFusedProjection
+        ) { [mlp($0)] }
+    }
+
+    private func assertVLMFusedAttentionKeepsTheBits(bits: Int) throws {
+        let attention = try XCTUnwrap(
+            try vlmModel(prepared: false, bits: bits).modules()
+                .compactMap { $0 as? Qwen35Language.Attention }.first)
+        try assertFusionKeepsTheBits(
+            "VLM \(bits)-bit q/k/v", prepare: attention.prepareFusedProjection
+        ) { input in
+            let projected = attention.projectPreNorm(input)
+            return [projected.0, projected.1, projected.2, projected.3]
+        }
+    }
+
+    private func assertVLMFusedMLPKeepsTheBits(bits: Int) throws {
+        let mlp = try XCTUnwrap(
+            try vlmModel(prepared: false, bits: bits).modules()
+                .compactMap { $0 as? Qwen35Language.MLP }.first)
+        try assertFusionKeepsTheBits(
+            "VLM \(bits)-bit MLP", prepare: mlp.prepareFusedProjection
+        ) { [mlp($0)] }
+    }
+
+    func testLLMFusedAttentionProjectionHasTheBitsOfTheSeparateProjections() throws {
+        try assertLLMFusedAttentionKeepsTheBits(bits: Fixture.bits)
     }
 
     func testLLMFusedMLPHasTheBitsOfTheSeparateProjections() throws {
-        let mlp = try XCTUnwrap(
-            try llmModel(prepared: false).modules().compactMap { $0 as? Qwen3NextMLP }.first)
-        let inputs = Self.projectionTokenCounts.map(rows)
-        let separate = inputs.map { mlp($0) }
-
-        XCTAssertTrue(try mlp.prepareFusedProjection())
-
-        assertBitIdentical(inputs.map { mlp($0) }, separate, "LLM MLP")
+        try assertLLMFusedMLPKeepsTheBits(bits: Fixture.bits)
     }
 
     func testVLMFusedAttentionProjectionHasTheBitsOfTheSeparateProjections() throws {
-        let attention = try XCTUnwrap(
-            try vlmModel(prepared: false).modules().compactMap { $0 as? Qwen35Language.Attention }
-                .first)
-        let inputs = Self.projectionTokenCounts.map(rows)
-        let separate = inputs.map { attention.projectPreNorm($0) }
-
-        XCTAssertTrue(try attention.prepareFusedProjection())
-
-        for (input, want) in zip(inputs, separate) {
-            let got = attention.projectPreNorm(input)
-            assertBitIdentical(
-                [got.0, got.1, got.2, got.3], [want.0, want.1, want.2, want.3],
-                "VLM q/k/v of \(input.dim(1)) tokens")
-        }
+        try assertVLMFusedAttentionKeepsTheBits(bits: Fixture.bits)
     }
 
     func testVLMFusedMLPHasTheBitsOfTheSeparateProjections() throws {
-        let mlp = try XCTUnwrap(
-            try vlmModel(prepared: false).modules().compactMap { $0 as? Qwen35Language.MLP }.first)
-        let inputs = Self.projectionTokenCounts.map(rows)
-        let separate = inputs.map { mlp($0) }
+        try assertVLMFusedMLPKeepsTheBits(bits: Fixture.bits)
+    }
 
-        XCTAssertTrue(try mlp.prepareFusedProjection())
+    func testEightBitLLMFusedAttentionProjectionHasTheBitsOfTheSeparateProjections() throws {
+        try assertLLMFusedAttentionKeepsTheBits(bits: Fixture.eightBits)
+    }
 
-        assertBitIdentical(inputs.map { mlp($0) }, separate, "VLM MLP")
+    func testEightBitLLMFusedMLPHasTheBitsOfTheSeparateProjections() throws {
+        try assertLLMFusedMLPKeepsTheBits(bits: Fixture.eightBits)
+    }
+
+    func testEightBitVLMFusedAttentionProjectionHasTheBitsOfTheSeparateProjections() throws {
+        try assertVLMFusedAttentionKeepsTheBits(bits: Fixture.eightBits)
+    }
+
+    func testEightBitVLMFusedMLPHasTheBitsOfTheSeparateProjections() throws {
+        try assertVLMFusedMLPKeepsTheBits(bits: Fixture.eightBits)
+    }
+
+    func testEightBitVLMFusedGatedDeltaInputProjectionHasTheBitsOfTheSeparateProjections()
+        throws
+    {
+        let gdn = try XCTUnwrap(
+            try vlmModel(prepared: false, bits: Fixture.eightBits).modules()
+                .compactMap { $0 as? Qwen35Language.GatedDeltaNet }.first)
+        try assertFusionKeepsTheBits(
+            "VLM 8-bit GDN input projection", prepare: gdn.prepareFusedInputProjection,
+            tokenCounts: Self.vectorCallTokenCounts
+        ) { input in
+            let projected = gdn.projectInputs(input, batch: 1, sequence: input.dim(1))
+            return [projected.qkv, projected.z, projected.b, projected.a]
+        }
     }
 
     // MARK: - Lifecycle
@@ -203,21 +278,35 @@ final class Qwen35FusedProjectionTests: XCTestCase {
             Array(repeating: true, count: attention.count + mlps.count))
     }
 
-    func testVLMPrepareFusesEveryAttentionAndDenseMLP() throws {
+    /// The fusion state of each attention, dense MLP and gated delta net input
+    /// projection of a vision-language model quantized to `bits`, after the
+    /// loader prepares it.
+    private func vlmFusionStates(bits: Int) throws -> [Bool] {
         let configuration = try JSONDecoder().decode(
             MLXVLM.Qwen35Configuration.self,
             from: Data(
                 Qwen35FixtureJSON.visionLanguage(textConfigJSON: Fixture.textConfigurationJSON)
                     .utf8))
         let model = try Fixture.seededQuantized(
-            seed: Self.weightSeed, filter: { path, _ in path.hasPrefix("language_model") },
+            seed: Self.weightSeed, bits: bits,
+            filter: { path, _ in path.hasPrefix("language_model") },
             prepare: { try $0.prepare() }, { Qwen35(configuration) })
-        let attention = model.modules().compactMap { $0 as? Qwen35Language.Attention }
-        let mlps = model.modules().compactMap { $0 as? Qwen35Language.MLP }
+        let modules = model.modules()
+        return modules.compactMap { ($0 as? Qwen35Language.Attention)?.hasFusedProjection }
+            + modules.compactMap { ($0 as? Qwen35Language.MLP)?.hasFusedProjection }
+            + modules.compactMap { ($0 as? Qwen35Language.GatedDeltaNet)?.hasFusedInputProjection }
+    }
 
-        XCTAssertEqual(
-            (attention.map(\.hasFusedProjection) + mlps.map(\.hasFusedProjection)),
-            Array(repeating: true, count: attention.count + mlps.count))
+    func testVLMPrepareFusesEveryAttentionAndDenseMLP() throws {
+        let states = try vlmFusionStates(bits: Fixture.bits)
+
+        XCTAssertEqual(states, Array(repeating: true, count: Self.fusedModuleCount))
+    }
+
+    func testEightBitVLMPrepareFusesEveryAttentionDenseMLPAndGatedDeltaInput() throws {
+        let states = try vlmFusionStates(bits: Fixture.eightBits)
+
+        XCTAssertEqual(states, Array(repeating: true, count: Self.fusedModuleCount))
     }
 
     func testPreparationKeepsTheCheckpointKeys() throws {
@@ -291,13 +380,13 @@ final class Qwen35FusedProjectionTests: XCTestCase {
 
     // MARK: - Compiled decode and verify
 
-    /// The hidden states of a decode after the prompt, step by step, then of
-    /// a verify after them, each through `forward`.
+    /// The hidden states of a decode after a prompt of `promptLength` tokens,
+    /// step by step, then of a verify after them, each through `forward`.
     private func decodeThenVerify(
-        cache: [KVCache?],
+        cache: [KVCache?], promptLength: Int,
         _ forward: (MLXArray, [KVCache?], Bool) -> MLXArray
     ) -> [MLXArray] {
-        var outputs = [forward(tokens(Self.promptLength, seed: Self.promptSeed), cache, false)]
+        var outputs = [forward(tokens(promptLength, seed: Self.promptSeed), cache, false)]
         let following = tokens(Self.decodeSteps + Self.verifyTokens, seed: Self.followingSeed)
         for step in 0 ..< Self.decodeSteps {
             outputs.append(forward(following[0..., step ..< (step + 1)], cache, false))
@@ -317,37 +406,122 @@ final class Qwen35FusedProjectionTests: XCTestCase {
         [MambaCache(), KVCacheSimple()]
     }
 
-    private func vlmDecodeThenVerify(_ model: Qwen35Language.Model) -> [MLXArray] {
-        decodeThenVerify(cache: caches()) { inputs, cache, verify in
+    /// The caches of the fixture layers of a run with `kvBits` 8: a gated
+    /// delta net, then attention in the one format the fused quantized-KV
+    /// attention kernels read.
+    private func eightBitKVCaches() -> [KVCache?] {
+        [
+            MambaCache(),
+            QuantizedKVCache(
+                groupSize: QuantizedKVAttentionKernel.groupSize,
+                bits: QuantizedKVAttentionKernel.bits),
+        ]
+    }
+
+    private func vlmDecodeThenVerify(
+        _ model: Qwen35Language.Model, cache: [KVCache?]? = nil,
+        promptLength: Int = Qwen35FusedProjectionTests.promptLength
+    ) -> [MLXArray] {
+        decodeThenVerify(cache: cache ?? caches(), promptLength: promptLength) {
+            inputs, cache, verify in
             model(inputs, cache: cache, keepsSnapshots: verify)
         }
     }
 
     private func llmDecodeThenVerify(_ model: Qwen35TextModel) -> [MLXArray] {
-        decodeThenVerify(cache: caches()) { inputs, cache, verify in
+        decodeThenVerify(cache: caches(), promptLength: Self.promptLength) {
+            inputs, cache, verify in
             model.model.forward(
                 inputs, cache: cache, applyFinalNorm: true, keepsSnapshots: verify)
         }
     }
 
+    /// Asserts that the compiled decode and verify of the fused model ran,
+    /// and gave the hidden states of the unfused model.
+    ///
+    /// - Parameters:
+    ///   - label: The model in a failure.
+    ///   - compiledSegmentCounts: The compiled decode and verify segments of
+    ///     the fused model after its run.
+    ///   - run: The hidden states of a run of the fused model when its
+    ///     argument is true, of the unfused model when it is false.
+    private func assertCompiledStepsKeepTheBits(
+        _ label: String, compiledSegmentCounts: () -> [Int], run: (Bool) throws -> [MLXArray],
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let got = try run(true)
+
+        for count in compiledSegmentCounts() {
+            XCTAssertGreaterThan(count, 0, "\(label): compiled segments", file: file, line: line)
+        }
+        assertBitIdentical(got, try run(false), label, file: file, line: line)
+    }
+
+    /// The compiled decode and verify segments of the whole-step schedule,
+    /// which a model over plain attention caches runs.
+    private static func compiledSegmentCounts(of model: Qwen35Language.Model) -> [Int] {
+        [model.compiledDecodeSegmentCount, model.compiledVerifySegmentCount]
+    }
+
+    /// The compiled gated delta net layers of the per-layer decode, which a
+    /// model over quantized attention caches runs.
+    private static func compiledLayerCounts(of model: Qwen35Language.Model) -> [Int] {
+        [model.compiledGDNTraceCount]
+    }
+
+    private func assertVLMCompiledStepsKeepTheBits(
+        bits: Int, cache: @escaping () -> [KVCache?], promptLength: Int,
+        compiledCounts: (Qwen35Language.Model) -> [Int] = compiledSegmentCounts
+    ) throws {
+        let fused = try vlmModel(prepared: true, bits: bits)
+        try assertCompiledStepsKeepTheBits(
+            "VLM \(bits)-bit step", compiledSegmentCounts: { compiledCounts(fused) }
+        ) { isFused in
+            try vlmDecodeThenVerify(
+                isFused ? fused : vlmModel(prepared: false, bits: bits), cache: cache(),
+                promptLength: promptLength)
+        }
+    }
+
+    private func assertLLMCompiledStepsKeepTheBits(bits: Int) throws {
+        let fused = try llmModel(prepared: true, bits: bits)
+        try assertCompiledStepsKeepTheBits(
+            "LLM \(bits)-bit step",
+            compiledSegmentCounts: {
+                [fused.model.compiledDecodeSegmentCount, fused.model.compiledVerifySegmentCount]
+            }
+        ) { isFused in
+            try llmDecodeThenVerify(isFused ? fused : llmModel(prepared: false, bits: bits))
+        }
+    }
+
     func testVLMCompiledDecodeAndVerifyHaveTheBitsOfTheUnfusedModel() throws {
-        let fused = try vlmModel(prepared: true)
-
-        let got = vlmDecodeThenVerify(fused)
-
-        XCTAssertGreaterThan(fused.compiledDecodeSegmentCount, 0)
-        XCTAssertGreaterThan(fused.compiledVerifySegmentCount, 0)
-        assertBitIdentical(got, vlmDecodeThenVerify(try vlmModel(prepared: false)), "VLM step")
+        try assertVLMCompiledStepsKeepTheBits(
+            bits: Fixture.bits, cache: caches, promptLength: Self.promptLength)
     }
 
     func testLLMCompiledDecodeAndVerifyHaveTheBitsOfTheUnfusedModel() throws {
-        let fused = try llmModel(prepared: true)
+        try assertLLMCompiledStepsKeepTheBits(bits: Fixture.bits)
+    }
 
-        let got = llmDecodeThenVerify(fused)
+    func testEightBitVLMCompiledDecodeAndVerifyHaveTheBitsOfTheUnfusedModel() throws {
+        try assertVLMCompiledStepsKeepTheBits(
+            bits: Fixture.eightBits, cache: caches, promptLength: Self.promptLength)
+    }
 
-        XCTAssertGreaterThan(fused.model.compiledDecodeSegmentCount, 0)
-        XCTAssertGreaterThan(fused.model.compiledVerifySegmentCount, 0)
-        assertBitIdentical(got, llmDecodeThenVerify(try llmModel(prepared: false)), "LLM step")
+    func testEightBitLLMCompiledDecodeAndVerifyHaveTheBitsOfTheUnfusedModel() throws {
+        try assertLLMCompiledStepsKeepTheBits(bits: Fixture.eightBits)
+    }
+
+    /// The prompt is long enough for the fused quantized-KV decode kernel to
+    /// read the cache, thus the steps run the kernels of a `kvBits` 8 run.
+    func testEightBitVLMCompiledStepsOverAnEightBitKVCacheHaveTheBitsOfTheUnfusedModel()
+        throws
+    {
+        try assertVLMCompiledStepsKeepTheBits(
+            bits: Fixture.eightBits, cache: eightBitKVCaches,
+            promptLength: DecodeAttentionKernel.fewestKeys, compiledCounts: Self.compiledLayerCounts
+        )
     }
 
     /// Scales the `k_proj` scales of the attention layer of `model`.
