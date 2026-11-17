@@ -46,14 +46,10 @@ private let lfm25DenseDSpark = ModelConfiguration(
     id: "LiquidAI/LFM2.5-2.6B-DSpark",
     revision: "458cedab07d0f7b2b05700c77e1aa463d43d6f04")
 
-/// The chat template of "What is the capital of France?" in the released
-/// LFM2.5 tokenizer. Literal ids keep the DSpark tests independent of the
-/// tokenizer while they exercise the distribution the draft checkpoints were
-/// trained on.
-private let lfm25CapitalOfFrancePrompt: [Int32] = [
-    124_894, 124_899, 5922, 207, 2992, 355, 278, 5205, 302, 3980,
-    39, 124_900, 207, 124_899, 63_514, 207,
-]
+/// The user turn of the DSpark tests. The target's chat template renders it,
+/// so the tests exercise the distribution the draft checkpoints were trained
+/// on.
+private let dsparkQuestion = "What is the capital of France?"
 
 /// The proposal block of the released DSpark drafters is nine tokens. The
 /// `blockSize` of the iterator includes the verifier bonus token.
@@ -77,8 +73,32 @@ private let lfm25MoEModuleBits = 4
 /// The quantization group size of the pinned sparse checkpoint.
 private let lfm25MoEGroupSize = 64
 
-/// The token ids of the short forward pass of the load tests.
-private let shortPromptTokens: [Int32] = [1, 2, 3]
+/// The tokens of the short forward pass of the load tests.
+private let shortPromptLength = 3
+
+/// The token ids of the short forward pass of the load tests: the first
+/// ``shortPromptLength`` non-zero ids.
+private let shortPromptTokens = (1 ... shortPromptLength).map { Int32($0) }
+
+/// A batch of one sequence of `tokens`, as a model takes it.
+private func batch(_ tokens: [Int32]) -> MLXArray {
+    MLXArray(tokens).reshaped(1, tokens.count)
+}
+
+/// Runs `body` and returns its value with the wall-clock seconds it took.
+private func timed<T>(_ body: () throws -> T) rethrows -> (value: T, seconds: Double) {
+    let start = Date.timeIntervalSinceReferenceDate
+    let value = try body()
+    return (value, Date.timeIntervalSinceReferenceDate - start)
+}
+
+/// Drains `iterator` and returns the tokens it emitted. `iterator` keeps its
+/// final state, thus a caller can read its draft counts afterwards.
+private func drain<Iterator: TokenIteratorProtocol>(_ iterator: inout Iterator) -> [Int] {
+    var tokens: [Int] = []
+    while let token = iterator.next() { tokens.append(token) }
+    return tokens
+}
 
 // MARK: - Benchmark shape
 
@@ -131,15 +151,15 @@ private struct ForwardThroughput {
 /// ``BenchmarkShape/decodeTokens`` single-token decode steps, after a warm-up
 /// outside the timed samples.
 private func measureForwardThroughput(_ model: any LanguageModel) throws -> ForwardThroughput {
+    /// A prompt of `count` filler tokens.
+    func prompt(count: Int) -> MLXArray {
+        batch([Int32](repeating: BenchmarkShape.promptToken, count: count))
+    }
+    let decodeStep = batch([BenchmarkShape.decodeToken])
+
     // Warm Metal kernels and allocator state outside the timed samples.
     let warmCache = try model.newCache(parameters: nil)
-    let warmUpTokens = BenchmarkShape.warmUpPromptTokens
-    eval(
-        model(
-            MLXArray([Int32](repeating: BenchmarkShape.promptToken, count: warmUpTokens))
-                .reshaped(1, warmUpTokens),
-            cache: warmCache))
-    let decodeStep = MLXArray([BenchmarkShape.decodeToken]).reshaped(1, 1)
+    eval(model(prompt(count: BenchmarkShape.warmUpPromptTokens), cache: warmCache))
     for _ in 0 ..< BenchmarkShape.warmUpDecodeSteps {
         eval(model(decodeStep, cache: warmCache))
     }
@@ -148,24 +168,43 @@ private func measureForwardThroughput(_ model: any LanguageModel) throws -> Forw
     let promptTokens = BenchmarkShape.promptTokens
     let decodeTokens = BenchmarkShape.decodeTokens
     let cache = try model.newCache(parameters: nil)
-    let prompt = MLXArray(
-        [Int32](repeating: BenchmarkShape.promptToken, count: promptTokens)
-    ).reshaped(1, promptTokens)
+    let timedPrompt = prompt(count: promptTokens)
 
-    let prefillStart = Date.timeIntervalSinceReferenceDate
-    eval(model(prompt, cache: cache))
-    let prefillSeconds = Date.timeIntervalSinceReferenceDate - prefillStart
-
-    let decodeStart = Date.timeIntervalSinceReferenceDate
-    for _ in 0 ..< decodeTokens {
-        eval(model(decodeStep, cache: cache))
-    }
-    let decodeSeconds = Date.timeIntervalSinceReferenceDate - decodeStart
+    let prefillSeconds = timed { eval(model(timedPrompt, cache: cache)) }.seconds
+    let decodeSeconds = timed {
+        for _ in 0 ..< decodeTokens {
+            eval(model(decodeStep, cache: cache))
+        }
+    }.seconds
 
     return ForwardThroughput(
         prefillTokensPerSecond: Double(promptTokens) / prefillSeconds,
         decodeTokensPerSecond: Double(decodeTokens) / decodeSeconds,
         peakGiB: Double(Memory.peakMemory) / BenchmarkShape.bytesPerGiB)
+}
+
+/// Expects a finite, positive rate.
+private func expectPositiveRate(
+    _ rate: Double, sourceLocation: SourceLocation = #_sourceLocation
+) {
+    #expect(rate.isFinite && rate > 0, sourceLocation: sourceLocation)
+}
+
+/// Measures the forward throughput of `model`, prints it under `label`, and
+/// expects a finite, positive prefill and decode rate.
+private func benchmarkForward(
+    _ model: any LanguageModel, label: String,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws {
+    let throughput = try measureForwardThroughput(model)
+    // swiftlint:disable:next no_direct_standard_out_logs — a benchmark; its output is the measurement.
+    print(
+        String(
+            format: "%@: prefill %.2f tok/s, decode %.2f tok/s, peak %.2f GiB",
+            label, throughput.prefillTokensPerSecond, throughput.decodeTokensPerSecond,
+            throughput.peakGiB))
+    expectPositiveRate(throughput.prefillTokensPerSecond, sourceLocation: sourceLocation)
+    expectPositiveRate(throughput.decodeTokensPerSecond, sourceLocation: sourceLocation)
 }
 
 // MARK: - Tests
@@ -198,7 +237,7 @@ struct LFM2CheckpointIntegrationTests {
         let model = try #require(context.model as? LFM2Model)
         let config = model.configuration
 
-        let tokens = MLXArray(shortPromptTokens).reshaped(1, shortPromptTokens.count)
+        let tokens = batch(shortPromptTokens)
         let logits = model(tokens, cache: try model.newCache(parameters: nil))
         eval(logits)
         #expect(logits.shape == [1, shortPromptTokens.count, config.vocabularySize])
@@ -218,18 +257,7 @@ struct LFM2CheckpointIntegrationTests {
         let model = LFM2Model(config)
         try await loadWeights(modelDirectory: directory, model: model)
 
-        let throughput = try measureForwardThroughput(model)
-        // swiftlint:disable:next no_direct_standard_out_logs — a benchmark; its output is the measurement.
-        print(
-            String(
-                format: "LFM2.5-2.6B bf16: prefill %.2f tok/s, decode %.2f tok/s, peak %.2f GiB",
-                throughput.prefillTokensPerSecond, throughput.decodeTokensPerSecond,
-                throughput.peakGiB))
-
-        #expect(
-            throughput.prefillTokensPerSecond.isFinite && throughput.prefillTokensPerSecond > 0)
-        #expect(
-            throughput.decodeTokensPerSecond.isFinite && throughput.decodeTokensPerSecond > 0)
+        try benchmarkForward(model, label: "LFM2.5-2.6B bf16")
     }
 
     /// Loads the mixed-precision sparse checkpoint through the factory, which
@@ -257,7 +285,7 @@ struct LFM2CheckpointIntegrationTests {
 
         let cache = try model.newCache(parameters: nil)
         let logits = model(
-            MLXArray(shortPromptTokens).reshaped(1, shortPromptTokens.count), cache: cache)
+            batch(shortPromptTokens), cache: cache)
         eval(logits)
         #expect(logits.shape == [1, shortPromptTokens.count, lfm25MoEVocabularySize])
         #expect(cache.count == lfm25MoELayerCount)
@@ -276,19 +304,7 @@ struct LFM2CheckpointIntegrationTests {
             model: model,
             perLayerQuantization: baseConfig.perLayerQuantization)
 
-        let throughput = try measureForwardThroughput(model)
-        // swiftlint:disable:next no_direct_standard_out_logs — a benchmark; its output is the measurement.
-        print(
-            String(
-                format:
-                    "LFM2.5-8B-A1B mixed 4/8-bit: prefill %.2f tok/s, decode %.2f tok/s, peak %.2f GiB",
-                throughput.prefillTokensPerSecond, throughput.decodeTokensPerSecond,
-                throughput.peakGiB))
-
-        #expect(
-            throughput.prefillTokensPerSecond.isFinite && throughput.prefillTokensPerSecond > 0)
-        #expect(
-            throughput.decodeTokensPerSecond.isFinite && throughput.decodeTokensPerSecond > 0)
+        try benchmarkForward(model, label: "LFM2.5-8B-A1B mixed 4/8-bit")
     }
 
     /// Loads the dense target and its DSpark drafter, then checks that greedy
@@ -296,8 +312,7 @@ struct LFM2CheckpointIntegrationTests {
     /// draft tokens.
     @Test
     func dsparkCheckpointLoadsAndGenerates() async throws {
-        let (target, drafter) = try await loadDSparkPair()
-        let input = LMInput(tokens: MLXArray(lfm25CapitalOfFrancePrompt))
+        let (target, drafter, input) = try await loadDSparkPair()
         let parameters = GenerateParameters(
             maxTokens: BenchmarkShape.dsparkParityTokens, temperature: 0)
         var baseline = try TokenIterator(
@@ -306,10 +321,8 @@ struct LFM2CheckpointIntegrationTests {
             input: input, mainModel: target.model, drafter: drafter,
             parameters: parameters, blockSize: lfm25DSparkBlockSize)
 
-        var expected: [Int] = []
-        while let token = baseline.next() { expected.append(token) }
-        var tokens: [Int] = []
-        while let token = iterator.next() { tokens.append(token) }
+        let expected = drain(&baseline)
+        let tokens = drain(&iterator)
 
         // swiftlint:disable:next no_direct_standard_out_logs — a benchmark; its output is the measurement.
         print(
@@ -328,51 +341,64 @@ struct LFM2CheckpointIntegrationTests {
     /// to reduce thermal-ordering bias.
     @Test
     func dsparkCheckpointPerformance() async throws {
-        let (target, drafter) = try await loadDSparkPair()
-        let input = LMInput(tokens: MLXArray(lfm25CapitalOfFrancePrompt))
+        let (target, drafter, input) = try await loadDSparkPair()
 
+        /// One timed sample of a decode path.
         struct Sample {
+            /// The seconds of iterator initialization, including prompt prefill.
             let prefillSeconds: Double
+            /// The seconds of token consumption.
             let decodeSeconds: Double
+            /// The draft tokens the verifier accepted; 0 for the baseline.
             let accepted: Int
+            /// The draft tokens the drafter proposed; 0 for the baseline.
             let proposed: Int
         }
 
-        func baseline(tokens: Int) throws -> Sample {
+        /// Times one decode path: iterator initialization (including prompt
+        /// prefill) as prefill, then the drain of `tokens` tokens as decode.
+        func sample<Iterator: TokenIteratorProtocol>(
+            tokens: Int,
+            makeIterator: (GenerateParameters) throws -> Iterator,
+            drafts: (Iterator) -> (accepted: Int, proposed: Int)
+        ) throws -> Sample {
             let parameters = GenerateParameters(maxTokens: tokens, temperature: 0)
-            let initializeStart = Date.timeIntervalSinceReferenceDate
-            var iterator = try TokenIterator(
-                input: input, model: target.model, parameters: parameters)
-            let prefillSeconds = Date.timeIntervalSinceReferenceDate - initializeStart
-            let decodeStart = Date.timeIntervalSinceReferenceDate
-            var count = 0
-            while iterator.next() != nil { count += 1 }
-            Stream.defaultStream.synchronize()
+            let (initialized, prefillSeconds) = try timed { try makeIterator(parameters) }
+            var iterator = initialized
+            let (count, decodeSeconds) = timed {
+                let count = drain(&iterator).count
+                Stream.defaultStream.synchronize()
+                return count
+            }
+            #expect(count == tokens)
+            let (accepted, proposed) = drafts(iterator)
             return Sample(
-                prefillSeconds: prefillSeconds,
-                decodeSeconds: Date.timeIntervalSinceReferenceDate - decodeStart,
-                accepted: 0,
-                proposed: count)
+                prefillSeconds: prefillSeconds, decodeSeconds: decodeSeconds,
+                accepted: accepted, proposed: proposed)
+        }
+
+        func baseline(tokens: Int) throws -> Sample {
+            try sample(
+                tokens: tokens,
+                makeIterator: {
+                    try TokenIterator(input: input, model: target.model, parameters: $0)
+                },
+                // The baseline drafts nothing, thus it proposes and accepts no tokens.
+                drafts: { _ in (accepted: 0, proposed: 0) })
         }
 
         func speculative(tokens: Int) throws -> Sample {
-            let parameters = GenerateParameters(maxTokens: tokens, temperature: 0)
-            let initializeStart = Date.timeIntervalSinceReferenceDate
-            var iterator = try MTPSpeculativeTokenIterator(
-                input: input, mainModel: target.model, drafter: drafter,
-                parameters: parameters, blockSize: lfm25DSparkBlockSize)
-            let prefillSeconds = Date.timeIntervalSinceReferenceDate - initializeStart
-            let decodeStart = Date.timeIntervalSinceReferenceDate
-            var count = 0
-            while iterator.next() != nil { count += 1 }
-            Stream.defaultStream.synchronize()
-            #expect(iterator.passthroughReason == nil)
-            #expect(count == tokens)
-            return Sample(
-                prefillSeconds: prefillSeconds,
-                decodeSeconds: Date.timeIntervalSinceReferenceDate - decodeStart,
-                accepted: iterator.acceptedCount,
-                proposed: iterator.proposedCount)
+            try sample(
+                tokens: tokens,
+                makeIterator: {
+                    try MTPSpeculativeTokenIterator(
+                        input: input, mainModel: target.model, drafter: drafter,
+                        parameters: $0, blockSize: lfm25DSparkBlockSize)
+                },
+                drafts: { iterator in
+                    #expect(iterator.passthroughReason == nil)
+                    return (accepted: iterator.acceptedCount, proposed: iterator.proposedCount)
+                })
         }
 
         // Compile kernels and realize lazy checkpoint tensors before sampling.
@@ -382,12 +408,15 @@ struct LFM2CheckpointIntegrationTests {
 
         let measuredTokens = BenchmarkShape.dsparkMeasuredTokens
         let repetitions = BenchmarkShape.dsparkRepetitions
-        var baselineSamples: [Sample] = []
-        var speculativeSamples: [Sample] = []
-        for _ in 0 ..< repetitions {
-            baselineSamples.append(try baseline(tokens: measuredTokens))
-            speculativeSamples.append(try speculative(tokens: measuredTokens))
+        // Each repetition times the baseline, then the speculative path.
+        let samples = try (0 ..< repetitions).map { _ in
+            (
+                baseline: try baseline(tokens: measuredTokens),
+                speculative: try speculative(tokens: measuredTokens)
+            )
         }
+        let baselineSamples = samples.map(\.baseline)
+        let speculativeSamples = samples.map(\.speculative)
 
         func median(_ values: [Double]) -> Double {
             values.sorted()[values.count / 2]
@@ -402,24 +431,29 @@ struct LFM2CheckpointIntegrationTests {
                 abs($0.decodeSeconds - speculativeSeconds)
                     < abs($1.decodeSeconds - speculativeSeconds)
             })
-        let baselineTPS = Double(measuredTokens) / baselineSeconds
-        let speculativeTPS = Double(measuredTokens) / speculativeSeconds
+        let baselineTokensPerSecond = Double(measuredTokens) / baselineSeconds
+        let speculativeTokensPerSecond = Double(measuredTokens) / speculativeSeconds
         // swiftlint:disable:next no_direct_standard_out_logs — a benchmark; its output is the measurement.
         print(
             String(
                 format:
                     "LFM2 DSpark benchmark (block %d, median of %d): baseline %.2f tok/s, DSpark %.2f tok/s, speedup %.2fx, prefill %.3fs -> %.3fs, acceptance %d/%d",
-                lfm25DSparkBlockSize, repetitions, baselineTPS, speculativeTPS,
-                speculativeTPS / baselineTPS, baselinePrefill, speculativePrefill,
+                lfm25DSparkBlockSize, repetitions, baselineTokensPerSecond,
+                speculativeTokensPerSecond,
+                speculativeTokensPerSecond / baselineTokensPerSecond, baselinePrefill,
+                speculativePrefill,
                 representative.accepted, representative.proposed))
 
-        #expect(baselineTPS.isFinite && baselineTPS > 0)
-        #expect(speculativeTPS.isFinite && speculativeTPS > 0)
+        expectPositiveRate(baselineTokensPerSecond)
+        expectPositiveRate(speculativeTokensPerSecond)
         #expect(representative.proposed > 0)
     }
 
-    /// Loads the dense bf16 target and the DSpark drafter that pairs with it.
-    private func loadDSparkPair() async throws -> (ModelContext, LFM2DSparkDraftModel) {
+    /// Loads the dense bf16 target and the DSpark drafter that pairs with it,
+    /// and renders ``dsparkQuestion`` through the target's chat template.
+    private func loadDSparkPair() async throws -> (
+        target: ModelContext, drafter: LFM2DSparkDraftModel, input: LMInput
+    ) {
         await LFM2DSparkRegistration.register()
         let targetDirectory = try await checkpointDirectory(lfm25DenseBF16)
         let target = try await LLMModelFactory.shared.load(
@@ -427,6 +461,8 @@ struct LFM2CheckpointIntegrationTests {
         let draftContext = try await MTPDrafterModelFactory.shared.load(
             from: downloader, using: tokenizerLoader, configuration: lfm25DenseDSpark)
         let drafter = try #require(draftContext.model as? LFM2DSparkDraftModel)
-        return (target, drafter)
+        let input = try await target.processor.prepare(
+            input: UserInput(chat: [.user(dsparkQuestion)]))
+        return (target, drafter, input)
     }
 }

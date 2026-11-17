@@ -36,6 +36,27 @@ comments:
     - [x] disallowed-constructs-swift no_direct_standard_out_logs: each of the 4 benchmark `print` lines has `// swiftlint:disable:next no_direct_standard_out_logs — a benchmark; its output is the measurement.`, the same form the profile file uses.
     Evidence: IntegrationTesting build-for-testing reports TEST BUILD SUCCEEDED with no warnings in either file, and VerifyAttentionBlockPassProfileTests passes (12.4 s, run under bench.lock).
   timestamp: 2026-11-17T15:31:51.362573+00:00
+- actor: claude-code
+  id: 01m7n3as0y01hgfycanzw0zfcg
+  text: |-
+    ## Review Findings (2026-11-17 09:31) — round 2, review sha f5e9306d..896e531f
+
+    Tool defect: the code-hygiene tool rules read file contents from the main checkout (/Users/wballard/github/swissarmyhammer/mlx-swift-lm), not from this worktree. They report "found no file at IntegrationTesting/IntegrationTestingTests/LFM2CheckpointIntegrationTests.swift", and they re-raise the 9 round-1 findings at Tests/MLXLMTests/LFM2DSparkTests.swift:302-469, LFM2MoeRoutingTests.swift:364 and LFM2Tests.swift:264. Those lines do not exist in the reviewed commit: the files there are 297, 277 and 187 lines long, and the change deleted that code. Under the written `review sha` scope rule ("Report a finding only on a line the change added or modified"), they are not findings on this change.
+
+    To get real coverage, I ran `review file` on the worktree files themselves, through the path `.claude/worktrees/agent-a04c80279e15f5723/...`, and fixed each finding it raised on new lines:
+    - [x] `LFM2CheckpointIntegrationTests.swift:355` `swift/naming-clarity` — the baseline `Sample.proposed` was filled with the emitted count. The baseline now records `proposed: 0` (it drafts nothing), checks `count == tokens`, and `Sample` documents its fields.
+    - [x] `:54`, `:55`, `:81` `code-hygiene/magic-numbers-swift` — the literal prompt ids are gone; the DSpark tests now render `dsparkQuestion` through the target's chat template (`processor.prepare`). `shortPromptTokens` is derived from `shortPromptLength`.
+    - [x] `:288` `reuse/reuse` — the copied throughput expectations now go through `expectPositiveRate`, which is reused by the DSpark benchmark (`:431` reuse finding).
+    - [x] `:365` `reuse/reuse` — `baseline`/`speculative` share one generic `sample(tokens:makeIterator:drafts:)`.
+    - [x] `:400` `swift/immutability` — the samples are built with `map` over the repetitions, which keeps the alternating order.
+    - [x] `:151`, `:272` `reuse/reuse` — one `batch(_:)` helper builds every token batch.
+    - [x] `:361` `reuse/reuse` — one `timed(_:)` stopwatch serves `measureForwardThroughput` and `sample`.
+    - [x] `:236` `reuse/reuse` — `benchmarkForward(_:label:)` holds the measure/print/expect pipeline of both forward benchmarks.
+    - [x] `:437` `swift/naming-clarity` — `baselineTPS`/`speculativeTPS` are renamed to `…TokensPerSecond`.
+    - [x] `:316`, `:318` `swift/immutability` — `drain(_:)` (inout, so the speculative iterator keeps its counts) replaces the `var` accumulators.
+    - [x] Fixed the same cause across the file: in Tests/MLXLMTests/LFM2DSparkTests.swift the 4 `[Int]()` inits are now `: [Int] = []`.
+    Final `review file` results: LFM2CheckpointIntegrationTests.swift 0 findings; VerifyAttentionBlockPassProfileTests.swift 0 findings. IntegrationTesting build-for-testing reports TEST BUILD SUCCEEDED with no warnings in the changed files.
+  timestamp: 2026-11-17T15:52:10.014398+00:00
 position_column: review
 position_ordinal: '80'
 title: 'MLXLMTests: 4 LFM2 real-checkpoint XCTests skip behind environment variables (from upstream merge 6dc1e4e7)'

@@ -248,9 +248,9 @@ struct LFM2DSparkMetalTests {
             input: input, mainModel: target, drafter: drafter,
             mainCache: speculativeCache, parameters: parameters, blockSize: 4)
 
-        var expected = [Int]()
+        var expected: [Int] = []
         while let token = baseline.next() { expected.append(token) }
-        var output = [Int]()
+        var output: [Int] = []
         while let token = iterator.next() { output.append(token) }
 
         #expect(output == expected)
@@ -285,9 +285,9 @@ struct LFM2DSparkMetalTests {
             input: input, mainModel: target, drafter: drafter,
             parameters: parameters, blockSize: 4)
 
-        var expected = [Int]()
+        var expected: [Int] = []
         while let token = baseline.next() { expected.append(token) }
-        var output = [Int]()
+        var output: [Int] = []
         while let token = iterator.next() { output.append(token) }
 
         #expect(output == expected)
