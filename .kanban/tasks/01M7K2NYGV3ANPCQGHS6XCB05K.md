@@ -59,6 +59,34 @@ comments:
     - commit: e6eb2737 (qwen-perf, local)
     - review: not yet — paused so ^4zv2rdx (Router chain) goes first; resume with /review 6xcb05k e6eb2737~1..e6eb2737
   timestamp: 2026-11-17T12:27:28.908542+00:00
+- actor: claude-code
+  id: 01m7mzhvvm231zq6sgvecas80c
+  text: |-
+    ### review — findings
+    - evidence: review sha e6eb2737~1..e6eb2737 — 1 finding (1 confirmed, 1 refuted): Libraries/MLXLMCommon/VerifyAttentionKernel.swift:243 (duplication/duplication)
+    - next: implement the 2026-11-17 08:42 Review Findings item (shared block-pass input/output-shape helper for DecodeAttentionKernel.blockAttention and VerifyAttentionKernel.blockResults), then re-review
+  timestamp: 2026-11-17T14:46:07.988750+00:00
+- actor: claude-code
+  id: 01m7mzj7vmm5645hkfva471mw6
+  text: |-
+    ### finish iteration 2 — findings
+    - implement: (iteration 1 work, e6eb2737, now on stable 59a2ec21)
+    - test: green — merged-stable run: 5 bundles 0 failures
+    - commit: e6eb2737
+    - review: findings — Libraries/MLXLMCommon/VerifyAttentionKernel.swift:243
+  timestamp: 2026-11-17T14:46:20.276811+00:00
+- actor: claude-code
+  id: 01m7mzxccmthmesj6mm52tjf72
+  text: 'Finding fix (08:42 duplication): added `DecodeAttentionKernel.BlockPass` (inputs = [queries] + cache + [scale, Int32 keysPerBlock]; outputShapes = [[rows, blocks, headDim], [rows, blocks], [rows, blocks]] with rows = batch*queryHeads*tokens; static outputDTypes = 3x float32). `DecodeAttentionKernel.blockAttention` and `VerifyAttentionKernel.blockResults` both build it; dispatch, template and grid stay per caller. Decode''s old rows formula omitted tokens, but every decode caller has tokens == 1 (canRun / the QuantizedKVAttentionKernel guard), so the shapes are identical. `QuantizedKVAttentionKernel` only calls those two helpers, so it had no copy of its own. `PrefillAttentionKernel` (single pass, no block keys, one output) and TurboQuantKernels (other kernels) are not the same construction, so they were left alone. New unit suite Tests/MLXLMTests/AttentionBlockPassTests.swift (4 tests): RED was a compile failure (no `BlockPass` member).'
+  timestamp: 2026-11-17T14:52:25.364101+00:00
+- actor: claude-code
+  id: 01m7n1sefzck17rh9wdb77sfnc
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Libraries/MLXLMCommon/DecodeAttentionKernel.swift (new `DecodeAttentionKernel.BlockPass`; `blockAttention` uses it), Libraries/MLXLMCommon/VerifyAttentionKernel.swift (`blockResults` uses it), new Tests/MLXLMTests/AttentionBlockPassTests.swift (4 tests). `swift build --build-tests` reports 0 warnings. `xcrun xctest MLXLMTests.xctest`: 2386 Swift Testing tests passed (3 known issues already existed), 1134 XCTest tests with 0 failures and 4 skips (the LFM2 skips of ^gcsvy3f, already there). qwencheck.sh -> qwen_golden_6xcb05k_dedup.json: 8/8 MATCH against mn44v3n, SESSION PASS, TOOLCHAT PASS x2, CHECK PASS. swift-format run. 08:42 finding flipped to [x]. Not committed.
+    - note: the first qwencheck attempt was killed by the coordinator. Its wrapper held bench.lock around qwencheck.sh, which takes the same lock, so the two runs deadlocked. Run qwencheck.sh bare; it locks itself.
+    - next: /review
+  timestamp: 2026-11-17T15:25:13.599442+00:00
 depends_on:
 - 01M7J84FZ3SJF8MB599CDEN2RC
 position_column: doing
@@ -75,3 +103,19 @@ title: 'Qwen3.8: fused 8-bit-KV decode and verify attention kernel for head dim 
 ## Acceptance
 - [x] KV8 plain and MTP decode at 32k and 64k faster than bf16 KV (qwenbench.sh with QWEN_KV_BITS=8), or a recorded NO-GO. (Recorded NO-GO: KV8 is +1.3%/-1.0% plain and +5.7%/+6.0% MTP vs bf16 at 32k/64k; see the bench comment.)
 - [x] Default path unchanged (`qwencheck.sh` identical). #qwen-perf-candidate
+
+## Review Findings (2026-11-17 08:42)
+
+> Scope: `review sha e6eb2737~1..e6eb2737` — reviewed the diffs only — lines this change added or modified. 7 file(s) reviewed, 8 not reviewed.
+
+> 8 file(s) not reviewed — no validator matched:
+> - `.kanban/tags/01M7MN11N3E31GPN2171AFMS4R.jsonl` — no validator matches this file
+> - `.kanban/tags/01M7MN11N3E31GPN2171AFMS4R.yaml` — no validator matches this file
+> - `.kanban/tasks/01M7K2NYGV3ANPCQGHS6XCB05K.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7K2NYGV3ANPCQGHS6XCB05K.md` — no validator matches this file
+> - `.kanban/tasks/01M7MN11N2WF3WAGFG84ZV2RDX.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7MN11N2WF3WAGFG84ZV2RDX.md` — no validator matches this file
+> - `.kanban/tasks/01M7MQHMPR2Q29682892H5WTCT.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7MQHMPR2Q29682892H5WTCT.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/VerifyAttentionKernel.swift:243` `duplication/duplication` — The kernel input list `[queries] + cache + [MLXArray([scale]), MLXArray([Int32(keysPerBlock(...))])]`, with its `outputShapes` and `grid` setup, is written a second time in `VerifyAttentionKernel.blockResults`, duplicating `DecodeAttentionKernel.blockAttention`. The two copies can drift apart, for example in the scale or block-keys packing, which would break decode and verify differently. Extract one helper that builds the block-pass inputs, the `blockKeys` array, and the block output shapes from `(queries, cache, scale, keyCount, blocks)`, and call it from both `DecodeAttentionKernel.blockAttention` and `VerifyAttentionKernel.blockResults`. Keep the kernel dispatch and the grid per caller, since those differ.

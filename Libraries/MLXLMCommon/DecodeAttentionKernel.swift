@@ -386,6 +386,49 @@ package enum DecodeAttentionKernel {
         (keys + blocks - 1) / blocks
     }
 
+    /// The inputs and the outputs of a block pass, which the decode, the
+    /// verify and the quantized block passes share. Each caller keeps its own
+    /// kernel dispatch and grid.
+    struct BlockPass {
+        /// The dtype of each block result: the weighted values, the largest
+        /// scores and the weight sums.
+        static let outputDTypes: [DType] = [.float32, .float32, .float32]
+
+        /// The kernel inputs: the queries, the arrays of the cache, the score
+        /// factor and the keys of each block but the last.
+        let inputs: [MLXArray]
+
+        /// The shapes of the block results: the weighted values, shape
+        /// `(rows, blocks, headDim)`, the largest scores and the weight sums,
+        /// shape `(rows, blocks)`. The rows are the `(batch, queryHeads,
+        /// tokens)` rows of the queries.
+        let outputShapes: [[Int]]
+
+        /// The inputs and the outputs of a block pass.
+        ///
+        /// - Parameters:
+        ///   - queries: The queries, shape `(batch, queryHeads, tokens,
+        ///     headDim)`.
+        ///   - cache: The arrays the rows part of the kernel reads, in the
+        ///     order of the kernel inputs.
+        ///   - scale: The factor each score takes before the softmax.
+        ///   - keyCount: The number of cached keys.
+        ///   - blocks: The block count.
+        init(queries: MLXArray, cache: [MLXArray], scale: Float, keyCount: Int, blocks: Int) {
+            let rows =
+                queries.dim(HeadRowsAxis.batch) * queries.dim(HeadRowsAxis.head)
+                * queries.dim(HeadRowsAxis.row)
+            inputs =
+                [queries] + cache + [
+                    MLXArray([scale]),
+                    MLXArray([Int32(keysPerBlock(keys: keyCount, blocks: blocks))]),
+                ]
+            outputShapes = [
+                [rows, blocks, queries.dim(HeadRowsAxis.width)], [rows, blocks], [rows, blocks],
+            ]
+        }
+    }
+
     /// Tells if the kernels run one attention call: the default device is
     /// the GPU, one query token reads at least ``fewestKeys`` keys, and the
     /// head shape fits the registers of one lane.
@@ -472,23 +515,20 @@ package enum DecodeAttentionKernel {
         _ kernel: MLXFast.MLXFastKernel, cache: [MLXArray], queries: MLXArray, kvHeads: Int,
         keyCount: Int, scale: Float
     ) -> MLXArray {
-        let rows = queries.dim(HeadRowsAxis.batch) * queries.dim(HeadRowsAxis.head)
-        let headDim = queries.dim(HeadRowsAxis.width)
         let blocks = blockCount(keys: keyCount)
+        let pass = BlockPass(
+            queries: queries, cache: cache, scale: scale, keyCount: keyCount, blocks: blocks)
         let blockThreads = blockSimdGroups * metalSimdWidth
         let results = kernel(
-            [queries] + cache + [
-                MLXArray([scale]),
-                MLXArray([Int32(keysPerBlock(keys: keyCount, blocks: blocks))]),
-            ],
+            pass.inputs,
             template: [
-                ("T", queries.dtype), ("DIM", headDim),
+                ("T", queries.dtype), ("DIM", queries.dim(HeadRowsAxis.width)),
                 ("GQA", queries.dim(HeadRowsAxis.head) / kvHeads),
             ],
             grid: (blockThreads, queries.dim(HeadRowsAxis.batch) * kvHeads, blocks),
             threadGroup: (blockThreads, 1, 1),
-            outputShapes: [[rows, blocks, headDim], [rows, blocks], [rows, blocks]],
-            outputDTypes: [.float32, .float32, .float32])
+            outputShapes: pass.outputShapes,
+            outputDTypes: BlockPass.outputDTypes)
         return combine(results, like: queries)
     }
 

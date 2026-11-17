@@ -235,24 +235,15 @@ package enum VerifyAttentionKernel {
     ) -> [MLXArray] {
         let keyCount = keys.dim(HeadRowsAxis.row)
         let blocks = blocks ?? blockCount(keys: keyCount)
-        let rows =
-            queries.dim(HeadRowsAxis.batch) * queries.dim(HeadRowsAxis.head)
-            * queries.dim(HeadRowsAxis.row)
+        let pass = DecodeAttentionKernel.BlockPass(
+            queries: queries, cache: cache, scale: scale, keyCount: keyCount, blocks: blocks)
         return PrefillAttentionKernel.run(
-            kernel,
-            inputs: [queries] + cache + [
-                MLXArray([scale]),
-                MLXArray([
-                    Int32(DecodeAttentionKernel.keysPerBlock(keys: keyCount, blocks: blocks))
-                ]),
-            ],
+            kernel, inputs: pass.inputs,
             queries: queries, keys: keys, causal: causal, keyBlocks: blocks,
             headsPerThreadgroup: headsPerThreadgroup(
                 queryHeads: queries.dim(HeadRowsAxis.head), kvHeads: keys.dim(HeadRowsAxis.head)),
-            outputShapes: [
-                [rows, blocks, queries.dim(HeadRowsAxis.width)], [rows, blocks], [rows, blocks],
-            ],
-            outputDTypes: [.float32, .float32, .float32])
+            outputShapes: pass.outputShapes,
+            outputDTypes: DecodeAttentionKernel.BlockPass.outputDTypes)
     }
 
     /// The scaled dot-product attention of a call: these kernels when they
