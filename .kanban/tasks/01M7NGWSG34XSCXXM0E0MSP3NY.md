@@ -76,8 +76,8 @@ comments:
     - evidence: `review file` on 6 files (Slot, Store, MLXLanguageModel, PromptCacheSpoolTestSupport, ExecutorPromptCacheCheckpointTests, ExecutorPromptCacheSpoolTests); 18 confirmed / 9 refuted. 2 blocking findings on lines changed this round: Tests/MLXFoundationModelsTests/ExecutorPromptCacheCheckpointTests.swift:326 (reuse/reuse, the stale-pass plan repeats the prompt-end plan call), :350 (duplication/duplication, the checkpoint key is built twice, here and at :192). 16 non-blocking findings on unchanged or moved lines were appended to ^36745n1. Strong capture in Store.spill: no finding; the cycle lasts only while a job is queued or running, and there is no deadlock. Slot commit fix and new spool tests are clean. No tests run (GPU reserved).
     - next: fix the two test findings in ExecutorPromptCacheCheckpointTests.swift, then re-review that file.
   timestamp: 2026-11-17T23:47:05.954319+00:00
-position_column: review
-position_ordinal: '8380'
+position_column: done
+position_ordinal: ffffc780
 title: Prompt-cache disk budget is zero when macOS reports 0 important-usage capacity
 ---
 ## Why

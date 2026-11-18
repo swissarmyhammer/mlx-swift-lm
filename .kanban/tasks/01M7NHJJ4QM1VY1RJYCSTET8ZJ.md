@@ -27,8 +27,8 @@ comments:
     - evidence: review file on ExecutorPromptCacheVolumeCapacity.swift (0 findings, 1 refuted), MLXLanguageModel+Availability.swift (0), FreeDiskSpaceTests.swift (0). `swift build --build-tests` exit 0. No tests run (GPU reserved); work is uncommitted.
     - next: commit together with ^0msp3ny; the Acceptance unit-test box is still unchecked by the implementer.
   timestamp: 2026-11-17T23:06:11.371682+00:00
-position_column: review
-position_ordinal: '8180'
+position_column: done
+position_ordinal: ffffc880
 title: MLXLanguageModel.freeDiskSpaceBytes reads only important-usage capacity (0 on this Mac)
 ---
 ## Why
