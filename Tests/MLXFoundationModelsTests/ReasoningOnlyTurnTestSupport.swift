@@ -21,12 +21,12 @@ enum ReasoningOnlyTurnFixture {
         .text(Transcript.TextSegment(content: content))
     }
 
-    /// A prompt entry that asks `question`.
+    /// A prompt entry that asks `question`, built by ``TestTranscript/prompt(_:)``.
     ///
     /// - Parameter question: The text of the prompt.
     /// - Returns: The entry.
     static func prompt(_ question: String) -> Transcript.Entry {
-        .prompt(Transcript.Prompt(segments: [text(question)], responseFormat: nil))
+        TestTranscript.prompt(question)
     }
 
     /// The reasoning entry of the turn.

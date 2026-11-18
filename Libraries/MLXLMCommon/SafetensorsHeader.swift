@@ -56,9 +56,15 @@ public struct SafetensorsHeader: Equatable, Sendable {
     /// The number of bytes of the length prefix at the start of the file.
     public static let lengthPrefixByteCount = MemoryLayout<UInt64>.size
 
+    /// The number of bytes of one mebibyte.
+    private static let bytesPerMebibyte: UInt64 = 1 << 20
+
+    /// The largest header length ``read(from:)`` accepts, in mebibytes.
+    private static let maximumHeaderMebibytes: UInt64 = 512
+
     /// The largest header length ``read(from:)`` accepts. A length prefix past it is not the
     /// prefix of a safetensors file.
-    public static let maximumHeaderByteCount: UInt64 = 512 * 1024 * 1024
+    public static let maximumHeaderByteCount = maximumHeaderMebibytes * bytesPerMebibyte
 
     /// The header key of the metadata, which is not a tensor.
     private static let metadataKey = "__metadata__"

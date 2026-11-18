@@ -432,30 +432,34 @@ private func safetensorsContainQuantizedWeights(_ files: [URL]) throws -> Bool {
     return false
 }
 
+/// The name suffix of the scales tensor that a quantized layer stores beside its weight.
+private let quantizedScalesTensorSuffix = ".scales"
+
+/// Whether the safetensors file at `url` holds a quantized weight: a tensor whose name ends in
+/// ``quantizedScalesTensorSuffix``.
+///
+/// The header is read with ``SafetensorsHeader/read(from:)``, so this check and the weight
+/// load share one header parser and one length cap.
+///
+/// - Parameter url: The safetensors file.
+/// - Returns: `true` when the header names a scales tensor. `false` when it names none, and
+///   also when the header cannot be read.
+/// - Throws: The error of opening the file.
 package func safetensorsFileContainsQuantizedWeights(_ url: URL) throws -> Bool {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
 
-    guard let headerSizeData = try handle.read(upToCount: 8),
-        headerSizeData.count == 8
-    else {
+    let header: SafetensorsHeader
+    do {
+        header = try SafetensorsHeader.read(from: handle)
+    } catch {
+        // Lenient on purpose, unlike the strict weight load: this check only guards the
+        // conversion against a source that is already quantized. A header it cannot read is
+        // not evidence of quantization, so it answers `false` and the conversion's own load
+        // reports the broken file.
         return false
     }
-
-    let headerSize = headerSizeData.enumerated().reduce(UInt64(0)) { result, byte in
-        result | (UInt64(byte.element) << UInt64(byte.offset * 8))
-    }
-    guard headerSize <= 100 * 1024 * 1024,
-        let headerData = try handle.read(upToCount: Int(headerSize)),
-        headerData.count == Int(headerSize),
-        let json = try? JSONSerialization.jsonObject(with: headerData) as? [String: Any]
-    else {
-        return false
-    }
-
-    return json.keys.contains { key in
-        key.hasSuffix(".scales")
-    }
+    return header.tensors.contains { $0.name.hasSuffix(quantizedScalesTensorSuffix) }
 }
 
 package func copyModelConversionFiles(

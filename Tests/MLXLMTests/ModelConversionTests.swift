@@ -286,6 +286,64 @@ final class ModelConversionTests: XCTestCase {
         }
     }
 
+    func testQuantizedWeightsCheckFindsAScalesTensor() throws {
+        let file = try makeTemporaryDirectory().appendingPathComponent("model.safetensors")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+
+        try writeSafetensorsHeader(
+            ["layer.scales": ["dtype": "F16", "shape": [1], "data_offsets": [0, 2]]], to: file)
+
+        XCTAssertTrue(try safetensorsFileContainsQuantizedWeights(file))
+    }
+
+    func testQuantizedWeightsCheckIgnoresAHeaderWithoutScales() throws {
+        let file = try makeTemporaryDirectory().appendingPathComponent("model.safetensors")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+
+        try writeSafetensorsHeader(
+            ["layer.weight": ["dtype": "F16", "shape": [1], "data_offsets": [0, 2]]], to: file)
+
+        XCTAssertFalse(try safetensorsFileContainsQuantizedWeights(file))
+    }
+
+    func testQuantizedWeightsCheckReturnsFalseForAFileShorterThanTheLengthPrefix() throws {
+        let file = try makeTemporaryDirectory().appendingPathComponent("model.safetensors")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+
+        try write("abc", to: file)
+
+        XCTAssertFalse(try safetensorsFileContainsQuantizedWeights(file))
+    }
+
+    func testQuantizedWeightsCheckReturnsFalseForAHeaderThatIsNotJSON() throws {
+        let file = try makeTemporaryDirectory().appendingPathComponent("model.safetensors")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+
+        try writeSafetensorsHeaderBytes(Data("not json .scales".utf8), to: file)
+
+        XCTAssertFalse(try safetensorsFileContainsQuantizedWeights(file))
+    }
+
+    /// The check reads the header with ``SafetensorsHeader/read(from:)``, so a header that
+    /// parser rejects — here a `.scales` entry with no byte range — reads as not quantized.
+    func testQuantizedWeightsCheckReturnsFalseForAHeaderTheSharedParserRejects() throws {
+        let file = try makeTemporaryDirectory().appendingPathComponent("model.safetensors")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+
+        try writeSafetensorsHeader(["layer.scales": ["dtype": "F16"]], to: file)
+
+        XCTAssertFalse(try safetensorsFileContainsQuantizedWeights(file))
+    }
+
+    func testQuantizedWeightsCheckThrowsForAMissingFile() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        XCTAssertThrowsError(
+            try safetensorsFileContainsQuantizedWeights(
+                directory.appendingPathComponent("missing.safetensors")))
+    }
+
     func testSourceConfigurationIsQuantizedDetectsBothConfigKeys() throws {
         let quantization = try XCTUnwrap(
             """
@@ -442,7 +500,11 @@ final class ModelConversionTests: XCTestCase {
     }
 
     private func writeSafetensorsHeader(_ header: [String: Any], to url: URL) throws {
-        let headerData = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+        try writeSafetensorsHeaderBytes(
+            JSONSerialization.data(withJSONObject: header, options: [.sortedKeys]), to: url)
+    }
+
+    private func writeSafetensorsHeaderBytes(_ headerData: Data, to url: URL) throws {
         var data = Data()
         var headerSize = UInt64(headerData.count).littleEndian
         withUnsafeBytes(of: &headerSize) { data.append(contentsOf: $0) }
