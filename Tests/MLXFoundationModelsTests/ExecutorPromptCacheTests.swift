@@ -32,28 +32,7 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     /// `ExecutorPromptCacheSpoolTests` reads the files. A writer that writes
     /// nothing thus leaves no file, and two stores never share a file name.
     private func makeStore() -> ExecutorPromptCacheStore {
-        ExecutorPromptCacheStore(
-            directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("ExecutorPromptCacheTests-\(UUID().uuidString)"),
-            writer: { _, _ in })
-    }
-
-    /// A transcript whose first entry carries `firstEntryID`.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func transcript(firstEntryID: String, turns: Int = 1) -> Transcript {
-        var entries: [Transcript.Entry] = [
-            .prompt(
-                Transcript.Prompt(
-                    id: firstEntryID,
-                    segments: [.text(Transcript.TextSegment(content: "first turn"))]))
-        ]
-        for turn in 1 ..< turns {
-            entries.append(
-                .prompt(
-                    Transcript.Prompt(
-                        segments: [.text(Transcript.TextSegment(content: "turn \(turn)"))])))
-        }
-        return Transcript(entries: entries)
+        PromptCacheTestStore.withoutWrites(folderNamed: "ExecutorPromptCacheTests")
     }
 
     // MARK: - Naming the session
@@ -62,10 +41,10 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func everyTurnOfOneSessionNamesTheSameCache() throws {
         let firstTurn = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
+            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.modelID, kvCache: nil)
         let secondTurn = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: transcript(firstEntryID: "session-a", turns: 3)),
+            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a", turns: 3)),
             modelID: Self.modelID, kvCache: nil)
 
         #expect(firstTurn == secondTurn)
@@ -76,10 +55,10 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func twoSessionsNeverNameTheSameCache() throws {
         let first = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
+            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.modelID, kvCache: nil)
         let second = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: transcript(firstEntryID: "session-b")),
+            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-b")),
             modelID: Self.modelID, kvCache: nil)
 
         #expect(first != second)
@@ -89,10 +68,10 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func oneSessionOnTwoModelsNamesTwoCaches() throws {
         let onOneModel = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
+            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.modelID, kvCache: nil)
         let onAnother = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: transcript(firstEntryID: "session-a")),
+            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.otherModelID, kvCache: nil)
 
         #expect(onOneModel != onAnother)

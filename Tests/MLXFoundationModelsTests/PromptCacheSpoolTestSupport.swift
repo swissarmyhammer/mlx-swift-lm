@@ -54,6 +54,64 @@ enum PromptCacheSpoolFixtureVolume {
     }
 }
 
+/// Builds the prompt cache stores of the test suites, each in a temporary folder of its own.
+///
+/// Every suite builds its stores here, thus the folder scheme and the writer of the tests are
+/// kept in one place.
+enum PromptCacheTestStore {
+
+    /// Makes the name of a new temporary folder for one store. The folder is not made: a
+    /// store that writes makes it at its first write.
+    ///
+    /// - Parameter name: The start of the folder name, usually the name of the suite.
+    /// - Returns: The URL `<temporary directory>/<name>-<UUID>`.
+    static func folder(named name: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(name)-\(UUID().uuidString)")
+    }
+
+    /// A store in `folder` whose writer writes nothing.
+    ///
+    /// A suite that reads the memory tier alone takes such a store: it leaves no file, and two
+    /// stores never share a file name. Its memory budget comes from the device.
+    ///
+    /// - Parameter folder: The spool folder of the store.
+    /// - Returns: The store.
+    static func withoutWrites(in folder: URL) -> ExecutorPromptCacheStore {
+        ExecutorPromptCacheStore(directory: folder, writer: { _, _ in })
+    }
+
+    /// A store in a new temporary folder whose writer writes nothing, as
+    /// ``withoutWrites(in:)`` makes it.
+    ///
+    /// - Parameter name: The start of the folder name, usually the name of the suite.
+    /// - Returns: The store.
+    static func withoutWrites(folderNamed name: String) -> ExecutorPromptCacheStore {
+        withoutWrites(in: folder(named: name))
+    }
+}
+
+/// The comparison of arrays that the prompt cache suites share.
+enum PromptCacheArrayExpectations {
+
+    /// Records an issue unless two lists of arrays have equal shapes, types and values.
+    ///
+    /// - Parameters:
+    ///   - actual: The arrays to check.
+    ///   - expected: The arrays they must equal.
+    ///   - label: The name of the comparison, for the issue text.
+    static func expectEqual(
+        _ actual: [MLXArray], _ expected: [MLXArray], _ label: String = "arrays"
+    ) {
+        #expect(actual.count == expected.count, "\(label): array count")
+        for (index, (lhs, rhs)) in zip(actual, expected).enumerated() {
+            #expect(lhs.shape == rhs.shape, "\(label) array \(index): shape")
+            #expect(lhs.dtype == rhs.dtype, "\(label) array \(index): type")
+            #expect(arrayEqual(lhs, rhs).item(Bool.self), "\(label) array \(index): values")
+        }
+    }
+}
+
 /// The fixture arrays, in the order of their first values.
 enum PromptCacheSpoolFixtureArray: Int {
     case keys
@@ -112,8 +170,7 @@ extension PromptCacheSpoolFixtures {
     ///
     /// - Returns: The URL of the folder.
     static func temporaryDirectory() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(Self.self)-\(UUID().uuidString)")
+        PromptCacheTestStore.folder(named: "\(Self.self)")
     }
 
     /// Makes a store in `directory` with the budget `budget`. Its disk budget comes from

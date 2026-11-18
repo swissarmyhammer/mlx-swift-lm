@@ -126,10 +126,8 @@ struct DeepSeekV4ReasoningLevelRenderTests {
         let request = makeExecutorRequest(
             transcript: ScriptedSessionModel.transcript(firstEntryID: Self.sessionID),
             contextOptions: contextOptions)
-        let store = ExecutorPromptCacheStore(
-            directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("DeepSeekV4ReasoningLevelRenderTests-\(UUID().uuidString)"),
-            writer: { _, _ in })
+        let store = PromptCacheTestStore.withoutWrites(
+            folderNamed: "DeepSeekV4ReasoningLevelRenderTests")
 
         _ = try await ScriptedExecutorPass.respond(to: request, model: model, inside: store)
 

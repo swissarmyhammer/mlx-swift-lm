@@ -165,20 +165,6 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         return count
     }
 
-    /// Records an issue unless two lists of arrays have equal shapes, types and values.
-    ///
-    /// - Parameters:
-    ///   - actual: The arrays to check.
-    ///   - expected: The arrays they must equal.
-    private static func expectEqual(_ actual: [MLXArray], _ expected: [MLXArray]) {
-        #expect(actual.count == expected.count)
-        for (lhs, rhs) in zip(actual, expected) {
-            #expect(lhs.shape == rhs.shape)
-            #expect(lhs.dtype == rhs.dtype)
-            #expect(arrayEqual(lhs, rhs).item(Bool.self))
-        }
-    }
-
     // MARK: - Writers a test controls
 
     /// A writer that counts the writes that run at the same time.
@@ -322,7 +308,8 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         let written = try ExecutorPromptCacheFile.read(
             from: writer.copy(of: url), key: Self.key("a"), templates: [KVCacheSimple()])
         #expect(written.caches[0].offset == Self.tokens.count)
-        Self.expectEqual(written.caches[0].state, Self.entry().caches[0].state)
+        PromptCacheArrayExpectations.expectEqual(
+            written.caches[0].state, Self.entry().caches[0].state)
     }
 
     @Test("a spill that a check-out and a later spill replaced leaves only the later file")

@@ -172,11 +172,8 @@ enum ExecutorReasoningConversation {
     /// - Returns: The transcript.
     static func transcript(_ fixture: Qwen35MTPFixture, after first: MTPTurn?) -> Transcript {
         var entries: [Transcript.Entry] = [
-            .instructions(
-                Transcript.Instructions(
-                    id: sessionID, segments: textSegments(fixture.text(for: instructions)),
-                    toolDefinitions: [])),
-            .prompt(Transcript.Prompt(segments: textSegments(fixture.text(for: firstPrompt)))),
+            TestTranscript.instructions(id: sessionID, fixture.text(for: instructions)),
+            TestTranscript.prompt(fixture.text(for: firstPrompt)),
         ]
         if let first {
             entries += [
@@ -186,21 +183,14 @@ enum ExecutorReasoningConversation {
                     Transcript.Response(
                         assetIDs: [],
                         segments: first.responseText.isEmpty
-                            ? [] : textSegments(first.responseText))),
-                .reasoning(Transcript.Reasoning(segments: textSegments(first.reasoningText))),
-                .prompt(
-                    Transcript.Prompt(segments: textSegments(fixture.text(for: followUpPrompt)))),
+                            ? [] : TestTranscript.textSegments(first.responseText))),
+                .reasoning(
+                    Transcript.Reasoning(
+                        segments: TestTranscript.textSegments(first.reasoningText))),
+                TestTranscript.prompt(fixture.text(for: followUpPrompt)),
             ]
         }
         return Transcript(entries: entries)
-    }
-
-    /// One text segment of `text`.
-    ///
-    /// - Parameter text: The text of the segment.
-    /// - Returns: The segments.
-    private static func textSegments(_ text: String) -> [Transcript.Segment] {
-        [.text(Transcript.TextSegment(content: text))]
     }
 
     /// Runs the first pass and its follow-up of the reasoning model of `setup` in a store of
@@ -213,8 +203,7 @@ enum ExecutorReasoningConversation {
     /// - Throws: The error of a pass, or an issue when the first pass checked in nothing.
     static func converse(_ setup: Setup, speculates: Bool) async throws -> Passes {
         let weights = try makeScriptedWeightsDirectory()
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "ExecutorReasoningConversation-\(UUID().uuidString)")
+        let folder = PromptCacheTestStore.folder(named: "ExecutorReasoningConversation")
         defer {
             try? FileManager.default.removeItem(at: weights)
             try? FileManager.default.removeItem(at: folder)
@@ -223,7 +212,7 @@ enum ExecutorReasoningConversation {
             weights: weights, capabilities: [.reasoning], resolver: setup.resolver,
             tokenizer: setup.tokenizer, toolCallFormat: .qwen35,
             speculativeDecoding: speculates ? try Qwen35MTPFixture.makeSpeculativeDecoding() : nil)
-        let store = ExecutorPromptCacheStore(directory: folder, writer: { _, _ in })
+        let store = PromptCacheTestStore.withoutWrites(in: folder)
         let key = PromptCacheTestKey.make(
             modelID: .init(model.modelID), sessionID: .init(sessionID))
         let options = GenerationOptions(

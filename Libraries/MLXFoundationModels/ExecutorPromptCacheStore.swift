@@ -100,15 +100,12 @@ actor ExecutorPromptCacheStore {
     private(set) lazy var diskBudgetBytes: Int = Self.defaultDiskBudgetBytes(
         availableCapacity: availableCapacity(ofVolumeOf: directory))
 
-    /// The checked-in entries, by session.
-    private var entries: [ExecutorPromptCacheKey: ExecutorPromptCacheEntry] = [:]
-
-    /// The checked-in keys, least recently used first.
-    private var usageOrder: [ExecutorPromptCacheKey] = []
+    /// The checked-in entries, by session, least recently used first.
+    private var entries = ExecutorPromptCacheLRUTier<ExecutorPromptCacheEntry>()
 
     /// The sum of ``ExecutorPromptCacheEntry/byteCount`` over the checked-in
     /// entries.
-    private(set) var retainedByteCount = 0
+    var retainedByteCount: Int { entries.byteCount }
 
     /// How many sessions hold a cache. Read by tests.
     var retainedSessionCount: Int { entries.count }
@@ -125,7 +122,7 @@ actor ExecutorPromptCacheStore {
     private let capacityReader: ExecutorPromptCacheVolumeCapacityReader
 
     /// One entry whose write to disk has not ended.
-    private struct SpillingEntry {
+    private struct SpillingEntry: ExecutorPromptCacheTierRecord {
 
         /// The entry. It is still in memory, thus a check-out gives it back.
         let entry: ExecutorPromptCacheEntry
@@ -142,16 +139,17 @@ actor ExecutorPromptCacheStore {
         let byteCount: Int
     }
 
-    /// The entries whose write to disk has not ended, by session.
-    private var spilling: [ExecutorPromptCacheKey: SpillingEntry] = [:]
+    /// The entries whose write to disk has not ended, by session. A write
+    /// ends on its own, not by a budget, thus this tier keeps no usage order.
+    private var spilling = ExecutorPromptCacheTier<SpillingEntry>()
 
     /// The sum of the bytes of the entries in ``spilling``. They are still in
     /// memory until their writes end, but they are not in
     /// ``retainedByteCount``.
-    private(set) var spillingByteCount = 0
+    var spillingByteCount: Int { spilling.byteCount }
 
     /// One spill file on disk.
-    private struct DiskFile {
+    private struct DiskFile: ExecutorPromptCacheTierRecord {
 
         /// The file and its session.
         let handle: ExecutorPromptCacheSpilledHandle
@@ -160,14 +158,12 @@ actor ExecutorPromptCacheStore {
         let byteCount: Int
     }
 
-    /// The files of the entries on disk, by session.
-    private var onDisk: [ExecutorPromptCacheKey: DiskFile] = [:]
-
-    /// The keys on disk, least recently used first.
-    private var diskUsageOrder: [ExecutorPromptCacheKey] = []
+    /// The files of the entries on disk, by session, least recently used
+    /// first.
+    private var onDisk = ExecutorPromptCacheLRUTier<DiskFile>()
 
     /// The sum of the sizes of the files in ``onDisk``: the known disk total.
-    private(set) var diskByteCount = 0
+    var diskByteCount: Int { onDisk.byteCount }
 
     /// The three byte totals of the store, read in one step: ``retainedByteCount``,
     /// ``spillingByteCount`` and ``diskByteCount``.
@@ -432,13 +428,13 @@ actor ExecutorPromptCacheStore {
     ///   for `key`.
     func checkOut(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheCheckout {
         removeStaleFoldersAtFirstUse()
-        if let entry = removeEntry(key) {
+        if let entry = entries.remove(key) {
             return .memory(entry)
         }
-        if let spill = removeSpill(of: key) {
+        if let spill = spilling.remove(key) {
             return .memory(spill.entry)
         }
-        if let file = removeDiskRecord(of: key) {
+        if let file = onDisk.remove(key) {
             return .spilled(file.handle)
         }
         return .none
@@ -481,9 +477,7 @@ actor ExecutorPromptCacheStore {
             spill(key, entry)
             return
         }
-        entries[key] = entry
-        usageOrder.append(key)
-        retainedByteCount += entry.byteCount
+        entries.insert(entry, for: key)
         evictToBudget()
     }
 
@@ -532,8 +526,8 @@ actor ExecutorPromptCacheStore {
     ///
     /// - Parameter key: the session to remove.
     func remove(_ key: ExecutorPromptCacheKey) {
-        removeEntry(key)
-        removeSpill(of: key)
+        entries.remove(key)
+        spilling.remove(key)
         deleteDiskFile(of: key)
     }
 
@@ -547,26 +541,11 @@ actor ExecutorPromptCacheStore {
         }
     }
 
-    /// Removes the entry of `key` from the entries, the usage order and the
-    /// byte total.
-    ///
-    /// - Parameter key: the session of the entry.
-    /// - Returns: the entry, or nil when the store holds none for `key`.
-    @discardableResult
-    private func removeEntry(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheEntry? {
-        guard let entry = entries.removeValue(forKey: key) else { return nil }
-        usageOrder.removeAll { $0 == key }
-        retainedByteCount -= entry.byteCount
-        return entry
-    }
-
     /// Removes the least recently used entries until the total is at or below
     /// ``memoryBudgetBytes``, and gives each one to ``spill(_:_:)``.
     private func evictToBudget() {
-        while retainedByteCount > memoryBudgetBytes, let oldest = usageOrder.first,
-            let entry = removeEntry(oldest)
-        {
-            spill(oldest, entry)
+        while let oldest = entries.removeLeastRecentlyUsed(whileOver: memoryBudgetBytes) {
+            spill(oldest.key, oldest.record)
         }
     }
 
@@ -576,43 +555,28 @@ actor ExecutorPromptCacheStore {
     /// - Parameter handle: the file and its session.
     private func recordDiskFile(_ handle: ExecutorPromptCacheSpilledHandle) {
         deleteDiskFile(of: handle.key)
-        let file = DiskFile(handle: handle, byteCount: Self.fileByteCount(at: handle.url))
-        onDisk[handle.key] = file
-        diskUsageOrder.append(handle.key)
-        diskByteCount += file.byteCount
+        onDisk.insert(
+            DiskFile(handle: handle, byteCount: Self.fileByteCount(at: handle.url)),
+            for: handle.key)
         evictDiskToBudget()
-    }
-
-    /// Removes the disk record of `key` from the records, the usage order and
-    /// the disk total. The file stays.
-    ///
-    /// - Parameter key: the session of the file.
-    /// - Returns: the record, or nil when no file of `key` is on disk.
-    @discardableResult
-    private func removeDiskRecord(of key: ExecutorPromptCacheKey) -> DiskFile? {
-        guard let file = onDisk.removeValue(forKey: key) else { return nil }
-        diskUsageOrder.removeAll { $0 == key }
-        diskByteCount -= file.byteCount
-        return file
     }
 
     /// Removes the disk record of `key` and deletes its file.
     ///
     /// - Parameter key: the session of the file.
     private func deleteDiskFile(of key: ExecutorPromptCacheKey) {
-        guard let file = removeDiskRecord(of: key) else { return }
+        guard let file = onDisk.remove(key) else { return }
         ExecutorPromptCacheFile.removeFile(at: file.handle.url)
     }
 
     /// Deletes the least recently used files until the known disk total is at
     /// or below ``diskBudgetBytes``, and logs each one.
     private func evictDiskToBudget() {
-        while diskByteCount > diskBudgetBytes, let oldest = diskUsageOrder.first,
-            let file = onDisk[oldest]
-        {
+        while let oldest = onDisk.removeLeastRecentlyUsed(whileOver: diskBudgetBytes) {
             ExecutorPromptCacheLog.info(
-                ExecutorPromptCacheReport.diskEvictionLine(key: oldest, byteCount: file.byteCount))
-            deleteDiskFile(of: oldest)
+                ExecutorPromptCacheReport.diskEvictionLine(
+                    key: oldest.key, byteCount: oldest.record.byteCount))
+            ExecutorPromptCacheFile.removeFile(at: oldest.record.handle.url)
         }
     }
 
@@ -669,8 +633,7 @@ actor ExecutorPromptCacheStore {
             entry: entry, input: input, generation: lastGeneration, byteCount: entry.byteCount)
         let url = directory.appendingPathComponent(
             ExecutorPromptCacheFile.fileName(for: key, generation: spill.generation))
-        spilling[key] = spill
-        spillingByteCount += spill.byteCount
+        spilling.insert(spill, for: key)
         pendingWriteCount += 1
         spoolWriter.enqueue(
             ExecutorPromptCacheSpillJob(input: spill.input, url: url) { result, duration in
@@ -679,19 +642,6 @@ actor ExecutorPromptCacheStore {
                     generation: spill.generation, byteCount: spill.byteCount,
                     result: result, duration: duration)
             })
-    }
-
-    /// Removes the spill of `key` that has not ended, and its bytes from
-    /// ``spillingByteCount``. The write of that spill then finds another
-    /// generation, or none, and only deletes its own file.
-    ///
-    /// - Parameter key: the session of the spill.
-    /// - Returns: the spill, or nil when no write of `key` is in the queue.
-    @discardableResult
-    private func removeSpill(of key: ExecutorPromptCacheKey) -> SpillingEntry? {
-        guard let spill = spilling.removeValue(forKey: key) else { return nil }
-        spillingByteCount -= spill.byteCount
-        return spill
     }
 
     /// Records the end of one write.
@@ -715,7 +665,7 @@ actor ExecutorPromptCacheStore {
         defer { finishPendingWrite() }
         let isCurrent = spilling[handle.key]?.generation == generation
         if isCurrent {
-            removeSpill(of: handle.key)
+            spilling.remove(handle.key)
         }
         let outcome: ExecutorPromptCacheSpillOutcome
         switch (result, isCurrent) {
@@ -745,6 +695,9 @@ actor ExecutorPromptCacheStore {
         }
     }
 }
+
+/// An entry in memory is a record of the memory tier of the store, which counts its bytes.
+extension ExecutorPromptCacheEntry: ExecutorPromptCacheTierRecord {}
 
 /// What one write of the spool gave.
 enum ExecutorPromptCacheSpillOutcome: CustomStringConvertible {

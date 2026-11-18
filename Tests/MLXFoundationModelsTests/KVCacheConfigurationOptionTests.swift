@@ -177,11 +177,7 @@ struct KVCacheConfigurationPromptCacheTests: PromptCachePlanFixtures {
     /// These tests read the memory tier alone. A writer that writes nothing thus leaves no file,
     /// and two stores never share a file name.
     private func makeStore() -> ExecutorPromptCacheStore {
-        ExecutorPromptCacheStore(
-            directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent(
-                    "KVCacheConfigurationPromptCacheTests-\(UUID().uuidString)"),
-            writer: { _, _ in })
+        PromptCacheTestStore.withoutWrites(folderNamed: "KVCacheConfigurationPromptCacheTests")
     }
 
     /// A scripted session model under `modelID` whose KV-cache configuration is `kvCache`.

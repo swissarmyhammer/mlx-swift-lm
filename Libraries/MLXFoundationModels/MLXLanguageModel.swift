@@ -310,9 +310,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// never asked for an eviction.
     public static func evictAll() async {
         await cache.evictAll()
-        await ExecutorPromptCacheStore.current.evict(modelID: nil)
-        // Last, and outside both actors: the released buffers reach the pool only when the last
-        // reference above drops, and this call waits for any eval that holds the MLX eval lock.
+        await releasePromptCaches(of: nil)
+    }
+
+    /// Releases the prompt cache entries of `modelID`, or of every model when `modelID` is nil,
+    /// then clears the MLX buffer pool.
+    ///
+    /// The clear runs last, and outside both actors: the released buffers reach the pool only
+    /// when the last reference to them drops, and the clear waits for any eval that holds the
+    /// MLX eval lock.
+    ///
+    /// - Parameter modelID: The model whose sessions to release, or nil for every model.
+    private static func releasePromptCaches(of modelID: ExecutorPromptCacheKey.ModelID?) async {
+        await ExecutorPromptCacheStore.current.evict(modelID: modelID)
         MLX.Memory.clearCache()
     }
 
@@ -325,10 +335,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Safe to call during an in-flight `respond()`: that call retains its own
     /// `ModelContainer` and finishes normally; the weights free via ARC once it
     /// returns, which is after this clear, so they stay in the pool until a later
-    /// clear. A prompt cache entry in a running or queued spill is the same case: the
-    /// spill job holds its buffers until its write ends, so they too stay in the pool
-    /// until a later clear, and the clear can wait for a running spill write, because
-    /// a safetensors save holds the MLX eval lock for its run.
+    /// clear. Spill and eval-lock timing: see ``evictAll()``.
     ///
     /// Evicting a model with an in-flight load cancels that load's task.
     /// If the loader honors cancellation, the awaiting `preload()` or `respond()`
@@ -336,10 +343,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// may not be `CancellationError`.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
-        await ExecutorPromptCacheStore.current.evict(modelID: .init(modelID))
-        // Last, and outside both actors: the released buffers reach the pool only when the last
-        // reference above drops, and this call waits for any eval that holds the MLX eval lock.
-        MLX.Memory.clearCache()
+        await Self.releasePromptCaches(of: .init(modelID))
     }
 
     // MARK: - Prompt Cache Budgets and Release
@@ -504,17 +508,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         weightsLocation: @Sendable @escaping (String) -> URL,
         load: @escaping ContainerLoader
     ) {
-        self.configuration = configuration
-        self.capabilities = LanguageModelCapabilities(capabilities)
-        self.configurationResolver = configurationResolver
-        self.speculativeDecoding = speculativeDecoding
-        self.prefillStepSize = prefillStepSize
-        self.kvCache = nil
-        self.weightsLocation = weightsLocation
-        self.load = { configuration, progress in
-            try await load(configuration, progress.download ?? { _ in })
-        }
-        self.progress = .init()
+        self.init(
+            configuration: configuration, capabilities: capabilities,
+            configurationResolver: configurationResolver,
+            speculativeDecoding: speculativeDecoding, prefillStepSize: prefillStepSize,
+            kvCache: nil, weightsLocation: weightsLocation, progress: .init(),
+            load: { configuration, progress in
+                try await load(configuration, progress.download ?? { _ in })
+            })
     }
 
     /// Creates an `MLXLanguageModel` whose loader receives phase-specific model
@@ -600,7 +601,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// fire-and-forget by ``Executor/prewarm(model:transcript:)``, reached
     /// publicly through `session.prewarm()`. Safe to call multiple times and
     /// concurrently; subsequent calls reuse the cached container.
+    ///
+    /// The warm-up checks for cancellation before each of its stages -- the load,
+    /// the grammar tokenizer, the MTP drafter load and the forward pass -- thus a
+    /// cancelled warm-up throws `CancellationError` before its next stage instead
+    /// of running to its end. A stage that already started runs to its end.
     func warmUp() async throws {
+        try Task.checkCancellation()
         // Distinguish a warmup of an already-present model (suppress the
         // spurious `.available → .downloading → .available` flip) from a
         // genuine first fetch (which still reports `.downloading`). Conditioning
@@ -628,12 +635,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         // makeConstraint is keyed on modelID:kind:source, where `source` is the
         // per-request schema/tool grammar that prewarm doesn't possess — a
         // pre-built constraint would land under a key no real respond() reads.
+        try Task.checkCancellation()
         let tokenizer = await container.tokenizer
         _ = try await Self.makeGrammarTokenizer(
             modelID: modelID, tokenizer: tokenizer)
 
         // The MTP drafter loads here too, once, into the same model cache a
         // later `respond` reads.
+        try Task.checkCancellation()
         let speculation = try await loadMTPSpeculation(for: container)
 
         // Force Metal shader JIT with a minimal 1-token generate, run inside
@@ -641,6 +650,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         // concurrent `respond`. `maxTokens: 1` makes the stream end on
         // its own; we consume it fully (no early break) so generation runs to
         // completion and leaves no dangling GPU work to race the teardown sync.
+        try Task.checkCancellation()
         try await container.perform(nonSendable: speculation) { context, speculation in
             // Exactly one synchronize on every exit path (success or throw),
             // per the Metal teardown invariant. `prepare` is CPU-only, so on a
@@ -1200,6 +1210,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// nothing could use it: the executor is a `Sendable` value with no
         /// teardown, the protocol offers no way to cancel a prewarm, and a
         /// warmup that outlives its caller only leaves the model cache warm.
+        /// The warm-up itself checks for cancellation between its stages (see
+        /// ``MLXLanguageModel/warmUp()``), thus a cancelled task stops early.
         ///
         /// - Parameters:
         ///   - model: The live model instance to warm.
@@ -1209,9 +1221,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // Unstructured by design, with no stored handle: the executor is a
             // `Sendable` value with no teardown hook and the protocol offers no
             // way to cancel a prewarm, so no owner could cancel or await it.
+            // `warmUp` checks for cancellation between its stages.
             Task {
                 do {
                     try await model.warmUp()
+                } catch is CancellationError {
+                    Self.logger.info("MLX prewarm cancelled for \(model.modelID)")
                 } catch {
                     Self.logger.error(
                         "MLX prewarm failed for \(model.modelID): \(error.localizedDescription)"
@@ -1307,12 +1322,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 model.capabilities.contains(.vision)
                     || !messages.contains(where: { !$0.images.isEmpty })
             else {
-                throw LanguageModelError.unsupportedCapability(
-                    LanguageModelError.UnsupportedCapability(
-                        capability: .vision,
-                        debugDescription:
-                            "This request includes an image, but .vision was not declared at MLXLanguageModel init. Declare .vision to accept image inputs."
-                    ))
+                throw Self.unsupportedCapability(
+                    .vision,
+                    "This request includes an image, but .vision was not declared at MLXLanguageModel init. Declare .vision to accept image inputs."
+                )
             }
 
             let toolCallingMode = ToolCallingModeResolution.resolve(
@@ -1373,6 +1386,14 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
             }
             let promptCache = ExecutorPromptCacheSlot(checkout, key: promptCacheKey)
+            let turn = RespondTurn(
+                request: request, enabledToolDefinitions: enabledToolDefinitions,
+                toolCallingMode: toolCallingMode, schemaJSON: schemaJSON, modelID: modelID,
+                requestedMaxTokens: requestedMaxTokens,
+                samplingConfiguration: requestedSamplingConfiguration,
+                declaresReasoning: declaresReasoning, entryID: entryID,
+                toolCallsEntryID: toolCallsEntryID, reasoningEntryID: reasoningEntryID,
+                promptCache: promptCache, channel: channel)
 
             let outcome: Result<Void, any Error>
             do {
@@ -1436,62 +1457,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         baselineInput: input,
                         context: context)
 
-                    // The prompt actually fed into generation: the suppressed
-                    // prompt when we're forcing thinking off, otherwise the
-                    // baseline `input` rendered above.
-                    let effectiveInput = reasoningPlan.suppressedInput ?? input
-
-                    // Tool path, entered on every round while tools are enabled
-                    // -- fresh turns and continuations alike. Allowed mode uses
-                    // native generation so the model can answer or call a tool;
-                    // required mode constrains generation to a real tool call.
-                    if !enabledToolDefinitions.isEmpty {
-                        try await runToolGeneration(
-                            request: request,
-                            messages: messages,
-                            enabledToolDefinitions: enabledToolDefinitions,
-                            toolCallingMode: toolCallingMode,
-                            schemaJSON: schemaJSON,
-                            baselineInput: input,
-                            resolved: resolved,
-                            declaresReasoning: declaresReasoning,
-                            modelID: modelID,
-                            requestedMaxTokens: requestedMaxTokens,
-                            samplingConfiguration: requestedSamplingConfiguration,
-                            entryID: entryID,
-                            toolCallsEntryID: toolCallsEntryID,
-                            reasoningEntryID: reasoningEntryID,
-                            promptCache: promptCache,
-                            speculation: speculation,
-                            context: context,
-                            channel: channel)
-                    } else if let schemaJSON {
-                        try await runSchemaGeneration(
-                            schemaJSON: schemaJSON,
-                            input: input,
-                            modelID: modelID,
-                            requestedMaxTokens: requestedMaxTokens,
-                            entryID: entryID,
-                            promptCache: promptCache,
-                            speculation: speculation,
-                            context: context,
-                            channel: channel)
-                    } else {
-                        try await runTextGeneration(
-                            reasoningSetup: reasoningPlan.reasoningSetup,
-                            fallbackInput: effectiveInput,
-                            transcriptBoundary: reasoningPlan.transcriptBoundary,
-                            requestedMaxTokens: requestedMaxTokens,
-                            requestedTemperature: request.generationOptions.temperature,
-                            samplingConfiguration: requestedSamplingConfiguration,
-                            responseEntryID: entryID,
-                            reasoningEntryID: reasoningEntryID,
-                            promptCache: promptCache,
-                            speculation: speculation,
-                            context: context,
-                            channel: channel
-                        )
-                    }
+                    try await dispatchGeneration(
+                        turn, messages: messages, input: input, reasoningPlan: reasoningPlan,
+                        resolved: resolved, speculation: speculation, context: context)
 
                     Stream.gpu.synchronize()
                 }
@@ -1526,6 +1494,124 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             // or threw reports what its passes recorded before they stopped.
             await Self.emitSpeculativeDecodingOutcome(entryID: entryID, into: channel)
             try outcome.get()
+        }
+
+        /// The values of one `respond` call that every generation path of the call reads.
+        struct RespondTurn: Sendable {
+
+            /// The request of the call.
+            let request: LanguageModelExecutorGenerationRequest
+
+            /// The tools the call enables, in the resolved tool-calling mode.
+            let enabledToolDefinitions: [Transcript.ToolDefinition]
+
+            /// The resolved tool-calling mode of the call.
+            let toolCallingMode: GenerationOptions.ToolCallingMode
+
+            /// The JSON schema of a guided call, or nil.
+            let schemaJSON: String?
+
+            /// The model identifier the descriptor carries.
+            let modelID: String
+
+            /// The most tokens the call may generate, or nil for the default.
+            let requestedMaxTokens: Int?
+
+            /// The sampling configuration of the call, translated once from its options.
+            let samplingConfiguration: MLXSamplingConfiguration?
+
+            /// Whether `.reasoning` was declared at init.
+            let declaresReasoning: Bool
+
+            /// The response entry of the call.
+            let entryID: ResponseEntryID
+
+            /// The tool-calls entry of the call.
+            let toolCallsEntryID: ToolCallsEntryID
+
+            /// The reasoning entry of the call.
+            let reasoningEntryID: ReasoningEntryID
+
+            /// The prompt cache slot of the session.
+            let promptCache: ExecutorPromptCacheSlot
+
+            /// The channel the events of the call go into.
+            let channel: LanguageModelExecutorGenerationChannel
+        }
+
+        /// Runs the generation path of one call: the tool path while tools are enabled, the
+        /// schema path for a guided call, and the text path otherwise.
+        ///
+        /// - Parameters:
+        ///   - turn: The values of the call.
+        ///   - messages: The chat messages the prompt renders from.
+        ///   - input: The prompt rendered with no thinking state.
+        ///   - reasoningPlan: The reasoning inputs of the text path.
+        ///   - resolved: The resolver-patched configuration of the call.
+        ///   - speculation: The MTP drafter of the model, or nil.
+        ///   - context: The loaded model context.
+        /// - Throws: The error of the generation path.
+        private func dispatchGeneration(
+            _ turn: RespondTurn, messages: [Chat.Message], input: LMInput,
+            reasoningPlan: ReasoningPlan, resolved: ModelConfiguration,
+            speculation: MTPSpeculation?, context: ModelContext
+        ) async throws {
+            // The prompt actually fed into generation: the suppressed
+            // prompt when we're forcing thinking off, otherwise the
+            // baseline `input` rendered above.
+            let effectiveInput = reasoningPlan.suppressedInput ?? input
+
+            // Tool path, entered on every round while tools are enabled
+            // -- fresh turns and continuations alike. Allowed mode uses
+            // native generation so the model can answer or call a tool;
+            // required mode constrains generation to a real tool call.
+            if !turn.enabledToolDefinitions.isEmpty {
+                try await runToolGeneration(
+                    request: turn.request,
+                    messages: messages,
+                    enabledToolDefinitions: turn.enabledToolDefinitions,
+                    toolCallingMode: turn.toolCallingMode,
+                    schemaJSON: turn.schemaJSON,
+                    baselineInput: input,
+                    resolved: resolved,
+                    declaresReasoning: turn.declaresReasoning,
+                    modelID: turn.modelID,
+                    requestedMaxTokens: turn.requestedMaxTokens,
+                    samplingConfiguration: turn.samplingConfiguration,
+                    entryID: turn.entryID,
+                    toolCallsEntryID: turn.toolCallsEntryID,
+                    reasoningEntryID: turn.reasoningEntryID,
+                    promptCache: turn.promptCache,
+                    speculation: speculation,
+                    context: context,
+                    channel: turn.channel)
+            } else if let schemaJSON = turn.schemaJSON {
+                try await runSchemaGeneration(
+                    schemaJSON: schemaJSON,
+                    input: input,
+                    modelID: turn.modelID,
+                    requestedMaxTokens: turn.requestedMaxTokens,
+                    entryID: turn.entryID,
+                    promptCache: turn.promptCache,
+                    speculation: speculation,
+                    context: context,
+                    channel: turn.channel)
+            } else {
+                try await runTextGeneration(
+                    reasoningSetup: reasoningPlan.reasoningSetup,
+                    fallbackInput: effectiveInput,
+                    transcriptBoundary: reasoningPlan.transcriptBoundary,
+                    requestedMaxTokens: turn.requestedMaxTokens,
+                    requestedTemperature: turn.request.generationOptions.temperature,
+                    samplingConfiguration: turn.samplingConfiguration,
+                    responseEntryID: turn.entryID,
+                    reasoningEntryID: turn.reasoningEntryID,
+                    promptCache: turn.promptCache,
+                    speculation: speculation,
+                    context: context,
+                    channel: turn.channel
+                )
+            }
         }
 
         /// Resolves the per-instance configuration for one generation.
@@ -1599,6 +1685,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             let transcriptBoundary: Int?
         }
 
+        /// The error message of a request on a model that always reasons when the caller did not
+        /// declare `.reasoning`.
+        static let undeclaredReasoningMessage =
+            "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
+
+        /// The `unsupportedCapability` error of a request that needs `capability`, which the
+        /// model cannot give.
+        ///
+        /// - Parameters:
+        ///   - capability: The capability the request needs.
+        ///   - message: The debug description of the error.
+        /// - Returns: The error.
+        static func unsupportedCapability(
+            _ capability: LanguageModelCapabilities.Capability, _ message: String
+        ) -> LanguageModelError {
+            .unsupportedCapability(
+                LanguageModelError.UnsupportedCapability(
+                    capability: capability, debugDescription: message))
+        }
+
         /// Gates the reasoning capability and prepares the reasoning inputs.
         ///
         /// Capability gate: when the caller omits `.reasoning` but the
@@ -1640,12 +1746,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     _ = try suppressionConfig.promptStrategy
                         .additionalContext(forThinkingEnabled: false)
                 } catch ReasoningError.cannotDisableReasoning {
-                    throw LanguageModelError.unsupportedCapability(
-                        LanguageModelError.UnsupportedCapability(
-                            capability: .reasoning,
-                            debugDescription:
-                                "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
-                        ))
+                    throw Self.unsupportedCapability(
+                        .reasoning, Self.undeclaredReasoningMessage)
                 }
             }
 
@@ -1660,9 +1762,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 suppressed = try await Self.preparedInput(
                     messages: messages, config: suppressionConfig,
                     thinkingEnabled: false, context: context,
-                    cannotDisableMessage:
-                        "This model always reasons; .reasoning must be declared at MLXLanguageModel init to receive its output."
-                )
+                    cannotDisableMessage: Self.undeclaredReasoningMessage)
             } else {
                 suppressed = nil
             }

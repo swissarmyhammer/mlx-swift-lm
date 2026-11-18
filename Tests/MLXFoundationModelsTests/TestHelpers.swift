@@ -157,6 +157,51 @@ func reflectedChannelPayload<T>(of value: Any, caseLabel: String, as type: T.Typ
     return payload.value as? T
 }
 
+// MARK: - Transcript Entries
+
+/// Builds the transcript entries of the executor tests, each of one text segment.
+///
+/// Every suite builds its entries here, thus the shape of a test transcript is kept in one
+/// place.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+enum TestTranscript {
+
+    /// One text segment of `text`.
+    ///
+    /// - Parameter text: The text of the segment.
+    /// - Returns: The segments.
+    static func textSegments(_ text: String) -> [Transcript.Segment] {
+        [.text(Transcript.TextSegment(content: text))]
+    }
+
+    /// An instructions entry of `text` with no tools.
+    ///
+    /// - Parameters:
+    ///   - id: The identifier of the entry, which names the session when it comes first.
+    ///   - text: The instructions.
+    /// - Returns: The entry.
+    static func instructions(id: String, _ text: String) -> Transcript.Entry {
+        .instructions(
+            Transcript.Instructions(id: id, segments: textSegments(text), toolDefinitions: []))
+    }
+
+    /// A prompt entry of `text`.
+    ///
+    /// - Parameter text: The prompt.
+    /// - Returns: The entry.
+    static func prompt(_ text: String) -> Transcript.Entry {
+        .prompt(Transcript.Prompt(segments: textSegments(text)))
+    }
+
+    /// A response entry of `text`.
+    ///
+    /// - Parameter text: The response.
+    /// - Returns: The entry.
+    static func response(_ text: String) -> Transcript.Entry {
+        .response(Transcript.Response(assetIDs: [], segments: textSegments(text)))
+    }
+}
+
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)
 
 // MARK: - Shared Test Fixtures (model-free)

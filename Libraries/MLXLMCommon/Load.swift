@@ -25,43 +25,15 @@ struct SafetensorSpan {
 
 /// The tensors of the safetensors file at `url`, ordered by their position in the file.
 ///
-/// Reads the 8-byte header length and the JSON header only. Throws when the file is not a
-/// well-formed safetensors file; callers fall back to loading the file whole.
+/// Reads the 8-byte header length and the JSON header only, through ``SafetensorsHeader``.
+/// Throws when the file is not a well-formed safetensors file; callers fall back to loading
+/// the file whole.
 func safetensorSpansInFileOrder(url: URL) throws -> [SafetensorSpan] {
-    struct Malformed: Error {}
-
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
-
-    guard let lengthData = try handle.read(upToCount: 8), lengthData.count == 8 else {
-        throw Malformed()
+    return try SafetensorsHeader.read(from: handle).tensors.map {
+        SafetensorSpan(name: $0.name, byteCount: Int64($0.dataOffsets.count))
     }
-    let headerLength = lengthData.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
-        .littleEndian
-    // a header bigger than this is not a header
-    guard headerLength > 0, headerLength <= 512 * 1024 * 1024 else { throw Malformed() }
-    guard let headerData = try handle.read(upToCount: Int(headerLength)),
-        headerData.count == headerLength,
-        let header = try JSONSerialization.jsonObject(with: headerData) as? [String: Any]
-    else {
-        throw Malformed()
-    }
-
-    var spans = [(name: String, begin: Int64, byteCount: Int64)]()
-    for (name, value) in header {
-        guard name != "__metadata__" else { continue }
-        guard let entry = value as? [String: Any],
-            let offsets = entry["data_offsets"] as? [Any], offsets.count == 2,
-            let begin = (offsets[0] as? NSNumber)?.int64Value,
-            let end = (offsets[1] as? NSNumber)?.int64Value,
-            end >= begin
-        else {
-            throw Malformed()
-        }
-        spans.append((name, begin, end - begin))
-    }
-    spans.sort { $0.begin < $1.begin }
-    return spans.map { SafetensorSpan(name: $0.name, byteCount: $0.byteCount) }
 }
 
 /// Contiguous index ranges of `byteCounts` whose byte totals are balanced around

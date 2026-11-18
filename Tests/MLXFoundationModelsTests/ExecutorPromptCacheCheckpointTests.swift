@@ -43,10 +43,7 @@ struct ExecutorPromptCacheCheckpointTests {
     /// A store in a folder of its own, whose writer writes nothing. The
     /// budget comes from the device, thus each entry stays in memory.
     private func makeStore() -> ExecutorPromptCacheStore {
-        ExecutorPromptCacheStore(
-            directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("ExecutorPromptCacheCheckpointTests-\(UUID().uuidString)"),
-            writer: { _, _ in })
+        PromptCacheTestStore.withoutWrites(folderNamed: "ExecutorPromptCacheCheckpointTests")
     }
 
     /// Runs the first turn of a new session, and then a second turn whose
@@ -82,16 +79,28 @@ struct ExecutorPromptCacheCheckpointTests {
         return (first, second)
     }
 
+    /// Runs ``runDroppedTurn(processor:recurrentLayerCount:)`` with the processor that writes
+    /// ``generationPrompt`` after the last message.
+    ///
+    /// - Parameter recurrentLayerCount: the recurrent layers of the model.
+    /// - Returns: what the first pass and the second pass streamed.
+    /// - Throws: the error of the executor.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func runGenerationPromptDroppedTurn(
+        recurrentLayerCount: Int = 1
+    ) async throws -> (first: ScriptedPassResult, second: ScriptedPassResult) {
+        try await runDroppedTurn(
+            processor: GenerationPromptBytesInputProcessor(generationPrompt: Self.generationPrompt),
+            recurrentLayerCount: recurrentLayerCount)
+    }
+
     @Test("the measured shape reuses the prompt up to the end of the last message")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func theMeasuredShapeReusesThePromptUpToTheEndOfTheLastMessage() async throws {
         // Turn 1 renders "first turn\nassistant:". Turn 2 renders
         // "first turn\nturn 1\nassistant:": it agrees with turn 1 through the
         // line break after the last message of turn 1, and no further.
-        let passes = try await runDroppedTurn(
-            processor: GenerationPromptBytesInputProcessor(
-                generationPrompt: Self.generationPrompt),
-            recurrentLayerCount: 1)
+        let passes = try await runGenerationPromptDroppedTurn()
 
         #expect(passes.second.reusedTokenCount == Self.firstMessageEnd)
     }
@@ -102,10 +111,7 @@ struct ExecutorPromptCacheCheckpointTests {
         let firstRender =
             Self.firstMessage + Self.messageSeparator + Self.generationPrompt
 
-        let passes = try await runDroppedTurn(
-            processor: GenerationPromptBytesInputProcessor(
-                generationPrompt: Self.generationPrompt),
-            recurrentLayerCount: 1)
+        let passes = try await runGenerationPromptDroppedTurn()
 
         #expect(passes.first.reusedTokenCount == 0)
         #expect(passes.first.promptTokenCount == firstRender.utf8.count)
@@ -128,10 +134,7 @@ struct ExecutorPromptCacheCheckpointTests {
     func aModelThatIsNotHybridStillRewindsToTheSharedPrefix() async throws {
         // An attention cache rewinds to any position, thus the render reuses
         // all it shares with the ledger, the line break included.
-        let passes = try await runDroppedTurn(
-            processor: GenerationPromptBytesInputProcessor(
-                generationPrompt: Self.generationPrompt),
-            recurrentLayerCount: 0)
+        let passes = try await runGenerationPromptDroppedTurn(recurrentLayerCount: 0)
 
         #expect(passes.second.reusedTokenCount == Self.firstMessageEnd)
     }
@@ -170,14 +173,28 @@ struct ExecutorPromptCacheCheckpointTests {
             caches: caches, tokens: Self.ledger, checkpoint: checkpoint)
     }
 
+    /// Plans a pass over `render` that reuses ``entryWithCheckpoint()`` on ``hybridModel()``.
+    ///
+    /// - Parameters:
+    ///   - render: the tokens of the next render.
+    ///   - protocolRules: the cache-reuse rules of the response protocol.
+    /// - Returns: the plan, or nil when the input cannot be planned.
+    /// - Throws: the error of the plan or of the fixture.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func planCheckpointRender(
+        _ render: [Int], protocolRules: [any PromptCacheReuseRule] = []
+    ) throws -> ExecutorPromptCachePlan? {
+        try planPromptCache(
+            render: render, reusing: entryWithCheckpoint(), model: hybridModel(),
+            protocolRules: protocolRules)
+    }
+
     @Test("a render that drops the generated turn goes back to the checkpoint")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatDropsTheGeneratedTurnGoesBackToTheCheckpoint() throws {
         let render = Self.checkpointTokens + [9, 9]
 
-        let planned = try #require(
-            try planPromptCache(
-                render: render, reusing: entryWithCheckpoint(), model: hybridModel()))
+        let planned = try #require(try planCheckpointRender(render))
 
         #expect(planned.decision == .restore(.init(render: render, ledger: Self.ledger)))
         #expect(planned.reusedTokenCount == Self.checkpointTokens.count)
@@ -188,9 +205,7 @@ struct ExecutorPromptCacheCheckpointTests {
     @Test("the plan line of a restore names the rule and the seam")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func thePlanLineOfARestoreNamesTheRuleAndTheSeam() throws {
-        let planned = try planPromptCache(
-            render: Self.checkpointTokens + [9, 9], reusing: entryWithCheckpoint(),
-            model: hybridModel())
+        let planned = try planCheckpointRender(Self.checkpointTokens + [9, 9])
 
         let line = ExecutorPromptCacheReport.planLine(
             key: Self.checkpointKey,
@@ -209,9 +224,7 @@ struct ExecutorPromptCacheCheckpointTests {
     func aRenderThatPartsBeforeTheCheckpointStillRebuilds() throws {
         let render = [1, 9, 9]
 
-        let planned = try #require(
-            try planPromptCache(
-                render: render, reusing: entryWithCheckpoint(), model: hybridModel()))
+        let planned = try #require(try planCheckpointRender(render))
 
         #expect(planned.decision == .rebuild(.init(render: render, ledger: Self.ledger)))
         #expect(planned.reusedTokenCount == 0)
@@ -220,9 +233,7 @@ struct ExecutorPromptCacheCheckpointTests {
     @Test("a render that extends the ledger still extends and does not restore")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatExtendsTheLedgerStillExtendsAndDoesNotRestore() throws {
-        let planned = try #require(
-            try planPromptCache(
-                render: Self.ledger + [7], reusing: entryWithCheckpoint(), model: hybridModel()))
+        let planned = try #require(try planCheckpointRender(Self.ledger + [7]))
 
         #expect(planned.decision == .extend)
         #expect(planned.reusedTokenCount == Self.ledger.count)
@@ -237,9 +248,9 @@ struct ExecutorPromptCacheCheckpointTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aProtocolRuleStillSplicesAndDoesNotRestore() throws {
         let planned = try #require(
-            try planPromptCache(
-                render: Self.checkpointTokens + [9, 9], reusing: entryWithCheckpoint(),
-                model: hybridModel(), protocolRules: [SplicingRule(commit: Self.spliceCommit)]))
+            try planCheckpointRender(
+                Self.checkpointTokens + [9, 9],
+                protocolRules: [SplicingRule(commit: Self.spliceCommit)]))
 
         #expect(planned.decision == .splice)
     }

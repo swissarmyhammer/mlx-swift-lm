@@ -398,19 +398,34 @@ struct ExecutorGenerationHandOff: Sendable {
     }
 }
 
+/// Whether the prefill of one executor pass ended, and the model state it left when it ended.
+///
+/// The model state of an ended prefill can itself be nil, thus a separate case, not a nil
+/// state, names a prefill that did not end.
+enum ExecutorPrefillOutcome {
+
+    /// The prefill did not report its end yet.
+    case pending
+
+    /// The prefill ended and left this model state, or nil when the model keeps none.
+    case ended(LMOutput.State?)
+}
+
 /// Records what the prefill of one executor pass left, and hands the end of that prefill to
 /// the prompt cache slot of the pass.
 ///
 /// The generation calls ``record(state:drafterState:)`` once, while it builds its iterator and
-/// before the pass reads its first token. The pass then commits ``state`` with its cache.
+/// before the pass reads its first token. The pass then commits the state of ``outcome`` with
+/// its cache.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 final class ExecutorPrefillRecorder {
 
     /// The slot that takes the checkpoint at the end of the prompt.
     private let promptCache: ExecutorPromptCacheSlot
 
-    /// The model state the prefill left, or nil before the prefill ended.
-    private(set) var state: LMOutput.State?
+    /// Whether the prefill ended, and the model state it left. It stays
+    /// ``ExecutorPrefillOutcome/pending`` until ``record(state:drafterState:)``.
+    private(set) var outcome = ExecutorPrefillOutcome.pending
 
     /// Creates a recorder that hands the end of the prefill to `promptCache`.
     ///
@@ -427,7 +442,7 @@ final class ExecutorPrefillRecorder {
     ///   - drafterState: reads the MTP drafter continuation at the end of the prompt, as
     ///     ``ExecutorPromptCacheSlot/prefillDidEnd(state:drafterState:)`` takes it.
     func record(state: LMOutput.State?, drafterState: () -> MTPDrafterContinuation?) {
-        self.state = state
+        outcome = .ended(state)
         promptCache.prefillDidEnd(state: state, drafterState: drafterState)
     }
 }

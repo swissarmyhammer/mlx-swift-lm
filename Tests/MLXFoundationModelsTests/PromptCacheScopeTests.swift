@@ -211,10 +211,7 @@ struct PromptCacheScopeTests {
     /// These tests read the memory tier alone. A writer that writes nothing
     /// thus leaves no file, and two stores never share a file name.
     private func makeStore() -> ExecutorPromptCacheStore {
-        ExecutorPromptCacheStore(
-            directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("PromptCacheScopeTests-\(UUID().uuidString)"),
-            writer: { _, _ in })
+        PromptCacheTestStore.withoutWrites(folderNamed: "PromptCacheScopeTests")
     }
 
     /// Runs one pass of `model` over `transcript` inside `store`, with `scope`

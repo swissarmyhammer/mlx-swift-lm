@@ -326,23 +326,6 @@ struct ExecutorPromptCacheFileTests {
 
     // MARK: - Comparisons
 
-    /// Records an issue unless two lists of arrays have equal shapes, types and values.
-    ///
-    /// - Parameters:
-    ///   - actual: The arrays to check.
-    ///   - expected: The arrays they must equal.
-    ///   - label: The name of the comparison, for the issue text.
-    static func expectEqual(
-        _ actual: [MLXArray], _ expected: [MLXArray], _ label: String
-    ) {
-        #expect(actual.count == expected.count, "\(label): array count")
-        for (index, (lhs, rhs)) in zip(actual, expected).enumerated() {
-            #expect(lhs.shape == rhs.shape, "\(label) array \(index): shape")
-            #expect(lhs.dtype == rhs.dtype, "\(label) array \(index): type")
-            #expect(arrayEqual(lhs, rhs).item(Bool.self), "\(label) array \(index): values")
-        }
-    }
-
     /// Records an issue unless the caches of `actual` hold the offsets and the arrays of the
     /// caches of `expected`.
     ///
@@ -352,7 +335,7 @@ struct ExecutorPromptCacheFileTests {
     static func expectEqualCaches(_ actual: [KVCache], _ expected: [KVCache]) {
         #expect(actual.map(\.offset) == expected.map(\.offset))
         for (index, (lhs, rhs)) in zip(actual, expected).enumerated() {
-            expectEqual(lhs.state, rhs.state, "cache \(index)")
+            PromptCacheArrayExpectations.expectEqual(lhs.state, rhs.state, "cache \(index)")
         }
     }
 
@@ -463,6 +446,27 @@ struct ExecutorPromptCacheFileTests {
         #expect(throws: ExecutorPromptCacheFileError.keyMismatch) {
             try ExecutorPromptCacheFile.read(
                 from: url, key: otherModel, templates: Self.templates())
+        }
+    }
+
+    @Test(
+        "a file of this format without the key metadata throws .keyMismatch",
+        arguments: [[Self.modelIDKey], [Self.sessionIDKey], [Self.modelIDKey, Self.sessionIDKey]])
+    func aFileWithoutTheKeyMetadataThrows(_ missingKeys: [String]) throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = Self.fileURL(in: directory)
+        let metadata = [
+            Self.formatKey: ExecutorPromptCacheFile.format,
+            Self.modelIDKey: Self.modelID,
+            Self.sessionIDKey: Self.sessionID,
+            LedgerKey.tokens.rawValue: Self.emptyLedger,
+            LedgerKey.renderTokens.rawValue: Self.emptyLedger,
+        ].filter { !missingKeys.contains($0.key) }
+        try savePromptCache(url: url, cache: Self.filledCaches(), metadata: metadata)
+
+        #expect(throws: ExecutorPromptCacheFileError.keyMismatch) {
+            try ExecutorPromptCacheFile.read(from: url, key: Self.key, templates: Self.templates())
         }
     }
 

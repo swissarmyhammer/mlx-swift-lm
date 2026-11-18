@@ -160,6 +160,11 @@ enum ExecutorPromptCacheFile {
 
     /// Reads the entry of `key` from `url` into the fresh caches of the model.
     ///
+    /// A file without the model or the session metadata throws
+    /// ``ExecutorPromptCacheFileError/keyMismatch``, as a file of another key does. Every writer of
+    /// this format wrote both keys, and a store reads only the files that its own process wrote,
+    /// thus no file that a store hands out lacks them.
+    ///
     /// - Parameters:
     ///   - url: The URL of the file.
     ///   - key: The session that the entry must belong to.
@@ -371,41 +376,32 @@ private enum TokenLedger {
 ///
 /// The safetensors load is lazy: it reads the header and makes an array for each tensor, and it
 /// reads the tensor bytes only when the array is evaluated. A read past the end of the file at
-/// that point stops the process. This check reads the header first, thus a truncated file
-/// throws before any array is made.
+/// that point stops the process. This check reads the header first, through
+/// ``SafetensorsHeader``, thus a truncated file throws before any array is made.
 private enum SafetensorsLength {
-
-    /// The number of bytes of the header length at the start of the file.
-    private static let headerLengthByteCount = MemoryLayout<UInt64>.size
-
-    /// The header key of the metadata, which is not a tensor.
-    private static let metadataKey = "__metadata__"
-
-    /// The header key of the byte range of a tensor, relative to the end of the header.
-    private static let dataOffsetsKey = "data_offsets"
 
     /// Throws unless the file at `url` holds every byte that its header names.
     ///
     /// - Parameter url: The URL of the safetensors file.
     /// - Throws: ``ExecutorPromptCacheFileError/truncated(byteCount:expectedByteCount:)`` for a
-    ///   short file, the error of the file system for a missing file, or the error of the JSON
-    ///   parser for a header that is not JSON.
+    ///   short file, the error of the file system for a missing file, the error of the JSON
+    ///   parser for a header that is not JSON, or ``SafetensorsHeaderError`` for a header that
+    ///   is not an object or names a tensor without a valid byte range.
     static func requireWholeFile(at url: URL) throws {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         let byteCount = try handle.seekToEnd()
         try handle.seek(toOffset: 0)
 
-        let headerStart = UInt64(headerLengthByteCount)
+        let headerStart = UInt64(SafetensorsHeader.lengthPrefixByteCount)
         try require(byteCount, atLeast: headerStart)
-        let lengthBytes = try handle.read(upToCount: headerLengthByteCount) ?? Data()
-        let headerLength = UInt64(
-            littleEndian: lengthBytes.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })
+        let headerLength = try SafetensorsHeader.readLength(from: handle)
 
         let dataStart = saturatingSum(headerStart, headerLength)
         try require(byteCount, atLeast: dataStart)
-        let header = try handle.read(upToCount: Int(headerLength)) ?? Data()
-        try require(byteCount, atLeast: saturatingSum(dataStart, dataLength(of: header)))
+        let header = try SafetensorsHeader(
+            json: try handle.read(upToCount: Int(headerLength)) ?? Data())
+        try require(byteCount, atLeast: saturatingSum(dataStart, header.dataByteCount))
     }
 
     /// Throws unless the file holds `expected` bytes.
@@ -431,24 +427,6 @@ private enum SafetensorsLength {
     private static func saturatingSum(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
         let (sum, overflow) = lhs.addingReportingOverflow(rhs)
         return overflow ? .max : sum
-    }
-
-    /// The number of data bytes that a header names: the largest end of a tensor range.
-    ///
-    /// - Parameter header: The JSON header.
-    /// - Returns: The end of the last tensor, relative to the end of the header.
-    /// - Throws: The error of the JSON parser.
-    private static func dataLength(of header: Data) throws -> UInt64 {
-        let entries = try JSONSerialization.jsonObject(with: header) as? [String: Any] ?? [:]
-        let ends = entries.compactMap { name, entry -> UInt64? in
-            guard name != metadataKey, let fields = entry as? [String: Any],
-                let offsets = fields[dataOffsetsKey] as? [NSNumber]
-            else {
-                return nil
-            }
-            return offsets.last?.uint64Value
-        }
-        return ends.max() ?? 0
     }
 }
 

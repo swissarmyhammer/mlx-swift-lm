@@ -110,19 +110,23 @@ extension Qwen35MTPFixture {
     ///   - drafterBytes: The byte estimate the memory policy weighs before the drafter loads,
     ///     or `nil` for none.
     ///   - memoryPolicy: The memory policy that admits the drafter, or `nil` for none.
+    ///   - makeDrafter: Makes the drafter of one load. The default makes the drafter of a new
+    ///     fixture.
     /// - Returns: The speculative decoding.
     /// - Throws: The error of the configuration when the drafter refuses the block size.
     static func makeSpeculativeDecoding(
         log: DrafterLoadLog? = nil, drafterBytes: Int? = nil,
-        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
+        memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
+        drafter makeDrafter: @escaping @Sendable () throws -> any MTPDrafterModel = {
+            try Qwen35MTPFixture().drafter
+        }
     ) throws -> MLXSpeculativeDecoding {
         try MLXSpeculativeDecoding(
             drafterConfiguration: drafterConfiguration, blockSize: blockSize,
             drafterBytes: drafterBytes, memoryPolicy: memoryPolicy
         ) { configuration in
             let container = MTPDrafterContainer(
-                context: MTPDrafterContext(
-                    configuration: configuration, model: try Qwen35MTPFixture().drafter))
+                context: MTPDrafterContext(configuration: configuration, model: try makeDrafter()))
             log?.recordLoad(of: container)
             return container
         }
@@ -134,13 +138,7 @@ extension Qwen35MTPFixture {
     /// - Returns: The speculative decoding.
     /// - Throws: The error of the configuration when the drafter refuses the block size.
     static func makeIncompatibleSpeculativeDecoding() throws -> MLXSpeculativeDecoding {
-        try MLXSpeculativeDecoding(
-            drafterConfiguration: drafterConfiguration, blockSize: blockSize
-        ) { configuration in
-            MTPDrafterContainer(
-                context: MTPDrafterContext(
-                    configuration: configuration, model: try Qwen35VLMMTPFixture().drafter))
-        }
+        try makeSpeculativeDecoding(drafter: { try Qwen35VLMMTPFixture().drafter })
     }
 }
 
@@ -161,15 +159,9 @@ extension Qwen35VLMMTPFixture {
         let container = makeModelContainer()
         let speculativeDecoding =
             speculates
-            ? try MLXSpeculativeDecoding(
-                drafterConfiguration: Qwen35MTPFixture.drafterConfiguration,
-                blockSize: Qwen35MTPFixture.blockSize
-            ) { configuration in
-                MTPDrafterContainer(
-                    context: MTPDrafterContext(
-                        configuration: configuration,
-                        model: try Qwen35VLMMTPFixture(readsImages: true).drafter))
-            } : nil
+            ? try Qwen35MTPFixture.makeSpeculativeDecoding(drafter: {
+                try Qwen35VLMMTPFixture(readsImages: true).drafter
+            }) : nil
         return MLXLanguageModel(
             configuration: ModelConfiguration(id: "probe/qwen35-vlm-mtp-\(UUID().uuidString)"),
             capabilities: [.vision],

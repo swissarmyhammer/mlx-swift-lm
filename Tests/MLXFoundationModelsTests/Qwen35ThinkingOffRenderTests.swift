@@ -290,10 +290,7 @@ struct Qwen35ThinkingOffRenderTests {
     /// A store in a folder of its own, whose writer writes nothing.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func makeStore() -> ExecutorPromptCacheStore {
-        ExecutorPromptCacheStore(
-            directory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("Qwen35ThinkingOffRenderTests-\(UUID().uuidString)"),
-            writer: { _, _ in })
+        PromptCacheTestStore.withoutWrites(folderNamed: "Qwen35ThinkingOffRenderTests")
     }
 
     /// The key of the session of `model`.
@@ -332,15 +329,9 @@ struct Qwen35ThinkingOffRenderTests {
     /// The instructions of the session and `turns` prompts.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func transcript(turns: Int) -> Transcript {
-        let instructionsEntry = Transcript.Instructions(
-            id: sessionID, segments: [.text(Transcript.TextSegment(content: instructions))],
-            toolDefinitions: [])
-        let prompts = (0 ..< turns).map { turn in
-            Transcript.Entry.prompt(
-                Transcript.Prompt(segments: [.text(Transcript.TextSegment(content: "turn \(turn)"))]
-                ))
-        }
-        return Transcript(entries: [.instructions(instructionsEntry)] + prompts)
+        let prompts = (0 ..< turns).map { TestTranscript.prompt("turn \($0)") }
+        return Transcript(
+            entries: [TestTranscript.instructions(id: sessionID, instructions)] + prompts)
     }
 }
 

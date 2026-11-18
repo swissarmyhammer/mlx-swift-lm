@@ -97,14 +97,13 @@ struct ExecutorPromptCacheMTPTests {
     ///   entry on disk.
     /// - Returns: The store, and its folder, which the caller removes.
     private func makeStore(writes: Bool = true) -> (store: ExecutorPromptCacheStore, folder: URL) {
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ExecutorPromptCacheMTPTests-\(UUID().uuidString)")
+        let folder = PromptCacheTestStore.folder(named: "ExecutorPromptCacheMTPTests")
         let store =
             writes
             ? ExecutorPromptCacheStore(
                 directory: folder,
                 capacityReader: PromptCacheSpoolFixtureVolume.capacity(ofVolumeOf:))
-            : ExecutorPromptCacheStore(directory: folder, writer: { _, _ in })
+            : PromptCacheTestStore.withoutWrites(in: folder)
         return (store, folder)
     }
 
@@ -114,31 +113,15 @@ struct ExecutorPromptCacheMTPTests {
     private func transcript(
         prompts: [[Int]], responses: [String], fixture: Qwen35MTPFixture
     ) -> Transcript {
-        var entries: [Transcript.Entry] = [
-            .instructions(
-                Transcript.Instructions(
-                    id: Self.sessionID,
-                    segments: [
-                        .text(Transcript.TextSegment(content: fixture.text(for: Self.instructions)))
-                    ],
-                    toolDefinitions: []))
-        ]
-        for (index, prompt) in prompts.enumerated() {
-            entries.append(
-                .prompt(
-                    Transcript.Prompt(
-                        segments: [
-                            .text(Transcript.TextSegment(content: fixture.text(for: prompt)))
-                        ])))
-            if responses.indices.contains(index) {
-                entries.append(
-                    .response(
-                        Transcript.Response(
-                            assetIDs: [],
-                            segments: [.text(Transcript.TextSegment(content: responses[index]))])))
-            }
+        let turns = prompts.enumerated().flatMap { index, prompt in
+            [TestTranscript.prompt(fixture.text(for: prompt))]
+                + (responses.indices.contains(index) ? [TestTranscript.response(responses[index])] : [])
         }
-        return Transcript(entries: entries)
+        return Transcript(
+            entries: [
+                TestTranscript.instructions(
+                    id: Self.sessionID, fixture.text(for: Self.instructions))
+            ] + turns)
     }
 
     /// Runs one greedy executor pass of `model` over `transcript` inside `store`.

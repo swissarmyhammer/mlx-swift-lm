@@ -794,8 +794,13 @@ extension MLXLanguageModel.Executor {
         // The generation hands its drafter state and its caches over before
         // the task returns its tokens, thus the hand-off holds them here.
         let generatedTokens = await task.value
-        handOff.commit(
-            plan, generatedTokens: generatedTokens, state: prefill.state, to: promptCache)
+        let state: LMOutput.State? =
+            switch prefill.outcome {
+            // A generation that stopped before its prefill ended left no model state.
+            case .pending: nil
+            case .ended(let state): state
+            }
+        handOff.commit(plan, generatedTokens: generatedTokens, state: state, to: promptCache)
     }
 
     /// Reads the cache of the session back from disk when it went there,
@@ -1517,10 +1522,7 @@ extension MLXLanguageModel.Executor {
         do {
             render = try ThinkingRender(config: config, thinkingEnabled: thinkingEnabled)
         } catch ReasoningError.cannotDisableReasoning {
-            throw LanguageModelError.unsupportedCapability(
-                LanguageModelError.UnsupportedCapability(
-                    capability: .reasoning,
-                    debugDescription: cannotDisableMessage))
+            throw unsupportedCapability(.reasoning, cannotDisableMessage)
         }
         return (
             render, try await render.prepare(messages: messages, tools: nil, context: context)
