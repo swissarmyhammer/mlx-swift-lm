@@ -1,7 +1,8 @@
 // Copyright © 2026 Apple Inc.
 //
 // Pins `decodeConv` bit-for-bit against `generalConv` (MLX's `Convolution`
-// kernel); a mismatch means compiled decode silently diverges from prefill.
+// kernel) through ``GDNDecodeConvolutionComparison``; a mismatch means compiled
+// decode silently diverges from prefill.
 
 import Foundation
 import MLX
@@ -11,22 +12,6 @@ import XCTest
 @testable import MLXLLM
 
 final class Qwen35GDNDecodeBitwiseTests: XCTestCase {
-
-    /// The f32 upcast is injective on finite f16/bf16/f32 values, so
-    /// bit-comparing the upcast compares the originals.
-    private func assertBitIdentical(
-        _ got: MLXArray, _ want: MLXArray, _ label: String,
-        file: StaticString = #filePath, line: UInt = #line
-    ) {
-        XCTAssertEqual(got.dtype, want.dtype, "\(label): dtype", file: file, line: line)
-        XCTAssertEqual(got.shape, want.shape, "\(label): shape", file: file, line: line)
-        let a = got.asType(.float32).asArray(Float.self)
-        let b = want.asType(.float32).asArray(Float.self)
-        let mismatches = zip(a, b).lazy.filter { $0.bitPattern != $1.bitPattern }.count
-        XCTAssertEqual(
-            mismatches, 0, "\(label): \(mismatches)/\(a.count) elements differ bitwise",
-            file: file, line: line)
-    }
 
     /// 256 conv channels — wide enough that an accumulation-order change in
     /// MLX's Convolution kernel cannot pass by coincidence (native-dtype
@@ -62,22 +47,8 @@ final class Qwen35GDNDecodeBitwiseTests: XCTestCase {
         let config = try tinyGDNConfiguration()
         for dtype in [DType.float16, DType.bfloat16] {
             withRandomState(MLXRandom.RandomState(seed: 11)) {
-                let gdn = Qwen35GatedDeltaNet(config)
-                gdn.conv1d.update(
-                    parameters: gdn.conv1d.parameters().mapValues { $0.asType(dtype) })
-
-                let qkv = MLXRandom.normal([1, 1, gdn.convDim]).asType(dtype)
-                let convState = MLXRandom.normal(
-                    [1, gdn.convKernelSize - 1, gdn.convDim]
-                ).asType(dtype)
-                eval(qkv, convState)
-
-                let (conv, state) = gdn.decodeConv(convState: convState, qkv: qkv)
-                let (refConv, refState) = gdn.generalConv(convState: convState, qkv: qkv)
-                eval(conv, state, refConv, refState)
-
-                assertBitIdentical(conv, refConv, "conv output (\(dtype))")
-                assertBitIdentical(state, refState, "conv state (\(dtype))")
+                GDNDecodeConvolutionComparison.assertFusedMatchesGeneral(
+                    Qwen35GatedDeltaNet(config), dtype: dtype)
             }
         }
     }

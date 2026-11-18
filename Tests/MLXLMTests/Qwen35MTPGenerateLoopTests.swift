@@ -356,9 +356,13 @@ struct Qwen35CompiledVerifyTests {
     private func verify(
         _ model: Qwen35TextModel, tokenCount: Int, rollingBack rollback: Int, compiled: Bool
     ) throws -> CompiledVerifyOutcome {
-        let cache = try model.newCache(parameters: nil)
-        let prompt = tokens(Self.promptLength, of: model, seed: Self.promptSeed)
-        eval(model(LMInput.Text(tokens: prompt[.newAxis]), cache: cache, state: nil).logits)
+        let cache = Qwen35VerifyPrefill.prefilled(
+            model, prompt: tokens(Self.promptLength, of: model, seed: Self.promptSeed)[.newAxis],
+            caches: try model.newCache(parameters: nil),
+            forward: { model, prompt, cache in
+                model(LMInput.Text(tokens: prompt), cache: cache, state: nil)
+            }, evaluating: \.logits
+        ).caches
 
         var state = LMOutput.State()
         state[mtpEmitFlagKey] = true

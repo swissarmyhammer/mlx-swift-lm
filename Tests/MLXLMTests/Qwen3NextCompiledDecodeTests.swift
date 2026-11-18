@@ -7,23 +7,40 @@ import XCTest
 @testable import MLXLLM
 
 final class Qwen3NextCompiledDecodeTests: XCTestCase {
-    private struct Snapshot: Equatable {
-        let shape: [Int]
-        let dtype: DType
-        let bytes: Data
-
-        init(_ array: MLXArray) {
-            let contents = array.asData(access: .copy)
-            self.shape = contents.shape
-            self.dtype = contents.dType
-            self.bytes = contents.data
+    /// The parts of the tiny Qwen3-Next test model that differ from the shared configuration of
+    /// ``GDNDecodeKernelFixture``.
+    enum TinyModel {
+        /// The decoder layers: a full-attention layer follows each linear-attention layer.
+        static let hiddenLayers = 4
+        /// The head width of the full-attention layers of the default model.
+        static let attentionHeadDim = 8
+        /// The hidden size and the expert MLP size of the default model.
+        static let hiddenSize = 16
+        /// The hidden size and the expert MLP size that a group size of 32 can quantize.
+        static let quantizableHiddenSize = 64
+        /// The width of each linear-attention key and value head of the default model.
+        static let linearHeadDim = 8
+        /// The width of each linear-attention head that a group size of 32 can quantize.
+        static let quantizableLinearHeadDim = 32
+        /// The number of linear-attention key heads and of value heads.
+        static let linearHeads = 2
+        /// The vocabulary size.
+        static let vocabularySize = 32
+        /// The base of the rotary position embedding.
+        static let ropeTheta = 10000.0
+        /// The part of each full-attention head that the rotary embedding turns.
+        static let partialRotaryFactor = 0.25
+        /// The most positions of the rotary embedding.
+        static let maxPositionEmbeddings = 128
+        /// The keys of the Qwen3-Next model that the shared fixture does not set.
+        static var extraKeys: [String: Any] {
+            [
+                "vocab_size": vocabularySize,
+                "rope_theta": ropeTheta, "partial_rotary_factor": partialRotaryFactor,
+                "max_position_embeddings": maxPositionEmbeddings, "norm_topk_prob": true,
+                "tie_word_embeddings": true,
+            ]
         }
-    }
-
-    private struct RunResult {
-        let logits: [Snapshot]
-        let cacheState: [Snapshot]
-        let offsets: [Int]
     }
 
     /// Decodes the configuration of a tiny Qwen3-Next model with four layers. A full-attention
@@ -35,58 +52,77 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
     /// - Returns: The configuration.
     /// - Throws: The error of the configuration decoder.
     static func configuration(
-        headDim: Int = 8,
+        headDim: Int = TinyModel.attentionHeadDim,
         quantizable: Bool = false
     ) throws -> Qwen3NextConfiguration {
-        let hiddenSize = quantizable ? 64 : 16
-        let intermediateSize = quantizable ? 128 : 32
-        let linearHeadDim = quantizable ? 32 : 8
-        let expertSize = quantizable ? 64 : 16
-        let json = """
-            {
-                "hidden_size": \(hiddenSize), "num_hidden_layers": 4,
-                "intermediate_size": \(intermediateSize),
-                "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": \(headDim),
-                "linear_num_value_heads": 2, "linear_num_key_heads": 2,
-                "linear_key_head_dim": \(linearHeadDim),
-                "linear_value_head_dim": \(linearHeadDim),
-                "linear_conv_kernel_dim": 4,
-                "num_experts": 4, "num_experts_per_tok": 2, "decoder_sparse_step": 1,
-                "shared_expert_intermediate_size": \(expertSize), "mlp_only_layers": [],
-                "moe_intermediate_size": \(expertSize), "rms_norm_eps": 1e-6,
-                "vocab_size": 32,
-                "rope_theta": 10000.0, "partial_rotary_factor": 0.25,
-                "max_position_embeddings": 128, "norm_topk_prob": true,
-                "tie_word_embeddings": true, "attention_bias": false,
-                "full_attention_interval": 2
+        let linearHeadDim =
+            quantizable ? TinyModel.quantizableLinearHeadDim : TinyModel.linearHeadDim
+        let heads = GDNDecodeKernelFixture.HeadCase(
+            batch: 1, keyHeads: TinyModel.linearHeads, valueHeads: TinyModel.linearHeads,
+            keyHeadDim: linearHeadDim, valueHeadDim: linearHeadDim)
+        return try GDNDecodeKernelFixture.configuration(
+            Qwen3NextConfiguration.self, heads, hiddenLayers: TinyModel.hiddenLayers,
+            hiddenSize: quantizable ? TinyModel.quantizableHiddenSize : TinyModel.hiddenSize,
+            attentionHeadDim: headDim, extraKeys: TinyModel.extraKeys)
+    }
+
+    /// A cache factory that keeps the linear-attention caches of the model and gives each
+    /// full-attention layer a new cache from `makeAttention`.
+    ///
+    /// - Parameter makeAttention: The factory of one full-attention layer cache.
+    /// - Returns: The factory of the caches of a model.
+    private static func attentionCaches(
+        _ makeAttention: @escaping () -> KVCache
+    ) -> (Qwen3NextModel) throws -> [KVCache] {
+        { model in
+            try model.newCache(parameters: nil).map { cache in
+                cache is MambaCache ? cache : makeAttention()
             }
-            """
-        return try JSONDecoder().decode(
-            Qwen3NextConfiguration.self, from: Data(json.utf8))
+        }
     }
 
     private func run(
         _ model: Qwen3NextModel,
         tokens: [Int32],
         compiled: Bool,
-        cache makeCache: (Qwen3NextModel) throws -> [KVCache] = {
-            try $0.newCache(parameters: nil)
-        }
-    ) throws -> RunResult {
+        cache makeCache: (Qwen3NextModel) throws -> [KVCache]
+    ) throws -> CompiledDecodeRun {
         let cache = try makeCache(model)
-        var logits: [Snapshot] = []
-        for token in tokens {
-            let output = model.forward(
+        return CompiledDecodeRun.decoding(tokens, cache: cache) { token in
+            model.forward(
                 MLXArray([token]).reshaped(1, 1),
                 cache: cache,
                 useCompiledDecode: compiled)
-            eval(output)
-            logits.append(Snapshot(output))
         }
-        return RunResult(
-            logits: logits,
-            cacheState: cache.flatMap { $0.innerState() }.map(Snapshot.init),
-            offsets: cache.map(\.offset))
+    }
+
+    /// Decodes `tokens` on the general path and on the compiled path, and asserts that both
+    /// give the same logits, cache state and cache offsets.
+    ///
+    /// - Parameters:
+    ///   - model: The model to decode with.
+    ///   - tokens: The tokens to feed one at a time.
+    ///   - makeCache: The factory of the caches of each run.
+    ///   - context: The text that the failure messages name, or `nil`.
+    ///   - file: The file of the caller.
+    ///   - line: The line of the caller.
+    /// - Returns: The compiled run.
+    /// - Throws: The error of the cache factory.
+    @discardableResult
+    private func assertCompiledMatchesGeneral(
+        _ model: Qwen3NextModel,
+        tokens: [Int32],
+        cache makeCache: (Qwen3NextModel) throws -> [KVCache] = {
+            try $0.newCache(parameters: nil)
+        },
+        context: String? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> CompiledDecodeRun {
+        try CompiledDecodeRun.assertCompiledMatchesEager(context, file: file, line: line) {
+            compiled in
+            try run(model, tokens: tokens, compiled: compiled, cache: makeCache)
+        }
     }
 
     func testSharedScheduleSplitsAtAttentionWrites() {
@@ -106,21 +142,8 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         let config = try Self.configuration()
         for dtype in [DType.float16, DType.bfloat16] {
             MLXRandom.seed(29)
-            let gdn = Qwen3NextGatedDeltaNet(config)
-            gdn.conv1d.update(
-                parameters: gdn.conv1d.parameters().mapValues { $0.asType(dtype) })
-            let qkv = MLXRandom.normal([1, 1, gdn.convDim]).asType(dtype)
-            let state = MLXRandom.normal(
-                [1, gdn.convKernelSize - 1, gdn.convDim]
-            ).asType(dtype)
-
-            let fused = gdn.decodeConv(convState: state, qkv: qkv)
-            let general = gdn.generalConv(convState: state, qkv: qkv)
-
-            XCTAssertEqual(
-                Snapshot(fused.conv), Snapshot(general.conv), "conv differs for \(dtype)")
-            XCTAssertEqual(
-                Snapshot(fused.state), Snapshot(general.state), "state differs for \(dtype)")
+            GDNDecodeConvolutionComparison.assertFusedMatchesGeneral(
+                Qwen3NextGatedDeltaNet(config), dtype: dtype)
         }
     }
 
@@ -131,13 +154,9 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
             model.update(parameters: model.parameters().mapValues { $0.asType(dtype) })
             let tokens = [Int32(1), 7, 3, 9, 2]
 
-            let general = try run(model, tokens: tokens, compiled: false)
-            let compiled = try run(model, tokens: tokens, compiled: true)
+            let compiled = try assertCompiledMatchesGeneral(
+                model, tokens: tokens, context: "\(dtype)")
 
-            XCTAssertEqual(compiled.logits, general.logits, "logits differ for \(dtype)")
-            XCTAssertEqual(
-                compiled.cacheState, general.cacheState, "cache state differs for \(dtype)")
-            XCTAssertEqual(compiled.offsets, general.offsets)
             XCTAssertEqual(compiled.offsets, [5, 5, 5, 5])
             if dtype == .float16 {
                 XCTAssertGreaterThan(model.model.compiledDecodeSegmentCount, 0)
@@ -164,9 +183,9 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         let general = layer(x, attentionMask: .none, ssmMask: nil, cache: cache)
         let step = layer.linearLayerBody(x: x, convState: convState, recState: recState)
 
-        XCTAssertEqual(Snapshot(step.output), Snapshot(general))
-        XCTAssertEqual(Snapshot(step.convState), Snapshot(try XCTUnwrap(cache[0])))
-        XCTAssertEqual(Snapshot(step.recurrentState), Snapshot(try XCTUnwrap(cache[1])))
+        XCTAssertEqual(ArraySnapshot(step.output), ArraySnapshot(general))
+        XCTAssertEqual(ArraySnapshot(step.convState), ArraySnapshot(try XCTUnwrap(cache[0])))
+        XCTAssertEqual(ArraySnapshot(step.recurrentState), ArraySnapshot(try XCTUnwrap(cache[1])))
         XCTAssertNil(step.snapshots)
     }
 
@@ -177,21 +196,10 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         let model = Qwen3NextModel(try Self.configuration(headDim: 32))
         model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
         let tokens = [Int32(2), 4, 6]
-        let quantizedCache: (Qwen3NextModel) throws -> [KVCache] = { model in
-            try model.newCache(parameters: nil).map { cache in
-                cache is MambaCache
-                    ? cache : QuantizedKVCache(groupSize: 32, bits: 8)
-            }
-        }
+        let quantizedCache = Self.attentionCaches { QuantizedKVCache(groupSize: 32, bits: 8) }
 
-        let general = try run(
-            model, tokens: tokens, compiled: false, cache: quantizedCache)
-        let compiled = try run(
-            model, tokens: tokens, compiled: true, cache: quantizedCache)
+        try assertCompiledMatchesGeneral(model, tokens: tokens, cache: quantizedCache)
 
-        XCTAssertEqual(compiled.logits, general.logits)
-        XCTAssertEqual(compiled.cacheState, general.cacheState)
-        XCTAssertEqual(compiled.offsets, general.offsets)
         XCTAssertGreaterThan(model.model.compiledDecodeSegmentCount, 0)
     }
 
@@ -200,20 +208,10 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         let model = Qwen3NextModel(try Self.configuration(headDim: 32))
         model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
         let tokens = [Int32(2), 4, 6]
-        let turboQuantCache: (Qwen3NextModel) throws -> [KVCache] = { model in
-            try model.newCache(parameters: nil).map { cache in
-                cache is MambaCache ? cache : TurboQuantKVCache(bits: 4, seed: 67)
-            }
-        }
+        let turboQuantCache = Self.attentionCaches { TurboQuantKVCache(bits: 4, seed: 67) }
 
-        let general = try run(
-            model, tokens: tokens, compiled: false, cache: turboQuantCache)
-        let fallback = try run(
-            model, tokens: tokens, compiled: true, cache: turboQuantCache)
+        try assertCompiledMatchesGeneral(model, tokens: tokens, cache: turboQuantCache)
 
-        XCTAssertEqual(fallback.logits, general.logits)
-        XCTAssertEqual(fallback.cacheState, general.cacheState)
-        XCTAssertEqual(fallback.offsets, general.offsets)
         XCTAssertEqual(model.model.compiledDecodeSegmentCount, 0)
     }
 
@@ -225,12 +223,8 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         quantize(model: model, groupSize: 32, bits: 4)
         let tokens = [Int32(3), 8, 1, 5]
 
-        let general = try run(model, tokens: tokens, compiled: false)
-        let compiled = try run(model, tokens: tokens, compiled: true)
+        try assertCompiledMatchesGeneral(model, tokens: tokens)
 
-        XCTAssertEqual(compiled.logits, general.logits)
-        XCTAssertEqual(compiled.cacheState, general.cacheState)
-        XCTAssertEqual(compiled.offsets, general.offsets)
         XCTAssertGreaterThan(model.model.compiledDecodeSegmentCount, 0)
     }
 

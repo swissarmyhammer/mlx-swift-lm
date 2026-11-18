@@ -89,12 +89,6 @@ struct Qwen35VLMCompiledVerifyTests {
     /// The factor that gives the test model other weights.
     private static let weightUpdateFactor: Float = 1.5
 
-    /// The quantization of a fused projection.
-    private static let projectionGroupSize = 32
-
-    /// The bits of a fused projection.
-    private static let projectionBits = 4
-
     /// The test model, whose GDN layers the kernel runs, on seeded weights.
     private static func kernelModel(dtype: DType = Self.dtype) throws -> Qwen35Language.Model {
         let configuration = try GDNDecodeKernelFixture.configuration(
@@ -120,6 +114,20 @@ struct Qwen35VLMCompiledVerifyTests {
         (0 ..< hiddenLayers).map { isLinearLayer($0) ? MambaCache() : KVCacheSimple() }
     }
 
+    /// The caches `caches` with each attention layer cache replaced by
+    /// `replaceAttention(cache)`. The GDN layer caches stay as they are.
+    ///
+    /// - Parameters:
+    ///   - caches: The caches of the test model.
+    ///   - replaceAttention: The replacement of one attention layer cache.
+    /// - Returns: The caches with the replaced attention layer caches.
+    /// - Throws: The error of `replaceAttention`.
+    private static func replacingAttentionCaches(
+        of caches: [KVCache], _ replaceAttention: (KVCache) throws -> KVCache
+    ) rethrows -> [KVCache] {
+        try caches.map { cache in cache is MambaCache ? cache : try replaceAttention(cache) }
+    }
+
     /// The M-RoPE positions of `length` tokens after `offset` tokens, moved by
     /// ``positionDelta``.
     private static func positions(offset: Int, length: Int) -> MLXArray {
@@ -135,13 +143,15 @@ struct Qwen35VLMCompiledVerifyTests {
 
     /// The caches of `model` after the prompt, on the general path.
     private static func prefilled(_ model: Qwen35Language.Model) -> [KVCache] {
-        let cache = caches()
-        eval(
-            model.forward(
-                tokens(promptLength, seed: promptSeed), cache: cache,
-                positionIds: positions(offset: promptOffset, length: promptLength),
-                useCompiledDecode: false))
-        return cache
+        Qwen35VerifyPrefill.prefilled(
+            model, prompt: tokens(promptLength, seed: promptSeed), caches: caches(),
+            forward: { model, prompt, cache in
+                model.forward(
+                    prompt, cache: cache,
+                    positionIds: positions(offset: promptOffset, length: promptLength),
+                    useCompiledDecode: false)
+            }, evaluating: \.self
+        ).caches
     }
 
     /// The hidden rows of one verify forward of `tokenCount` tokens after the prompt.
@@ -185,21 +195,6 @@ struct Qwen35VLMCompiledVerifyTests {
         return CompiledVerifyOutcome(
             logits: model.embedTokens.asLinear(hidden), hidden: hidden, cache: cache,
             rollingBack: rollback)
-    }
-
-    /// Replaces the input projections of `gdn` with 4-bit ones, which fuse.
-    private func quantizeProjections(of gdn: Qwen35Language.GatedDeltaNet) throws {
-        let quantized = { (linear: Linear) -> Linear in
-            QuantizedLinear(
-                linear, groupSize: Self.projectionGroupSize, bits: Self.projectionBits)
-        }
-        try gdn.update(
-            modules: ModuleChildren(values: [
-                "in_proj_qkv": .value(quantized(gdn.inProjQKV)),
-                "in_proj_z": .value(quantized(gdn.inProjZ)),
-                "in_proj_b": .value(quantized(gdn.inProjB)),
-                "in_proj_a": .value(quantized(gdn.inProjA)),
-            ]), verify: [])
     }
 
     // MARK: - The compiled verify
@@ -287,7 +282,7 @@ struct Qwen35VLMCompiledVerifyTests {
         let model = try Self.kernelModel()
         let gdn = try #require(
             model.modules().compactMap { $0 as? Qwen35Language.GatedDeltaNet }.first)
-        try quantizeProjections(of: gdn)
+        try gdn.quantizeInputProjections()
         #expect(try gdn.prepareFusedInputProjection())
         _ = verify(
             model, tokenCount: CompiledVerifyShape.fewestTokens, rollingBack: Self.noRollback,
@@ -372,11 +367,8 @@ struct Qwen35VLMCompiledVerifyTests {
     @Test("a verify over a TurboQuant cache takes the general path")
     func turboQuantCacheCompilesNoVerifySegment() throws {
         let model = try Self.kernelModel()
-        let prefilled = Self.prefilled(model)
-        let cache = prefilled.indices.map { index -> KVCache in
-            Self.isLinearLayer(index)
-                ? prefilled[index]
-                : TurboQuantKVCache(bits: Self.turboQuantCacheBits, seed: Self.turboQuantSeed)
+        let cache = Self.replacingAttentionCaches(of: Self.prefilled(model)) { _ in
+            TurboQuantKVCache(bits: Self.turboQuantCacheBits, seed: Self.turboQuantSeed)
         }
         eval(
             Self.forward(
@@ -389,9 +381,8 @@ struct Qwen35VLMCompiledVerifyTests {
         let model = try Self.kernelModel()
         let tokenCount = CompiledVerifyShape.fewestTokens
         let quantizedPrefill = {
-            try Self.prefilled(model).map { cache -> KVCache in
-                guard let simple = cache as? KVCacheSimple else { return cache }
-                return try simple.toQuantized(
+            try Self.replacingAttentionCaches(of: Self.prefilled(model)) { cache in
+                try #require(cache as? KVCacheSimple).toQuantized(
                     groupSize: Self.quantizedCacheGroupSize, bits: Self.quantizedCacheBits)
             }
         }

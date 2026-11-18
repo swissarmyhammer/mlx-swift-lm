@@ -263,10 +263,13 @@ struct Qwen35VLMVerifyAttentionTests {
 
     /// The caches of `model` after `context`, and the state the prompt left.
     private static func prefilled(_ model: Qwen35, _ context: MLXArray) throws -> Prefilled {
-        let cache: [KVCache?] = try model.newCache(parameters: nil)
-        let prompt = model.languageModel(context, cache: cache, state: nil)
-        eval(prompt.logits)
-        return Prefilled(cache: cache, state: prompt.state ?? LMOutput.State())
+        let caches: [KVCache?] = try model.newCache(parameters: nil)
+        let prefill = Qwen35VerifyPrefill.prefilled(
+            model, prompt: context, caches: caches,
+            forward: { model, prompt, cache in
+                model.languageModel(prompt, cache: cache, state: nil)
+            }, evaluating: \.logits)
+        return Prefilled(cache: prefill.caches, state: prefill.output.state ?? LMOutput.State())
     }
 
     /// One forward of the language model of `model` over the caches of

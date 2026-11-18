@@ -50,31 +50,99 @@ struct Qwen35AttentionLayerFixture {
         case values
     }
 
+    /// The head shape of the gated delta net (GDN) layers of a configuration.
+    struct LinearHeads: Sendable {
+        /// The number of key heads.
+        let keyHeads: Int
+        /// The number of value heads.
+        let valueHeads: Int
+        /// The width of one key head.
+        let keyHeadDim: Int
+        /// The width of one value head.
+        let valueHeadDim: Int
+    }
+
+    /// The decoder layers: one GDN layer, then one full-attention layer.
+    static let hiddenLayers = 2
+
+    /// The width of the dense MLPs.
+    static let intermediateSize = 64
+
+    /// The GDN heads: one key head and two value heads, each of width 8.
+    static let linearHeads = LinearHeads(
+        keyHeads: 1, valueHeads: 2, keyHeadDim: 8, valueHeadDim: 8)
+
+    /// The conv taps of the GDN layers.
+    static let convKernel = 4
+
+    /// The number of tokens of the vocabulary.
+    static let vocabularySize = 32
+
+    /// The layer interval of the full-attention layers.
+    static let fullAttentionInterval = 2
+
     /// The width of one attention head.
     let headDim: Int
 
     /// A small dense Qwen3.5 text configuration with one full-attention
     /// layer.
     func configuration() throws -> Qwen35TextConfiguration {
-        let json = """
-            {
-                "model_type": "qwen3_5",
-                "hidden_size": \(Self.hiddenSize),
-                "num_hidden_layers": 2,
-                "intermediate_size": 64,
-                "num_attention_heads": \(Self.queryHeads),
-                "num_key_value_heads": \(Self.kvHeads),
-                "head_dim": \(headDim),
-                "linear_num_value_heads": 2,
-                "linear_num_key_heads": 1,
-                "linear_key_head_dim": 8,
-                "linear_value_head_dim": 8,
-                "linear_conv_kernel_dim": 4,
-                "vocab_size": 32,
-                "full_attention_interval": 2
-            }
-            """
-        return try JSONDecoder().decode(Qwen35TextConfiguration.self, from: Data(json.utf8))
+        try Self.configuration(Qwen35TextConfiguration.self, headDim: headDim)
+    }
+
+    /// A small Qwen 3.5 configuration, decoded as `type`. Each parameter but
+    /// the head width defaults to the shape of ``configuration()``.
+    ///
+    /// - Parameters:
+    ///   - type: The configuration type that decodes the Qwen 3.5 keys.
+    ///   - headDim: The width of one full-attention head.
+    ///   - hiddenSize: The width of the residual stream.
+    ///   - hiddenLayers: The number of decoder layers.
+    ///   - intermediateSize: The width of the dense MLPs.
+    ///   - queryHeads: The number of query heads of a full-attention layer.
+    ///   - kvHeads: The number of KV heads of a full-attention layer.
+    ///   - linearHeads: The head shape of the GDN layers.
+    ///   - convKernel: The conv taps of the GDN layers.
+    ///   - vocabularySize: The number of tokens of the vocabulary.
+    ///   - fullAttentionInterval: The layer interval of the full-attention
+    ///     layers.
+    ///   - extraKeys: The keys that a test adds to the configuration, or whose
+    ///     value it replaces.
+    /// - Returns: The configuration.
+    /// - Throws: The error of the serializer or of the decoder.
+    static func configuration<Configuration: Decodable>(
+        _ type: Configuration.Type,
+        headDim: Int,
+        hiddenSize: Int = Qwen35AttentionLayerFixture.hiddenSize,
+        hiddenLayers: Int = Qwen35AttentionLayerFixture.hiddenLayers,
+        intermediateSize: Int = Qwen35AttentionLayerFixture.intermediateSize,
+        queryHeads: Int = Qwen35AttentionLayerFixture.queryHeads,
+        kvHeads: Int = Qwen35AttentionLayerFixture.kvHeads,
+        linearHeads: LinearHeads = Qwen35AttentionLayerFixture.linearHeads,
+        convKernel: Int = Qwen35AttentionLayerFixture.convKernel,
+        vocabularySize: Int = Qwen35AttentionLayerFixture.vocabularySize,
+        fullAttentionInterval: Int = Qwen35AttentionLayerFixture.fullAttentionInterval,
+        extraKeys: [String: Any] = [:]
+    ) throws -> Configuration {
+        let keys: [String: Any] = [
+            "model_type": "qwen3_5",
+            "hidden_size": hiddenSize,
+            "num_hidden_layers": hiddenLayers,
+            "intermediate_size": intermediateSize,
+            "num_attention_heads": queryHeads,
+            "num_key_value_heads": kvHeads,
+            "head_dim": headDim,
+            "linear_num_value_heads": linearHeads.valueHeads,
+            "linear_num_key_heads": linearHeads.keyHeads,
+            "linear_key_head_dim": linearHeads.keyHeadDim,
+            "linear_value_head_dim": linearHeads.valueHeadDim,
+            "linear_conv_kernel_dim": convKernel,
+            "vocab_size": vocabularySize,
+            "full_attention_interval": fullAttentionInterval,
+        ]
+        let json = try JSONSerialization.data(
+            withJSONObject: keys.merging(extraKeys) { _, extra in extra })
+        return try JSONDecoder().decode(type, from: json)
     }
 
     /// The full-attention layer of the configuration, with its weights in

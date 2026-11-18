@@ -109,6 +109,13 @@ enum GDNDecodeKernelFixture {
             "\(batch) x \(keyHeads) key heads of \(keyHeadDim), "
                 + "\(valueHeads) value heads of \(valueHeadDim)"
         }
+
+        /// The GDN head shape of a configuration of this case.
+        var linearHeads: Qwen35AttentionLayerFixture.LinearHeads {
+            Qwen35AttentionLayerFixture.LinearHeads(
+                keyHeads: keyHeads, valueHeads: valueHeads, keyHeadDim: keyHeadDim,
+                valueHeadDim: valueHeadDim)
+        }
     }
 
     /// The head shape of the GDN layers of Qwen3.8.
@@ -201,7 +208,7 @@ enum GDNDecodeKernelFixture {
 
     /// The head width of the full-attention layers of the test
     /// configuration.
-    private static let attentionHeadDim = 32
+    static let attentionHeadDim = 32
 
     /// The vocabulary size of the test configuration: the vocabulary of the
     /// Qwen 3.5 MTP fixtures, so each decode prompt of the Qwen 3.5 suites is a
@@ -251,7 +258,9 @@ enum GDNDecodeKernelFixture {
 
     /// The configuration of one GDN layer of a head shape. One JSON text
     /// holds the keys of the Qwen 3.5 and the Qwen3-Next configurations, thus
-    /// every layer kind reads the same shape.
+    /// every layer kind reads the same shape. The keys of the dense layers
+    /// come from ``Qwen35AttentionLayerFixture``, and this fixture adds the
+    /// keys of the sparse MLP blocks.
     ///
     /// - Parameters:
     ///   - type: The configuration type of the layer kind.
@@ -259,36 +268,34 @@ enum GDNDecodeKernelFixture {
     ///   - hiddenLayers: The decoder layers of a whole model: one
     ///     full-attention layer in each ``fullAttentionInterval``, the others
     ///     GDN layers.
+    ///   - hiddenSize: The hidden size, which is also the size of the dense
+    ///     and the expert MLPs.
+    ///   - attentionHeadDim: The head width of the full-attention layers.
+    ///   - extraKeys: The keys that a test model adds to the configuration, or
+    ///     whose value it replaces.
     /// - Returns: The configuration.
-    /// - Throws: The error of the decoder.
+    /// - Throws: The error of the serializer or of the decoder.
     static func configuration<Configuration: Decodable>(
-        _ type: Configuration.Type, _ headCase: HeadCase, hiddenLayers: Int = 1
+        _ type: Configuration.Type, _ headCase: HeadCase, hiddenLayers: Int = 1,
+        hiddenSize: Int = GDNDecodeKernelFixture.hiddenSize,
+        attentionHeadDim: Int = GDNDecodeKernelFixture.attentionHeadDim,
+        extraKeys: [String: Any] = [:]
     ) throws -> Configuration {
-        let json = """
-            {
-                "model_type": "qwen3_5",
-                "hidden_size": \(hiddenSize),
-                "num_hidden_layers": \(hiddenLayers),
-                "intermediate_size": \(hiddenSize),
-                "num_attention_heads": \(attentionHeads),
-                "num_key_value_heads": 1,
-                "head_dim": \(attentionHeadDim),
-                "linear_num_value_heads": \(headCase.valueHeads),
-                "linear_num_key_heads": \(headCase.keyHeads),
-                "linear_key_head_dim": \(headCase.keyHeadDim),
-                "linear_value_head_dim": \(headCase.valueHeadDim),
-                "linear_conv_kernel_dim": \(convTaps),
-                "vocab_size": \(vocabularySize),
-                "full_attention_interval": \(fullAttentionInterval),
-                "num_experts": \(experts),
-                "num_experts_per_tok": \(expertsPerToken),
-                "decoder_sparse_step": 1,
-                "shared_expert_intermediate_size": \(hiddenSize),
-                "moe_intermediate_size": \(hiddenSize),
-                "rms_norm_eps": \(rmsNormEps)
-            }
-            """
-        return try JSONDecoder().decode(type, from: Data(json.utf8))
+        let sparseKeys: [String: Any] = [
+            "num_experts": experts,
+            "num_experts_per_tok": expertsPerToken,
+            "decoder_sparse_step": 1,
+            "shared_expert_intermediate_size": hiddenSize,
+            "moe_intermediate_size": hiddenSize,
+            "rms_norm_eps": rmsNormEps,
+        ]
+        return try Qwen35AttentionLayerFixture.configuration(
+            type, headDim: attentionHeadDim, hiddenSize: hiddenSize,
+            hiddenLayers: hiddenLayers, intermediateSize: hiddenSize,
+            queryHeads: attentionHeads, kvHeads: 1, linearHeads: headCase.linearHeads,
+            convKernel: convTaps, vocabularySize: vocabularySize,
+            fullAttentionInterval: fullAttentionInterval,
+            extraKeys: sparseKeys.merging(extraKeys) { _, extra in extra })
     }
 
     /// Sets the parameters of a layer to `dtype`, gives its gated RMSNorm a
