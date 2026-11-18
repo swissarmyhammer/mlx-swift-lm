@@ -115,7 +115,8 @@ struct ExecutorPromptCacheMTPTests {
     ) -> Transcript {
         let turns = prompts.enumerated().flatMap { index, prompt in
             [TestTranscript.prompt(fixture.text(for: prompt))]
-                + (responses.indices.contains(index) ? [TestTranscript.response(responses[index])] : [])
+                + (responses.indices.contains(index)
+                    ? [TestTranscript.response(responses[index])] : [])
         }
         return Transcript(
             entries: [

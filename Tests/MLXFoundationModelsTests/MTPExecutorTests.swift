@@ -127,7 +127,8 @@ struct MTPExecutorTests {
     func anAllowedToolTurnWritesThePlainText() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights, capabilities: [.toolCalling])
+        let models = try Qwen35MTPFixture.makeLanguageModels(
+            weights: weights, capabilities: [.toolCalling])
 
         let turns = try await MTPExecutorTurns.respond(
             plain: models.plain, speculative: models.speculative,
@@ -287,7 +288,8 @@ struct MTPExecutorTests {
         try #require(decode.tokens.firstIndex(of: stopToken) == Self.bonusSlotStopIndex)
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights, eosTokenIds: [stopToken])
+        let models = try Qwen35MTPFixture.makeLanguageModels(
+            weights: weights, eosTokenIds: [stopToken])
 
         let turns = try await MTPExecutorTurns.respond(
             plain: models.plain, speculative: models.speculative,

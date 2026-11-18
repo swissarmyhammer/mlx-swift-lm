@@ -63,6 +63,15 @@ public enum GuidedGenerationLoop {
     ///     Used by the run tracker to detect consecutive whitespace runs.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
+    ///   - logitProcessor: Optional processor, such as
+    ///     `GenerateParameters.processor()` for repetition, presence and
+    ///     frequency penalties. It processes the raw logits before the grammar
+    ///     mask. As in `TokenIterator`, `didSample` sees every sampled token,
+    ///     including a stop token, and `didEmit` every token in the output.
+    ///     Fast-forward tokens get both calls but are not processed or sampled.
+    ///   - logitSampler: Sampler applied to the masked logits, such as
+    ///     `GenerateParameters.sampler()` for temperature, top-p, top-k and
+    ///     min-p. Nil samples greedily.
     ///   - prefill: Prompt prefill parameters (step size, chunking strategy,
     ///     progress callback). Defaults to no step size, which lets the model
     ///     prefill with its own default step, and balanced chunking.
@@ -89,6 +98,8 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
+        logitProcessor: (any LogitProcessor)? = nil,
+        logitSampler: (any LogitSampler)? = nil,
         prefill: PrefillParameters = .init(),
         emit: (String) -> Bool
     ) throws -> Int {
@@ -98,6 +109,7 @@ public enum GuidedGenerationLoop {
             quantizedKVStart: quantizedKVStart, completionReserve: completionReserve,
             hardReserve: hardReserve, closingBias: closingBias, whitespaceBias: whitespaceBias,
             whitespaceTokenIDs: whitespaceTokenIDs, diagnosticLog: diagnosticLog,
+            logitProcessor: logitProcessor, logitSampler: logitSampler,
             prefill: prefill, speculation: nil, emit: emit)
     }
 
@@ -109,6 +121,9 @@ public enum GuidedGenerationLoop {
     /// of plain guided decoding: see ``GuidedSpeculation``. A drafter that cannot draft for the
     /// target, or a target that cannot verify in place, leaves the generation to plain decoding,
     /// and the generation records why on its diagnostic sink, which the response metadata reads.
+    ///
+    /// A caller's processor or sampler decodes plainly: the MTP round verifies its drafts
+    /// greedily, and its output is the output of plain greedy decoding only.
     ///
     /// - Parameters:
     ///   - speculation: The MTP drafter of the generation, or `nil` for plain decoding.
@@ -134,6 +149,8 @@ public enum GuidedGenerationLoop {
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
         diagnosticLog: Bool = false,
+        logitProcessor: (any LogitProcessor)? = nil,
+        logitSampler: (any LogitSampler)? = nil,
         prefill: PrefillParameters = .init(),
         speculation: MTPSpeculation?,
         bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing(),
@@ -143,6 +160,7 @@ public enum GuidedGenerationLoop {
             kvCache: kvCache, kvBits: kvBits, kvGroupSize: kvGroupSize,
             quantizedKVStart: quantizedKVStart)
         var target = try GuidedTarget(model: context.model, parameters: parameters)
+        let speculation = logitProcessor == nil && logitSampler == nil ? speculation : nil
         let drafter = GuidedSpeculation.drafter(of: speculation, for: target)
         let feed = drafter.flatMap { _ in
             speculation?.prefillFeed(
@@ -165,7 +183,9 @@ public enum GuidedGenerationLoop {
         return try withoutActuallyEscaping(emit) { emit in
             var decoder = try GuidedDecoder(
                 rules: rules, tokenizer: context.tokenizer, diagnosticLog: diagnosticLog,
-                bufferPoolClearing: bufferPoolClearing, emit: emit)
+                bufferPoolClearing: bufferPoolClearing, logitProcessor: logitProcessor,
+                logitSampler: logitSampler, prompt: input.text.tokens, emit: emit)
+            defer { decoder.finalizeProcessor() }
             guard decoder.hasBudget, let first = try decoder.decide(from: prefilled.logits)
             else { return try decoder.finish() }
             if let speculation, let drafter,
@@ -233,7 +253,8 @@ public enum GuidedGenerationLoop {
         buildStopTokenIds(modelConfiguration: configuration, tokenizer: tokenizer)
     }
 
-    /// Apply a *prebuilt* grammar mask and optional bias to logits, then argmax.
+    /// Apply an optional processor, then a *prebuilt* grammar mask and optional bias to logits,
+    /// then sample: with `logitSampler`, or argmax.
     ///
     /// The mask is built once per token in the eval loop's overlap window (see
     /// `buildMaskArray`) and passed in here, so this runs no `bitmaskToMLXArray`
@@ -246,19 +267,32 @@ public enum GuidedGenerationLoop {
     ///     tokens (no mask to apply).
     ///   - closingBias: Optional logit bias favoring closing tokens. Applied
     ///     after the grammar mask so masked-out tokens remain at -inf.
+    ///   - logitProcessor: Optional processor, applied before the grammar mask.
+    ///   - logitSampler: Sampler for the masked logits. Nil samples greedily.
     /// - Returns: The sampled token ID.
     static func applyMaskAndSample(
         logits rawLogits: MLXArray,
         maskArray: MLXArray?,
-        closingBias: MLXArray? = nil
+        closingBias: MLXArray? = nil,
+        logitProcessor: (any LogitProcessor)? = nil,
+        logitSampler: (any LogitSampler)? = nil
     ) -> UInt32 {
         // Extract last-position logits: [batch, seq, vocab] -> [vocab]
-        let logits = constrainedLogits(
-            rawLogits[0..., -1, 0...], maskArray: maskArray, bias: closingBias)
+        var logits = rawLogits[0..., -1, 0...]
+        logits = logitProcessor?.process(logits: logits) ?? logits
+        logits = constrainedLogits(logits, maskArray: maskArray, bias: closingBias)
 
-        // Grammar-constrained generation samples greedily by construction.
-        let sampled = argMax(logits, axis: -1)
+        let sampled = logitSampler?.sample(logits: logits) ?? argMax(logits, axis: -1)
         return sampled.item(UInt32.self)
+    }
+
+    /// Whether `mask` allows `tokenId`. Ids at or beyond `vocabSize` are never
+    /// allowed, matching `bitmaskToMLXArray`.
+    static func maskAllows(_ mask: MaskResult, tokenId: Int, vocabSize: Int) -> Bool {
+        guard tokenId >= 0, tokenId < vocabSize, tokenId / 32 < mask.mask.count else {
+            return false
+        }
+        return (UInt32(bitPattern: mask.mask[tokenId / 32]) >> UInt32(tokenId % 32)) & 1 == 1
     }
 
     /// `logits` with a prebuilt grammar mask and an optional bias added.

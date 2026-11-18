@@ -120,6 +120,10 @@ public enum GenerateStopReason: Sendable {
     /// The owning chat turn continues with the additional user input.
     case steered
 
+    /// This model step ended at a supported boundary because its chat response was
+    /// interrupted. The response keeps its output and ends.
+    case interrupted
+
     /// Generation stopped due to explicit task cancellation or early stream termination.
     case cancelled
 }

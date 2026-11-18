@@ -106,3 +106,4 @@ main.py
 # Coverage output left behind by a bare `xcrun xctest` run
 *.profraw
 *.profdata
+.worktrees

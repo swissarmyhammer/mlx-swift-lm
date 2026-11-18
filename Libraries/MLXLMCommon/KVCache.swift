@@ -72,6 +72,14 @@ public protocol KVCache: Evaluatable, Updatable {
     /// get the current state for serialization
     var state: [MLXArray] { get set }
 
+    /// Read the live attention keys and values without updating the cache.
+    ///
+    /// Unlike ``KVCache/state``, which is an implementation-defined serialization
+    /// representation, this returns dense K/V in chronological order, trimmed
+    /// to the entries currently visible to attention. Caches that do not store
+    /// attention K/V return `nil`.
+    func currentKeyValues() -> (keys: MLXArray, values: MLXArray)?
+
     /// get/set metadata state as string array for serialization
     var metaState: [String] { get set }
 
@@ -219,6 +227,9 @@ extension KVCache {
     public var evaluationState: [MLXArray] {
         state
     }
+
+    /// No live attention keys and values: a cache that stores none returns `nil`.
+    public func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? { nil }
 }
 
 extension Array where Element == MLXArray {
@@ -368,6 +379,8 @@ open class BaseKVCache: KVCache {
             }
         }
     }
+
+    open func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? { nil }
 
     open var metaState: [String] {
         get { [""] }

@@ -446,6 +446,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         minimumDraftProbability: Float,
         components: GenerationComponents
     ) throws {
+        guard !mainModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: mainModel)))
+        }
+
         guard blockSize >= Self.minimumBlockSize else {
             throw KVCacheError(
                 message:

@@ -209,6 +209,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return (rows(of: keys, in: ranges), rows(of: values, in: ranges))
     }
 
+    /// The live keys and values in temporal order, the rewind reserve left out.
+    public override func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
+        logicalView(tail: .max)
+    }
+
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         if self.keys == nil {
             self.keys = keys
@@ -415,6 +420,12 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             // Note: RotatingKVCache doesn't set offset from keys like KVCache does
             // The offset is managed through meta_state
         }
+    }
+
+    /// The keys and values in temporal order, or no arrays before the first write.
+    var temporalState: [MLXArray] {
+        guard let keys = self.keys, let values = self.values else { return [] }
+        return [temporalOrder(keys), temporalOrder(values)]
     }
 
     public override var metaState: [String] {

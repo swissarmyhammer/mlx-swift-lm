@@ -180,6 +180,25 @@ struct MTPKVCacheConfigurationTests {
 }
 
 @Test
+func testMTPIteratorRejectsBlockDiffusionTarget() {
+    let main = MockMainModel(nextLogitTokens: [0], capabilities: .blockDiffusion)
+
+    do {
+        _ = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([Int32(1)])),
+            mainModel: main,
+            drafter: MockDrafter(),
+            parameters: GenerateParameters(maxTokens: 1, temperature: 0),
+            blockSize: 2)
+        Issue.record("Expected block-diffusion MTP target to be rejected")
+    } catch GenerateError.unsupportedSpeculativeDecoding(let modelName) {
+        #expect(modelName.contains("MockMainModel"))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test
 func testMTPSpeculateRoundSmokeWithSynthetics() throws {
     // Plan: prompt of 3 tokens [1, 2, 3], main model is rigged so that it
     // samples bonus token 7 at prefill, then on the verify pass samples

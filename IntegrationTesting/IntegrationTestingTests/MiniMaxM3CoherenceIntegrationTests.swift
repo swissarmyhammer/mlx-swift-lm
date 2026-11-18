@@ -11,11 +11,6 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-private let models = IntegrationTestModels(
-    downloader: #hubDownloader(),
-    tokenizerLoader: #huggingFaceTokenizerLoader()
-)
-
 /// Minimum physical memory required to safely attempt loading
 /// `mlx-community/MiniMax-M3-4bit`. Chain reconciliation across kanban
 /// ^wz8y8qq/^b90razv put the checkpoint's real size in the 120-214 GB range;

@@ -191,6 +191,9 @@ public final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvide
     public static let vocabularySize = 20
 
     public var kvHeads: [Int] { [1] }
+    /// The capabilities the mock reports, none unless a test sets them.
+    public let reportedCapabilities: LMModelCapabilities
+    public var capabilities: LMModelCapabilities { reportedCapabilities }
     /// Sequence of token values returned in increasing position order. Length
     /// must cover all positions the iterator will sample across the run.
     public var nextLogitTokens: [Int32]
@@ -212,8 +215,9 @@ public final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvide
     /// span fidelity (see the emit block below).
     public private(set) var emittedSharedKVSpans: [Int] = []
 
-    public init(nextLogitTokens: [Int32]) {
+    public init(nextLogitTokens: [Int32], capabilities: LMModelCapabilities = []) {
         self.nextLogitTokens = nextLogitTokens
+        self.reportedCapabilities = capabilities
         super.init()
     }
 

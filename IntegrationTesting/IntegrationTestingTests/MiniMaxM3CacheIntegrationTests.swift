@@ -10,11 +10,6 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-private let models = IntegrationTestModels(
-    downloader: #hubDownloader(),
-    tokenizerLoader: #huggingFaceTokenizerLoader()
-)
-
 /// Real-weights integration tests proving `MiniMaxM3KVCache` (the custom
 /// sparse-attention KV cache, kanban `^8dbc476`) is correct across multi-turn
 /// generation on `mlx-community/MiniMax-M3-4bit`.

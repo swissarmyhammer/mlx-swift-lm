@@ -60,6 +60,13 @@ struct GuidedDecoder {
     /// The cadence that returns the freed buffers of the MLX pool to the system.
     private let bufferPoolClearing: GenerationBufferPoolClearing
 
+    /// The caller's processor of the raw logits, or `nil`. It sees every sampled token and
+    /// every emitted token.
+    private var logitProcessor: (any LogitProcessor)?
+
+    /// The caller's sampler of the constrained logits, or `nil` to decide greedily.
+    private let logitSampler: (any LogitSampler)?
+
     /// Whether the generation writes the diagnostic log.
     private let diagnosticLog: Bool
 
@@ -81,12 +88,21 @@ struct GuidedDecoder {
     ///   - tokenizer: The tokenizer that decodes the output.
     ///   - diagnosticLog: Whether the generation writes the diagnostic log.
     ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
+    ///   - logitProcessor: The caller's processor of the raw logits, or `nil`.
+    ///   - logitSampler: The caller's sampler of the constrained logits, or `nil` to decide
+    ///     greedily.
+    ///   - prompt: The prompt tokens, which the processor reads first.
     ///   - emit: Takes each piece of text; `false` stops the generation.
     /// - Throws: The error of the matcher.
     init(
         rules: GuidedDecisionRules, tokenizer: any Tokenizer, diagnosticLog: Bool,
-        bufferPoolClearing: GenerationBufferPoolClearing, emit: @escaping (String) -> Bool
+        bufferPoolClearing: GenerationBufferPoolClearing,
+        logitProcessor: (any LogitProcessor)? = nil, logitSampler: (any LogitSampler)? = nil,
+        prompt: MLXArray? = nil, emit: @escaping (String) -> Bool
     ) throws {
+        self.logitProcessor = logitProcessor
+        self.logitSampler = logitSampler
+        if let prompt { self.logitProcessor?.prompt(prompt) }
         self.rules = rules
         self.position = try rules.startPosition()
         self.whitespace = position.whitespace
@@ -116,7 +132,17 @@ struct GuidedDecoder {
         let token = Int(
             GuidedGenerationLoop.applyMaskAndSample(
                 logits: logits, maskArray: position.maskArray,
-                closingBias: rules.bias(at: position)))
+                closingBias: rules.bias(at: position), logitProcessor: logitProcessor,
+                logitSampler: logitSampler))
+        // A caller's sampler must not pick a token the grammar excludes.
+        if position.mask.needsApply
+            && !GuidedGenerationLoop.maskAllows(
+                position.mask, tokenId: token, vocabSize: rules.vocabSize)
+        {
+            throw GrammarError.commitFailed(
+                "the sampler chose token \(token), which the grammar does not allow")
+        }
+        logitProcessor?.didSample(token: MLXArray([Int32(token)]))
         let whitespaceAfter = rules.whitespace(after: token, from: position.whitespace)
         guard !rules.endsGeneration(token, at: position) else {
             logStop("EOS/unk tokenId=\(token) at token \(tokenCount)")
@@ -180,6 +206,11 @@ struct GuidedDecoder {
             : try rules.position(tokenCount: recorded.tokenCount, whitespace: recorded.whitespace)
     }
 
+    /// Tells the caller's processor that the generation emitted its last token.
+    mutating func finalizeProcessor() {
+        logitProcessor?.finalizeGeneration()
+    }
+
     /// Emits the rest of the text, and reports how the generation ended.
     ///
     /// - Returns: The tokens the generation counted.
@@ -224,6 +255,7 @@ struct GuidedDecoder {
         }
         for forced in commit.tokens {
             guard hasBudget else { return nil }
+            logitProcessor?.didSample(token: MLXArray([forced]))
             diagnosticSink?.recordFastForwardToken(Int(forced))
             guard append(Int(forced)) else { return nil }
         }
@@ -239,6 +271,7 @@ struct GuidedDecoder {
     private mutating func append(_ token: Int) -> Bool {
         bufferPoolClearing.clearPoolIfDue(tokenCount: tokenCount)
         detokenizer.append(token: token)
+        logitProcessor?.didEmit(token: token)
         if let text = detokenizer.next() {
             emittedText += text
             guard emit(text) else {

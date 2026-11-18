@@ -37,6 +37,8 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case qwen35MoE
     case qwen35VL
     case qwen35MoEVL
+    case prismHadamardQwen35
+    case prismHadamardQwen35VL
 
     /// The seed of the initializer weights of each tiny model.
     private static let weightSeed: UInt64 = 43
@@ -58,6 +60,13 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
 
     /// The model type of the Qwen 3.5 checkpoints.
     private static let qwen35ModelType = "qwen3_5"
+
+    /// The manifest of the tiny Hadamard-rotated Qwen 3.5 models: one rotated projection, the
+    /// MLP output of the recurrent layer 0, whose input width is a whole quantization group.
+    private static let prismHadamardManifest = HadamardQuantizedManifest(
+        baseModelType: qwen35ModelType, tensorNamespace: "mlx-vlm-qwen3_5",
+        modules: [.init(path: "model.layers.0.mlp.down_proj", block: 32)],
+        quantization: .init(groupSize: 32, bits: 2))
 
     /// Makes the tiny model with fixed initializer weights.
     ///
@@ -121,6 +130,14 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
                 try Self.decode(
                     MLXVLM.Qwen35Configuration.self,
                     Self.qwen35VLJSON(experts: Self.qwen35ExpertCount)))
+        case .prismHadamardQwen35:
+            return try PrismHadamardQwen35Model(
+                try Self.decode(MLXLLM.Qwen35Configuration.self, Self.qwen35WrappedJSON()),
+                manifest: Self.prismHadamardManifest)
+        case .prismHadamardQwen35VL:
+            return try PrismHadamardQwen35(
+                try Self.decode(MLXVLM.Qwen35Configuration.self, Self.qwen35VLJSON()),
+                manifest: Self.prismHadamardManifest)
         }
     }
 

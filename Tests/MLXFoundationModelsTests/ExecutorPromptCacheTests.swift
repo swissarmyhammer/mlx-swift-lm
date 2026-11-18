@@ -41,10 +41,12 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func everyTurnOfOneSessionNamesTheSameCache() throws {
         let firstTurn = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
+            for: makeRequest(
+                transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.modelID, kvCache: nil)
         let secondTurn = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a", turns: 3)),
+            for: makeRequest(
+                transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a", turns: 3)),
             modelID: Self.modelID, kvCache: nil)
 
         #expect(firstTurn == secondTurn)
@@ -55,10 +57,12 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func twoSessionsNeverNameTheSameCache() throws {
         let first = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
+            for: makeRequest(
+                transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.modelID, kvCache: nil)
         let second = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-b")),
+            for: makeRequest(
+                transcript: ScriptedSessionModel.transcript(firstEntryID: "session-b")),
             modelID: Self.modelID, kvCache: nil)
 
         #expect(first != second)
@@ -68,10 +72,12 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func oneSessionOnTwoModelsNamesTwoCaches() throws {
         let onOneModel = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
+            for: makeRequest(
+                transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.modelID, kvCache: nil)
         let onAnother = MLXLanguageModel.Executor.sessionCacheKey(
-            for: makeRequest(transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
+            for: makeRequest(
+                transcript: ScriptedSessionModel.transcript(firstEntryID: "session-a")),
             modelID: Self.otherModelID, kvCache: nil)
 
         #expect(onOneModel != onAnother)

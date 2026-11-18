@@ -453,7 +453,7 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
     // settles any in-flight evaluation at the end of the task body.
     tokenLoop: while !isCancelled() {
         if let steering, handler.canEndForSteering, steering.requestsEarlyBoundary {
-            stopReason = .steered
+            stopReason = steering.isInterrupted ? .interrupted : .steered
             break
         }
         guard let token = nextPooledToken(&iterator) else { break }
@@ -513,10 +513,12 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
         stopReason
         ?? inferredStopReason(isAtTokenLimit: iterator.isAtTokenLimit, isCancelled: isCancelled())
 
-    // Speculative iterators verify several candidates at once. A stop
-    // token, consumer termination, or token limit can leave verified
-    // but unreturned candidates in their shared caches. Remove that
-    // lookahead before ChatSession reconciles its token ledger.
+    // Speculative iterators verify several candidates at once and
+    // block-diffusion iterators denoise a whole canvas ahead of the
+    // emitted tokens. A stop token, consumer termination, or token
+    // limit can leave deferred work (verified candidates, uncommitted
+    // canvas tokens) that must be reconciled with what the loop
+    // actually emitted before ChatSession reconciles its token ledger.
     if var finalizing = iterator as? any GenerationFinalizingTokenIterator {
         finalizing.finalizeGeneration()
         // Write back: the cast copies the iterator, and the trim also

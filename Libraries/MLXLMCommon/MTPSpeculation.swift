@@ -99,6 +99,15 @@ package struct MTPSpeculation {
         parameters: GenerateParameters, model: any LanguageModel,
         components: GenerationComponents
     ) throws -> any TokenIteratorProtocol {
+        if let diffusionModel = model as? any BlockDiffusionLanguageModel {
+            guard speculation == nil else {
+                throw GenerateError.unsupportedSpeculativeDecoding(
+                    String(describing: type(of: model)))
+            }
+            return try BlockDiffusionTokenIterator(
+                input: input, model: diffusionModel, cache: cache, parameters: parameters,
+                components: components)
+        }
         let fallback = speculation.flatMap {
             MTPDrafterFallback.incompatibility(of: $0.drafter, with: model)
         }

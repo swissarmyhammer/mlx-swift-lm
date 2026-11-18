@@ -12,11 +12,6 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-private let models = IntegrationTestModels(
-    downloader: #hubDownloader(),
-    tokenizerLoader: #huggingFaceTokenizerLoader()
-)
-
 /// Real-weights image Q&A integration test for MiniMax-M3's vision tower
 /// (kanban ^9a2aw98): loads `mlx-community/MiniMax-M3-4bit` (or the
 /// `MLX_MINIMAX_M3_CHECKPOINT` override) through `VLMModelFactory` and asserts

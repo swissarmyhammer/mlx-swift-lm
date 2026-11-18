@@ -161,6 +161,36 @@ struct ChatConventionsTests {
         #expect(config.implicitEndDelimiters == ["<tool_call>"])
     }
 
+    @Test func qwen35BudgetProtocol() {
+        let config = QwenReasoningProtocol.qwen35
+        // Qwen3.5 answers from a span that was only closed, so the declared
+        // transition adds no text of its own.
+        #expect(config.budgetTransition == .immediate)
+        #expect(config.implicitEndDelimiters == ["<tool_call>"])
+    }
+
+    /// A validated transition must be the only wire delta a family adds to the
+    /// protocol it derives from, so the wire syntax cannot drift per family.
+    /// Qwen 3.5 also replays reasoning into history and renders thinking off as
+    /// a closed block, which change the history render and not the delimiters.
+    @Test func budgetTransitionsAreTheOnlyFamilyDelta() {
+        for derived in [QwenReasoningProtocol.qwen3, QwenReasoningProtocol.qwen35] {
+            var withoutTransition = derived
+            withoutTransition.budgetTransition = nil
+            withoutTransition.replaysReasoningIntoHistory =
+                QwenReasoningProtocol.tagged.replaysReasoningIntoHistory
+            withoutTransition.promptStrategy = QwenReasoningProtocol.tagged.promptStrategy
+            #expect(withoutTransition == QwenReasoningProtocol.tagged)
+            #expect(derived.budgetTransition != nil)
+        }
+
+        var glimmerWithoutTransition = OnyxReasoningProtocol.glimmer
+        glimmerWithoutTransition.budgetTransition = nil
+        #expect(glimmerWithoutTransition == OnyxReasoningProtocol.frames)
+        #expect(OnyxReasoningProtocol.glimmer.budgetTransition == .immediate)
+        #expect(OnyxReasoningProtocol.frames.budgetTransition == nil)
+    }
+
     @Test func alwaysOnPreset() {
         #expect(ReasoningConfig.alwaysOnThinking.promptStrategy == .alwaysOn)
         #expect(ReasoningConfig.alwaysOnThinking.startDelimiter == "<think>")

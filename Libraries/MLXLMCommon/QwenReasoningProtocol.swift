@@ -4,7 +4,10 @@
 ///
 /// Model-specific wire behavior lives here rather than in ``ReasoningConfig``.
 /// The generic configuration only describes a protocol; this adapter decides
-/// which Qwen families have a validated hard-budget transition.
+/// which Qwen families have a validated hard-budget transition. Each of those
+/// is derived from ``tagged`` through
+/// ``ReasoningConfig/declaringBudgetTransition(_:)``, so the delimiters have a
+/// single definition and a family can only differ in what was measured for it.
 public enum QwenReasoningProtocol {
     /// Qwen-compatible `<think>` tags and tool-call boundary, without claiming
     /// that a hard-budget transition is safe for the model.
@@ -36,8 +39,16 @@ public enum QwenReasoningProtocol {
     /// keeps the flag on and ends its prompt with the block that the template
     /// writes for the flag `false` (``ThinkingOffRender/closedBlock(_:)``).
     /// Card `^v3dt28p` measured the two full prefills.
+    ///
+    /// Qwen3.5 answers from a span that was only closed, thus its hard-budget
+    /// transition is ``ReasoningBudgetTransition/immediate``. Qwen publishes no
+    /// `early_stopping_text` for this generation, and forcing Qwen3's changed
+    /// nothing: over 20 forced cuts on `Qwen3.5-9B-8bit` both closing the span
+    /// alone and adding Qwen3's text produced a well-formed answer every time,
+    /// while unbounded reasoning ran past the generation limit and answered
+    /// almost never.
     public static let qwen35: ReasoningConfig = {
-        var config = tagged
+        var config = tagged.declaringBudgetTransition(.immediate)
         config.replaysReasoningIntoHistory = true
         config.promptStrategy = .templateFlag(
             key: thinkingFlag, defaultOn: true, thinkingOff: .closedBlock(closedThinkBlock))
@@ -57,14 +68,9 @@ public enum QwenReasoningProtocol {
     /// `early_stopping_text`. Keeping this adapter family-specific prevents a
     /// later Qwen-derived model from inheriting the transition merely because it
     /// happens to use the same delimiters.
-    public static let qwen3 = ReasoningConfig(
-        startDelimiter: "<think>", endDelimiter: "</think>",
-        promptStrategy: .templateFlag(key: "enable_thinking", defaultOn: true),
-        isSpecialToken: true,
-        implicitEndDelimiters: ["<tool_call>"],
-        budgetTransition: ReasoningBudgetTransition(
+    public static let qwen3 = tagged.declaringBudgetTransition(
+        ReasoningBudgetTransition(
             beforeEndDelimiter:
                 "\n\n Considering the limited time by the user, I have to give the solution based on the thinking directly now.\n",
             afterEndDelimiter: "\n\n"))
-
 }

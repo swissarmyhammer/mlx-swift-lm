@@ -664,9 +664,15 @@ private func validateTurboQuantCache(state: [MLXArray], metaState: [String]) thr
 
 /// The configuration numbers of a saved `TurboQuantKVCache` meta state.
 private struct TurboQuantSavedConfiguration {
-    /// The meta-state count: the offset, the bit width, the key and value bit widths, and the
-    /// seed.
-    private static let metaStateCount = 5
+    /// The meta-state count of a file that predates the head width: the offset, the bit width,
+    /// the key and value bit widths, and the seed.
+    private static let legacyMetaStateCount = 5
+
+    /// The meta-state count with the head width, `None` before the first write.
+    private static let metaStateCount = 6
+
+    /// The meta-state value of a head width that no write set yet.
+    private static let unsetHeadDim = "None"
 
     /// The array count of a cache that holds raw keys and raw values, in every key mode.
     private static let rawStateCount = 2
@@ -714,7 +720,11 @@ private struct TurboQuantSavedConfiguration {
     /// - Parameter metaState: The saved meta state.
     /// - Throws: ``KVCacheError`` when the meta state is not a valid layout.
     init(metaState: [String]) throws {
-        guard metaState.count == Self.metaStateCount,
+        guard
+            metaState.count == Self.legacyMetaStateCount
+                || (metaState.count == Self.metaStateCount
+                    && (metaState[Self.legacyMetaStateCount] == Self.unsetHeadDim
+                        || (Int(metaState[Self.legacyMetaStateCount]) ?? 0) > 0)),
             Int(metaState[0]) != nil,
             let bits = Int(metaState[SavedMetaStateIndex.turboQuantBits]),
             let keyBits = Int(metaState[SavedMetaStateIndex.turboQuantKeyBits]),

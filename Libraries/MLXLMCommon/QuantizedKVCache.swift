@@ -141,6 +141,19 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
         return (trimmedKeys, trimmedValues)
     }
 
+    /// The live keys and values, dequantized.
+    public override func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
+        guard let (keys, values) = getQuantizedState() else { return nil }
+        return (
+            dequantized(
+                keys.0, scales: keys.1, biases: keys.2,
+                groupSize: groupSize, bits: bits, mode: mode),
+            dequantized(
+                values.0, scales: values.1, biases: values.2,
+                groupSize: groupSize, bits: bits, mode: mode)
+        )
+    }
+
     /// Update cache and return quantized tuples (Python's update_and_fetch)
     /// This is needed because `update` in Swift must return `(MLXArray, MLXArray)`
     ///
