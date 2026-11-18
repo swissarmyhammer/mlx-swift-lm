@@ -131,32 +131,36 @@ extension MLXLanguageModel {
     /// Free bytes on the volume hosting this model's configured weights
     /// location, or `nil` if the volume can't be resolved.
     ///
-    /// Walks up `weightsLocation(configuration.name)` to the first extant
-    /// ancestor and queries `URLResourceKey.volumeAvailableCapacityForImportantUsageKey`
-    /// against it. Returns `nil` rather than `0` on lookup failure so callers
-    /// can distinguish "low" from "unknown". Synchronous because it's just an
+    /// Reads the first extant ancestor of `weightsLocation(configuration.name)`
+    /// and reports `URLResourceKey.volumeAvailableCapacityForImportantUsageKey`
+    /// when it is positive, else `URLResourceKey.volumeAvailableCapacityKey`:
+    /// macOS can report zero for the important-usage key while the volume has
+    /// room. Returns `nil` rather than `0` on lookup failure so callers can
+    /// distinguish "low" from "unknown". Synchronous because it's just an
     /// `URLResourceValues` lookup -- no I/O.
     public var freeDiskSpaceBytes: Int64? {
-        // The per-model location won't exist until after a download, so walk
-        // up to the first extant ancestor (usually the caches directory,
-        // which the app sandbox always provides).
-        var probe = weightsLocation(configuration.name)
-        while !FileManager.default.fileExists(atPath: probe.path) {
-            let parent = probe.deletingLastPathComponent()
-            // `deletingLastPathComponent()` is a fixed point at the
-            // filesystem root; break to avoid spinning forever on a
-            // genuinely missing volume.
-            if parent == probe { break }
-            probe = parent
-        }
-        do {
-            let values = try probe.resourceValues(
-                forKeys: [.volumeAvailableCapacityForImportantUsageKey]
-            )
-            return values.volumeAvailableCapacityForImportantUsage
-        } catch {
+        freeDiskSpaceBytes(reading: ExecutorPromptCacheVolumeCapacity.read(of:))
+    }
+
+    /// Free bytes on the volume hosting this model's configured weights
+    /// location, as `reader` reports them: the
+    /// ``ExecutorPromptCacheVolumeCapacity/usableFreeSpace`` of its reading.
+    ///
+    /// The per-model location won't exist until after a download, thus the
+    /// reader reads the first extant ancestor (usually the caches directory,
+    /// which the app sandbox always provides).
+    ///
+    /// - Parameter reader: reads the free space of the volume of a folder that
+    ///   exists. Tests give a reader that reports a fixed volume.
+    /// - Returns: the free bytes, or `nil` when the reader throws or reports no
+    ///   value under either key.
+    func freeDiskSpaceBytes(reading reader: ExecutorPromptCacheVolumeCapacityReader) -> Int64? {
+        let folder = ExecutorPromptCacheVolumeCapacity.nearestExistingFolder(
+            to: weightsLocation(configuration.name))
+        guard let freeSpace = try? reader(folder).usableFreeSpace else {
             return nil
         }
+        return Int64(freeSpace.bytes)
     }
 
     // MARK: - Internals

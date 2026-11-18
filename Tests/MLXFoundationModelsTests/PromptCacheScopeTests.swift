@@ -247,7 +247,7 @@ struct PromptCacheScopeTests {
     /// - Returns: the key.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func key(_ sessionID: String, of model: MLXLanguageModel) -> ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: model.modelID, sessionID: sessionID)
+        PromptCacheTestKey.make(modelID: .init(model.modelID), sessionID: .init(sessionID))
     }
 }
 

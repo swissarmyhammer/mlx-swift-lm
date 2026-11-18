@@ -134,7 +134,8 @@ struct PromptCacheSpoolIntegrationTests {
                 model: model)
             let session = SpooledSession(
                 firstEntry: firstEntry, firstAnswer: firstTurn.text,
-                key: ExecutorPromptCacheKey(modelID: model.modelID, sessionID: firstEntry.id))
+                key: ExecutorPromptCacheKey(
+                    modelID: .init(model.modelID), sessionID: .init(firstEntry.id)))
             if sessions.isEmpty {
                 let entry = try #require(await store.peek(session.key))
                 await store.configure(memoryBudgetBytes: entry.byteCount)
@@ -170,7 +171,7 @@ struct PromptCacheSpoolIntegrationTests {
         await store.waitForSpills()
 
         let line =
-            "\(Self.measurementPrefix) session \(session.key.sessionID) onDisk=\(wasOnDisk) "
+            "\(Self.measurementPrefix) session \(session.key.sessionID.rawValue) onDisk=\(wasOnDisk) "
             + "prompt=\(warm.promptTokenCount) cached=\(warm.cachedTokenCount) "
             + "coldCached=\(cold.cachedTokenCount) sameAnswer=\(warm.text == cold.text)"
         Self.measurementLog.info("\(line, privacy: .public)")

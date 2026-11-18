@@ -52,7 +52,7 @@ private struct EvictionPoolFixture {
         var state = LMOutput.State()
         state[Self.stateKey] = Self.makeBuffer()
         await ExecutorPromptCacheStore.current.checkIn(
-            ExecutorPromptCacheKey(modelID: modelID, sessionID: "evicted-session"),
+            PromptCacheTestKey.make(modelID: .init(modelID), sessionID: .init("evicted-session")),
             ExecutorPromptCacheEntry(caches: [KVCacheSimple()], tokens: [1], state: state))
         return EvictionPoolFixture(model: model, activeBytesBeforeEviction: Memory.activeMemory)
     }

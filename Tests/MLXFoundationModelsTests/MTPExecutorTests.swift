@@ -69,33 +69,6 @@ struct MTPExecutorTests {
     /// Pause between two reads of the decode count while polling.
     private static let pollInterval = Duration.milliseconds(5)
 
-    /// The text and the model of one fixture target, with and without the MTP drafter.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private struct Models {
-        let fixture: Qwen35MTPFixture
-        let plain: MLXLanguageModel
-        let speculative: MLXLanguageModel
-    }
-
-    /// The fixture's target, once plain and once with its drafter.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func makeModels(
-        weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
-        resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
-        eosTokenIds: Set<Int> = [], tokenizer: (any Tokenizer)? = nil
-    ) throws -> Models {
-        let fixture = try Qwen35MTPFixture()
-        return Models(
-            fixture: fixture,
-            plain: fixture.makeLanguageModel(
-                weights: weights, capabilities: capabilities, resolver: resolver,
-                eosTokenIds: eosTokenIds, tokenizer: tokenizer),
-            speculative: fixture.makeLanguageModel(
-                weights: weights, capabilities: capabilities, resolver: resolver,
-                eosTokenIds: eosTokenIds, tokenizer: tokenizer,
-                speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding()))
-    }
-
     /// The reasoning resolver of the reasoning tests: its end delimiter is the token at
     /// ``reasoningEndIndex`` of the greedy decode of `prompt`, as `tokenizer` spells it.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -116,7 +89,7 @@ struct MTPExecutorTests {
     func aPlainTextTurnWritesThePlainText() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
 
         let turns = try await MTPExecutorTurns.respond(
             plain: models.plain, speculative: models.speculative,
@@ -134,7 +107,7 @@ struct MTPExecutorTests {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
         let prompt = Self.prompt + [Self.reasoningStartToken]
-        let models = try makeModels(
+        let models = try Qwen35MTPFixture.makeLanguageModels(
             weights: weights, capabilities: [.reasoning],
             resolver: try await reasoningResolver(prompt: prompt))
 
@@ -154,7 +127,7 @@ struct MTPExecutorTests {
     func anAllowedToolTurnWritesThePlainText() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights, capabilities: [.toolCalling])
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights, capabilities: [.toolCalling])
 
         let turns = try await MTPExecutorTurns.respond(
             plain: models.plain, speculative: models.speculative,
@@ -181,7 +154,7 @@ struct MTPExecutorTests {
         defer { try? FileManager.default.removeItem(at: weights) }
         let tokenizer = ToolCallAlphabetTokenizer()
         let prompt = Self.prompt + [Self.reasoningStartToken]
-        let models = try makeModels(
+        let models = try Qwen35MTPFixture.makeLanguageModels(
             weights: weights, capabilities: [.reasoning, .toolCalling],
             resolver: try await reasoningResolver(prompt: prompt, tokenizer: tokenizer),
             tokenizer: tokenizer)
@@ -265,7 +238,7 @@ struct MTPExecutorTests {
     func anUncachedTurnWritesThePlainText() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
 
         let turns = try await MLXLanguageModel.$promptCacheScope.withValue(.uncached) {
             try await MTPExecutorTurns.respond(
@@ -282,7 +255,7 @@ struct MTPExecutorTests {
     func aSampledTurnSpeculatesAndRepeatsWithItsSeed() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
         let sampled = GenerationOptions(
             samplingMode: .random(probabilityThreshold: Self.fullNucleus, seed: Self.samplingSeed),
             maximumResponseTokens: Self.generatedTokenCount)
@@ -314,7 +287,7 @@ struct MTPExecutorTests {
         try #require(decode.tokens.firstIndex(of: stopToken) == Self.bonusSlotStopIndex)
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights, eosTokenIds: [stopToken])
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights, eosTokenIds: [stopToken])
 
         let turns = try await MTPExecutorTurns.respond(
             plain: models.plain, speculative: models.speculative,

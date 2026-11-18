@@ -299,7 +299,7 @@ struct Qwen35ThinkingOffRenderTests {
     /// The key of the session of `model`.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func key(of model: MLXLanguageModel) -> ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: model.modelID, sessionID: Self.sessionID)
+        PromptCacheTestKey.make(modelID: .init(model.modelID), sessionID: .init(Self.sessionID))
     }
 
     /// Runs one pass over the instructions and `turns` prompts.

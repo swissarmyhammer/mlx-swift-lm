@@ -314,7 +314,7 @@ struct ExecutorPromptCacheQwenFileTests: PromptCacheSpoolFixtures {
 
     /// The key of each entry of this suite.
     private static var key: ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
+        PromptCacheTestKey.make(modelID: .init(modelID), sessionID: .init(sessionID))
     }
 
     /// Makes plain text tokens in a fixed pattern.

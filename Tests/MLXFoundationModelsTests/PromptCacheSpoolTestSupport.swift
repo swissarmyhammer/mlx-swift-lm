@@ -31,6 +31,29 @@ enum PromptCacheSpoolFixtureShape {
     static let valueStride: Float = 100
 }
 
+/// The spool volume that each test store that writes files reads, in place of the volume of
+/// the host.
+///
+/// The default disk budget of a store is one quarter of the free space of its volume. macOS can
+/// report no free space for important files while the volume has room, and the budget of a store
+/// that read the host would then delete each file at once. Each store that writes files thus
+/// reads this fixed volume, and its disk budget does not depend on the host.
+enum PromptCacheSpoolFixtureVolume {
+
+    /// The free space of the volume under both keys: one tebibyte. The disk budget that it gives
+    /// is far above the bytes that any test spills.
+    static let freeSpace = 1 << 40
+
+    /// Reports ``freeSpace`` for any folder. A store takes it as its capacity reader.
+    ///
+    /// - Parameter folder: The folder whose volume the store reads. The fixed volume ignores it.
+    /// - Returns: ``freeSpace`` under both keys.
+    static func capacity(ofVolumeOf folder: URL) -> ExecutorPromptCacheVolumeCapacity {
+        ExecutorPromptCacheVolumeCapacity(
+            importantUsage: Int64(freeSpace), available: freeSpace)
+    }
+}
+
 /// The fixture arrays, in the order of their first values.
 enum PromptCacheSpoolFixtureArray: Int {
     case keys
@@ -93,7 +116,8 @@ extension PromptCacheSpoolFixtures {
             .appendingPathComponent("\(Self.self)-\(UUID().uuidString)")
     }
 
-    /// Makes a store in `directory` with the budget `budget`.
+    /// Makes a store in `directory` with the budget `budget`. Its disk budget comes from
+    /// ``PromptCacheSpoolFixtureVolume``, not from the volume of the host.
     ///
     /// - Parameters:
     ///   - directory: The spool folder of the store.
@@ -104,7 +128,9 @@ extension PromptCacheSpoolFixtures {
         in directory: URL, budget: Int = 0,
         writer: @escaping ExecutorPromptCacheFileWriter = ExecutorPromptCacheStore.writeSpillFile
     ) async -> ExecutorPromptCacheStore {
-        let store = ExecutorPromptCacheStore(directory: directory, writer: writer)
+        let store = ExecutorPromptCacheStore(
+            directory: directory, writer: writer,
+            capacityReader: PromptCacheSpoolFixtureVolume.capacity(ofVolumeOf:))
         await store.configure(memoryBudgetBytes: budget)
         return store
     }
@@ -140,6 +166,28 @@ extension PromptCacheSpoolFixtures {
     }
 }
 
+/// Builds the prompt cache key of a test from the identifier of a model configuration and the
+/// identifier of a session or a transcript entry.
+///
+/// Every suite builds its keys here, thus the key scheme of the tests is kept in one place. The
+/// two identifiers have types of their own, thus a swapped pair does not compile.
+enum PromptCacheTestKey {
+
+    /// The key of `sessionID` of `modelID` under `kvCache`.
+    ///
+    /// - Parameters:
+    ///   - modelID: The model of the key.
+    ///   - sessionID: The session of the key.
+    ///   - kvCache: The KV-cache configuration of the key, or `nil` for full precision.
+    /// - Returns: The key.
+    static func make(
+        modelID: ExecutorPromptCacheKey.ModelID, sessionID: ExecutorPromptCacheKey.SessionID,
+        kvCache: KVCacheConfiguration? = nil
+    ) -> ExecutorPromptCacheKey {
+        ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID, kvCache: kvCache)
+    }
+}
+
 /// A suite whose prompt cache keys name one model, unless a key names another.
 ///
 /// A suite conforms to get the key builders as static and as instance members.
@@ -157,8 +205,10 @@ extension PromptCacheKeyFixtures {
     ///   - sessionID: The session of the key.
     ///   - modelID: The model of the key.
     /// - Returns: The key.
-    static func key(_ sessionID: String, modelID: String) -> ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
+    static func key(
+        _ sessionID: ExecutorPromptCacheKey.SessionID, modelID: ExecutorPromptCacheKey.ModelID
+    ) -> ExecutorPromptCacheKey {
+        PromptCacheTestKey.make(modelID: modelID, sessionID: sessionID)
     }
 
     /// The key of `sessionID` under ``modelID``.
@@ -166,7 +216,7 @@ extension PromptCacheKeyFixtures {
     /// - Parameter sessionID: The session of the key.
     /// - Returns: The key.
     static func key(_ sessionID: String) -> ExecutorPromptCacheKey {
-        key(sessionID, modelID: modelID)
+        key(.init(sessionID), modelID: .init(modelID))
     }
 
     /// The key of `sessionID` under `modelID`.
@@ -175,7 +225,9 @@ extension PromptCacheKeyFixtures {
     ///   - sessionID: The session of the key.
     ///   - modelID: The model of the key.
     /// - Returns: The key.
-    func key(_ sessionID: String, modelID: String) -> ExecutorPromptCacheKey {
+    func key(
+        _ sessionID: ExecutorPromptCacheKey.SessionID, modelID: ExecutorPromptCacheKey.ModelID
+    ) -> ExecutorPromptCacheKey {
         Self.key(sessionID, modelID: modelID)
     }
 
@@ -212,7 +264,7 @@ struct ScriptedSpoolSession: PromptCacheSpoolFixtures {
 
     /// The key of the session.
     var key: ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: model.modelID, sessionID: sessionID)
+        PromptCacheTestKey.make(modelID: .init(model.modelID), sessionID: .init(sessionID))
     }
 
     /// Runs the first turn of a new session, and waits until its cache is in the store.

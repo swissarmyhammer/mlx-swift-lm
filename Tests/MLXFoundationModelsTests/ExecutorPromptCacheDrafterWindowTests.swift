@@ -31,8 +31,8 @@ struct ExecutorPromptCacheDrafterWindowTests {
     private static let generatedTokenCount = 48
 
     /// The session of the spill file.
-    private static let key = ExecutorPromptCacheKey(
-        modelID: "tiny-qwen35-mtp", sessionID: "executor-prompt-cache-drafter-window")
+    private static let key = PromptCacheTestKey.make(
+        modelID: .init("tiny-qwen35-mtp"), sessionID: .init("executor-prompt-cache-drafter-window"))
 
     /// The greedy parameters of a stream whose drafter attends to `window` tokens, or to the
     /// whole context when `window` is `nil`.

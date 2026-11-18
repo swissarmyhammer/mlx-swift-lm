@@ -102,8 +102,8 @@ enum ExecutorPromptCacheFile {
     ) throws -> PromptCacheSaveInput {
         let metadata = [
             MetadataKey.format: format,
-            MetadataKey.modelID: key.modelID,
-            MetadataKey.sessionID: key.sessionID,
+            MetadataKey.modelID: key.modelID.rawValue,
+            MetadataKey.sessionID: key.sessionID.rawValue,
             MetadataKey.tokens: try TokenLedger.encode(entry.tokens),
             MetadataKey.renderTokens: try TokenLedger.encode(entry.renderTokens),
             MetadataKey.uncommittedTokens: try TokenLedger.encode(entry.uncommittedTokens),
@@ -187,8 +187,8 @@ enum ExecutorPromptCacheFile {
         guard metadata[MetadataKey.format] == format else {
             throw ExecutorPromptCacheFileError.formatMismatch(metadata[MetadataKey.format])
         }
-        guard metadata[MetadataKey.modelID] == key.modelID,
-            metadata[MetadataKey.sessionID] == key.sessionID
+        guard metadata[MetadataKey.modelID] == key.modelID.rawValue,
+            metadata[MetadataKey.sessionID] == key.sessionID.rawValue
         else {
             throw ExecutorPromptCacheFileError.keyMismatch
         }
@@ -252,7 +252,7 @@ enum ExecutorPromptCacheFile {
     ///     name.
     /// - Returns: `<digest>-<generation>.safetensors`.
     static func fileName(for key: ExecutorPromptCacheKey, generation: UInt64) -> String {
-        let keyBytes = Data("\(key.modelID)\u{0}\(key.sessionID)".utf8)
+        let keyBytes = Data("\(key.modelID.rawValue)\u{0}\(key.sessionID.rawValue)".utf8)
         let digest = SHA256.hash(data: keyBytes).map { String(format: "%02x", $0) }.joined()
         return "\(digest)-\(generation).\(fileExtension)"
     }

@@ -83,8 +83,9 @@ struct ExecutorPromptCacheUnfedTokenTests {
             caches: caches, tokens: firstEntry.tokens, renderTokens: firstEntry.renderTokens,
             uncommittedTokens: firstEntry.uncommittedTokens)
         try #require(!entry.uncommittedTokens.isEmpty)
-        let key = ExecutorPromptCacheKey(
-            modelID: Self.spillModelID, sessionID: ExecutorReasoningConversation.sessionID)
+        let key = PromptCacheTestKey.make(
+            modelID: .init(Self.spillModelID),
+            sessionID: .init(ExecutorReasoningConversation.sessionID))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(
             ExecutorPromptCacheFile.fileName(for: key, generation: Self.spillGeneration))
         defer { try? FileManager.default.removeItem(at: url) }
@@ -104,8 +105,9 @@ struct ExecutorPromptCacheUnfedTokenTests {
         let conversation = try await converseWithAnUnfedLastToken(setup)
         let entry = try #require(conversation.entry, "The follow-up pass must check in.")
         let drafterState = try conversation.drafterState()
-        let key = ExecutorPromptCacheKey(
-            modelID: Self.spillModelID, sessionID: ExecutorReasoningConversation.sessionID)
+        let key = PromptCacheTestKey.make(
+            modelID: .init(Self.spillModelID),
+            sessionID: .init(ExecutorReasoningConversation.sessionID))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(
             ExecutorPromptCacheFile.fileName(for: key, generation: Self.spillGeneration))
         defer { try? FileManager.default.removeItem(at: url) }

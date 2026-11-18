@@ -193,7 +193,7 @@ struct ExecutorPromptCacheFileTests {
 
     /// The key of each entry of this suite.
     private static var key: ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: modelID, sessionID: sessionID)
+        PromptCacheTestKey.make(modelID: .init(modelID), sessionID: .init(sessionID))
     }
 
     /// Makes an array of consecutive values.
@@ -443,7 +443,8 @@ struct ExecutorPromptCacheFileTests {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = try Self.write(Self.entry(), in: directory)
-        let otherSession = ExecutorPromptCacheKey(modelID: Self.modelID, sessionID: "session-b")
+        let otherSession = PromptCacheTestKey.make(
+            modelID: .init(Self.modelID), sessionID: .init("session-b"))
 
         #expect(throws: ExecutorPromptCacheFileError.keyMismatch) {
             try ExecutorPromptCacheFile.read(
@@ -456,8 +457,8 @@ struct ExecutorPromptCacheFileTests {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = try Self.write(Self.entry(), in: directory)
-        let otherModel = ExecutorPromptCacheKey(
-            modelID: "test-org/other", sessionID: Self.sessionID)
+        let otherModel = PromptCacheTestKey.make(
+            modelID: .init("test-org/other"), sessionID: .init(Self.sessionID))
 
         #expect(throws: ExecutorPromptCacheFileError.keyMismatch) {
             try ExecutorPromptCacheFile.read(
@@ -672,7 +673,8 @@ struct ExecutorPromptCacheFileTests {
 
     @Test("two sessions get two file names")
     func twoSessionsGetTwoFileNames() {
-        let otherSession = ExecutorPromptCacheKey(modelID: Self.modelID, sessionID: "session-b")
+        let otherSession = PromptCacheTestKey.make(
+            modelID: .init(Self.modelID), sessionID: .init("session-b"))
 
         #expect(
             ExecutorPromptCacheFile.fileName(for: Self.key, generation: Self.generation)

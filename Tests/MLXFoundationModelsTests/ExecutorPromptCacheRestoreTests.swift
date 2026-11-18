@@ -261,8 +261,8 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func expectASlotWhoseSpilledFileIsMissingPlansAColdPass() throws {
         let directory = Self.temporaryDirectory()
-        let key = ExecutorPromptCacheKey(
-            modelID: Self.slotModelID, sessionID: SpilledSessionValues.sessionID)
+        let key = PromptCacheTestKey.make(
+            modelID: .init(Self.slotModelID), sessionID: .init(SpilledSessionValues.sessionID))
         let handle = ExecutorPromptCacheSpilledHandle(
             url: directory.appendingPathComponent("missing.safetensors"), key: key)
         var lines: [String] = []
@@ -456,7 +456,7 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
     /// - Parameter key: the session of the slot.
     /// - Returns: the head of the line, up to the source.
     private static func planLinePrefix(of key: ExecutorPromptCacheKey) -> String {
-        "prompt cache plan model=\(key.modelID) session=\(key.sessionID) "
+        "prompt cache plan model=\(key.modelID.rawValue) session=\(key.sessionID.rawValue) "
     }
 
     /// Writes the fixture entry to a spill file in `directory`.
@@ -467,8 +467,8 @@ struct ExecutorPromptCacheRestoreTests: PromptCacheSpoolFixtures {
         in directory: URL
     ) throws -> ExecutorPromptCacheSpilledHandle {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let key = ExecutorPromptCacheKey(
-            modelID: slotModelID, sessionID: SpilledSessionValues.sessionID)
+        let key = PromptCacheTestKey.make(
+            modelID: .init(slotModelID), sessionID: .init(SpilledSessionValues.sessionID))
         let url = directory.appendingPathComponent(
             ExecutorPromptCacheFile.fileName(for: key, generation: slotFileGeneration))
         try ExecutorPromptCacheFile.write(
@@ -616,8 +616,9 @@ private enum CommittedTurn: PromptCacheSpoolFixtures {
     static let nextRender = previousRender + [renderedOnly, commit] + toolResponse
 
     /// The session of the entry.
-    static let key = ExecutorPromptCacheKey(
-        modelID: "test-org/prompt-cache-committed-turn", sessionID: "committed-turn-session")
+    static let key = PromptCacheTestKey.make(
+        modelID: .init("test-org/prompt-cache-committed-turn"),
+        sessionID: .init("committed-turn-session"))
 
     /// Checks an entry of ``ledger`` into a store whose memory budget is zero, waits for the
     /// spill, checks it out, restores it through a slot, and plans ``nextRender`` with the Qwen

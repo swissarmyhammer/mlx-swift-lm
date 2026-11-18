@@ -46,6 +46,53 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
     /// The free space that the default-disk-budget test gives.
     private static let availableCapacity = 400_000
 
+    /// A second free space, which the free-space-source test reports under the key that the
+    /// store must not read.
+    private static let otherAvailableCapacity = 800_000
+
+    /// One reading of the free space of the spool volume, and the free space that the default
+    /// disk budget must take from it.
+    struct VolumeCapacityCase: Sendable, CustomTestStringConvertible {
+
+        /// What the file system reports for the volume.
+        let capacity: ExecutorPromptCacheVolumeCapacity
+
+        /// The free space that the store must take, in bytes.
+        let freeSpace: Int
+
+        /// The name of the case in the test report.
+        let testDescription: String
+    }
+
+    /// The readings of the free-space-source test. The important-usage value counts when it is
+    /// positive. When it is zero or missing, as macOS reports it after a restart that left
+    /// purgeable space unaccounted, the plain value counts.
+    static let volumeCapacityCases: [VolumeCapacityCase] = [
+        VolumeCapacityCase(
+            capacity: ExecutorPromptCacheVolumeCapacity(
+                importantUsage: Int64(availableCapacity), available: otherAvailableCapacity),
+            freeSpace: availableCapacity,
+            testDescription: "a positive important-usage value"),
+        VolumeCapacityCase(
+            capacity: ExecutorPromptCacheVolumeCapacity(
+                importantUsage: 0, available: availableCapacity),
+            freeSpace: availableCapacity,
+            testDescription: "an important-usage value of zero"),
+        VolumeCapacityCase(
+            capacity: ExecutorPromptCacheVolumeCapacity(
+                importantUsage: nil, available: availableCapacity),
+            freeSpace: availableCapacity,
+            testDescription: "no important-usage value"),
+        VolumeCapacityCase(
+            capacity: ExecutorPromptCacheVolumeCapacity(importantUsage: 0, available: nil),
+            freeSpace: 0,
+            testDescription: "an important-usage value of zero and no plain value"),
+        VolumeCapacityCase(
+            capacity: ExecutorPromptCacheVolumeCapacity(importantUsage: nil, available: nil),
+            freeSpace: 0,
+            testDescription: "no value under either key"),
+    ]
+
     /// A spool folder whose free space no volume can give. It is not a file URL, thus the file
     /// system does not know it, and the store cannot read the free space of its volume.
     private static let unmeasurableSpoolAddress = "https://example.invalid/prompt-cache-spool"
@@ -235,6 +282,26 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         #expect(try Self.fileNames(in: directory).isEmpty)
     }
 
+    @Test("a spill that ends after its caller dropped the store still goes on record")
+    func aSpillThatEndsAfterItsCallerDroppedTheStoreStillGoesOnRecord() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = try HeldWriter(copies: Self.temporaryDirectory())
+        defer { try? FileManager.default.removeItem(at: writer.copies) }
+        var store: ExecutorPromptCacheStore? = await Self.store(in: directory, writer: writer.write)
+        weak let droppedStore = store
+        var starts = writer.startedWrites.makeAsyncIterator()
+
+        await store?.checkIn(Self.key("a"), Self.entry())
+        _ = await starts.next()
+        store = nil
+        writer.release()
+        let heldStore = try #require(droppedStore)
+        await heldStore.waitForSpills()
+
+        #expect(await heldStore.checkOut(Self.key("a")).spilledHandle != nil)
+    }
+
     @Test("an update after a check-out during a spill does not change the file")
     func anUpdateAfterACheckOutDuringASpillDoesNotChangeTheFile() async throws {
         let directory = Self.temporaryDirectory()
@@ -350,14 +417,14 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         let directory = Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let modelID = "probe/spilled-prompt-cache-\(UUID().uuidString)"
-        let sessionKey = Self.key("spilled-session", modelID: modelID)
+        let sessionKey = Self.key(.init("spilled-session"), modelID: .init(modelID))
         let store = await Self.store(in: directory)
         await store.checkIn(sessionKey, Self.entry())
         await store.waitForSpills()
         #expect(try Self.fileNames(in: directory).count == 1)
 
         try await ScriptedExecutorPass.respondOnce(
-            inside: store, modelID: modelID, sessionID: sessionKey.sessionID)
+            inside: store, modelID: modelID, sessionID: sessionKey.sessionID.rawValue)
 
         #expect(try Self.fileNames(in: directory).isEmpty)
         #expect(await store.checkOut(sessionKey) == .none)
@@ -414,6 +481,19 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
                 == 100_000)
         #expect(ExecutorPromptCacheStore.defaultDiskBudgetBytes(availableCapacity: 0) == 0)
         #expect(ExecutorPromptCacheStore.defaultDiskBudgetBytes(availableCapacity: -1) == 0)
+    }
+
+    @Test(
+        "the default disk budget takes the important-usage free space when it is positive, else the plain free space",
+        arguments: Self.volumeCapacityCases)
+    func theDefaultDiskBudgetTakesTheUsableFreeSpace(_ row: VolumeCapacityCase) async {
+        let store = ExecutorPromptCacheStore(
+            directory: Self.temporaryDirectory(), capacityReader: { _ in row.capacity })
+
+        #expect(
+            await store.diskBudgetBytes
+                == ExecutorPromptCacheStore.defaultDiskBudgetBytes(availableCapacity: row.freeSpace)
+        )
     }
 
     @Test("the default disk budget is zero when the free space of the spool volume cannot be read")
@@ -542,7 +622,7 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         let other = Self.entry()
         let store = await Self.store(in: directory, budget: other.byteCount)
         let firstModel = Self.key("shared")
-        let secondModel = Self.key("shared", modelID: Self.otherModelID)
+        let secondModel = Self.key(.init("shared"), modelID: .init(Self.otherModelID))
         // Each check-in sends the one before it to disk.
         await store.checkIn(firstModel, Self.entry())
         await store.checkIn(secondModel, Self.entry())
@@ -550,7 +630,7 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         await store.waitForSpills()
         #expect(try Self.fileNames(in: directory).count == 2)
 
-        await store.evict(sessionID: "shared")
+        await store.evict(sessionID: .init("shared"))
 
         #expect(try Self.fileNames(in: directory).isEmpty)
         #expect(await store.diskByteCount == 0)
@@ -569,7 +649,7 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         defer { try? FileManager.default.removeItem(at: writer.copies) }
         let store = await Self.store(in: directory, writer: writer.write)
         let evicted = { Self.key($0) }
-        let kept = { Self.key($0, modelID: Self.otherModelID) }
+        let kept = { Self.key(.init($0), modelID: .init(Self.otherModelID)) }
         // The first two writes run at once. The third write waits.
         writer.release()
         writer.release()
@@ -582,7 +662,7 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         await store.checkIn(evicted("memory"), Self.entry())
         await store.checkIn(kept("memory"), keptEntry)
 
-        await store.evict(modelID: Self.modelID)
+        await store.evict(modelID: .init(Self.modelID))
         writer.release()
         await store.waitForSpills()
 
@@ -602,7 +682,7 @@ struct ExecutorPromptCacheSpoolTests: PromptCacheSpoolFixtures, PromptCacheKeyFi
         let store = await Self.store(in: directory)
         await store.checkIn(Self.key("a"), Self.entry())
         await store.checkIn(
-            Self.key("a", modelID: Self.otherModelID), Self.entry())
+            Self.key(.init("a"), modelID: .init(Self.otherModelID)), Self.entry())
         await store.waitForSpills()
         #expect(try Self.fileNames(in: directory).count == 2)
 

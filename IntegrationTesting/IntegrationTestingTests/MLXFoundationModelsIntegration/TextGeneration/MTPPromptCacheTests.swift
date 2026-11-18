@@ -138,7 +138,8 @@ struct MTPPromptCacheTests {
             // The first transcript entry names the session of the cache.
             let sessionID = try #require(session.transcript.first?.id)
             entry = await ExecutorPromptCacheStore.current.peek(
-                ExecutorPromptCacheKey(modelID: model.modelID, sessionID: sessionID))
+                ExecutorPromptCacheKey(
+                    modelID: .init(model.modelID), sessionID: .init(sessionID)))
             let ledger = try #require(entry?.tokens, "The turn must check its cache in.")
             turns.append(try log.turn(text: text, ledger: ledger))
         }

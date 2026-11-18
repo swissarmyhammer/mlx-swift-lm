@@ -90,38 +90,8 @@ struct ExecutorPromptCacheMTPTests {
         var firstLedgerCount: Int { firstLedger.count }
     }
 
-    /// The fixture's target, once plain and once with its drafter.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private struct Models {
-        let fixture: Qwen35MTPFixture
-        let plain: MLXLanguageModel
-        let speculative: MLXLanguageModel
-    }
-
-    /// Makes the plain and the speculative model of one fixture.
-    ///
-    /// - Parameters:
-    ///   - weights: The directory that makes the models available.
-    ///   - capabilities: The capabilities each model declares.
-    ///   - eosTokenIds: The tokens that end a generation.
-    /// - Returns: The models.
-    /// - Throws: The error of the fixture or of the speculative decoding.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func makeModels(
-        weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
-        eosTokenIds: Set<Int> = []
-    ) throws -> Models {
-        let fixture = try Qwen35MTPFixture()
-        return Models(
-            fixture: fixture,
-            plain: fixture.makeLanguageModel(
-                weights: weights, capabilities: capabilities, eosTokenIds: eosTokenIds),
-            speculative: fixture.makeLanguageModel(
-                weights: weights, capabilities: capabilities, eosTokenIds: eosTokenIds,
-                speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding()))
-    }
-
-    /// A store that spills to a new folder of its own.
+    /// A store that spills to a new folder of its own. Its disk budget comes from
+    /// ``PromptCacheSpoolFixtureVolume``, not from the volume of the host.
     ///
     /// - Parameter writes: Whether a spill writes its file. A store that writes none keeps no
     ///   entry on disk.
@@ -131,15 +101,11 @@ struct ExecutorPromptCacheMTPTests {
             .appendingPathComponent("ExecutorPromptCacheMTPTests-\(UUID().uuidString)")
         let store =
             writes
-            ? ExecutorPromptCacheStore(directory: folder)
+            ? ExecutorPromptCacheStore(
+                directory: folder,
+                capacityReader: PromptCacheSpoolFixtureVolume.capacity(ofVolumeOf:))
             : ExecutorPromptCacheStore(directory: folder, writer: { _, _ in })
         return (store, folder)
-    }
-
-    /// The key of the session of `model`.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func key(of model: MLXLanguageModel) -> ExecutorPromptCacheKey {
-        ExecutorPromptCacheKey(modelID: model.modelID, sessionID: Self.sessionID)
     }
 
     /// The transcript of the instructions, each prompt, and the response after each prompt
@@ -220,7 +186,8 @@ struct ExecutorPromptCacheMTPTests {
     ) async throws -> Conversation {
         let (store, folder) = makeStore()
         defer { try? FileManager.default.removeItem(at: folder) }
-        let sessionKey = key(of: model)
+        let sessionKey = PromptCacheTestKey.make(
+            modelID: .init(model.modelID), sessionID: .init(Self.sessionID))
 
         let first = try await respond(
             model, over: transcript(prompts: [Self.firstPrompt], responses: [], fixture: fixture),
@@ -288,7 +255,7 @@ struct ExecutorPromptCacheMTPTests {
     func aFollowUpTurnResumesTheDrafterStateOfTheFirstTurn() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
 
         let plain = try await converse(models.plain, fixture: models.fixture, secondTurn: .followUp)
         let speculative = try await converse(
@@ -316,7 +283,8 @@ struct ExecutorPromptCacheMTPTests {
         try #require(decode.tokens.firstIndex(of: stopToken) == Self.fedStopIndex)
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights, eosTokenIds: [stopToken])
+        let models = try Qwen35MTPFixture.makeLanguageModels(
+            weights: weights, eosTokenIds: [stopToken])
 
         let plain = try await converse(models.plain, fixture: models.fixture, secondTurn: .followUp)
         let speculative = try await converse(
@@ -342,7 +310,8 @@ struct ExecutorPromptCacheMTPTests {
     func anEditResumesTheDrafterStateOfTheCheckpoint() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights, capabilities: [.toolCalling])
+        let models = try Qwen35MTPFixture.makeLanguageModels(
+            weights: weights, capabilities: [.toolCalling])
 
         let plain = try await converse(
             models.plain, fixture: models.fixture, secondTurn: .edit, tools: true)
@@ -395,7 +364,7 @@ struct ExecutorPromptCacheMTPTests {
     func aSpilledEntryRestoresItsDrafterState() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
         let spill: (ExecutorPromptCacheStore, ExecutorPromptCacheKey) async throws -> Void = {
             store, key in
             await store.configure(memoryBudgetBytes: 0)
@@ -417,7 +386,7 @@ struct ExecutorPromptCacheMTPTests {
     func aSpillFileWithoutADrafterStateRestoresWithAColdDrafter() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
         let spillMainCachesOnly:
             (ExecutorPromptCacheStore, ExecutorPromptCacheKey) async throws -> Void = {
                 store, key in
@@ -446,7 +415,7 @@ struct ExecutorPromptCacheMTPTests {
     func aDrafterStateOfAnotherDrafterStartsTheDrafterCold() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
         let relabel: (ExecutorPromptCacheStore, ExecutorPromptCacheKey) async throws -> Void = {
             store, key in
             let entry = try #require(await store.checkOut(key).entry)
@@ -480,10 +449,11 @@ struct ExecutorPromptCacheMTPTests {
     func theMemoryBudgetCountsTheDrafterBytes() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try makeModels(weights: weights)
+        let models = try Qwen35MTPFixture.makeLanguageModels(weights: weights)
         let (store, folder) = makeStore(writes: false)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let sessionKey = key(of: models.speculative)
+        let sessionKey = PromptCacheTestKey.make(
+            modelID: .init(models.speculative.modelID), sessionID: .init(Self.sessionID))
         _ = try await respond(
             models.speculative,
             over: transcript(prompts: [Self.firstPrompt], responses: [], fixture: models.fixture),

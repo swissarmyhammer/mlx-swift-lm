@@ -132,7 +132,8 @@ struct Qwen35SessionPromptCacheTests {
 
         let first = try await session.respond(to: firstPrompt, options: options)
         let firstEntryID = try #require(session.transcript.first?.id)
-        let key = ExecutorPromptCacheKey(modelID: model.modelID, sessionID: firstEntryID)
+        let key = ExecutorPromptCacheKey(
+            modelID: .init(model.modelID), sessionID: .init(firstEntryID))
         let ledger = await ExecutorPromptCacheStore.shared.peek(key)?.tokens ?? []
         report(turn: 1, usage: first.usage, transcript: session.transcript)
 
@@ -328,7 +329,8 @@ struct Qwen35SessionPromptCacheTests {
         let first = try await session.respond(to: firstPrompt, options: options)
         report(turn: 1, usage: first.usage, transcript: session.transcript)
         let firstEntryID = try #require(session.transcript.first?.id)
-        let key = ExecutorPromptCacheKey(modelID: model.modelID, sessionID: firstEntryID)
+        let key = ExecutorPromptCacheKey(
+            modelID: .init(model.modelID), sessionID: .init(firstEntryID))
         let checkpoint = try #require(
             await ExecutorPromptCacheStore.shared.peek(key)?.checkpointPosition)
 
@@ -383,7 +385,8 @@ struct Qwen35SessionPromptCacheTests {
             let first = try await session.respond(to: firstPrompt, options: options)
             await store.waitForSpills()
             let firstEntryID = try #require(session.transcript.first?.id)
-            let key = ExecutorPromptCacheKey(modelID: model.modelID, sessionID: firstEntryID)
+            let key = ExecutorPromptCacheKey(
+            modelID: .init(model.modelID), sessionID: .init(firstEntryID))
             let wasInMemory = await store.peek(key) != nil
             let diskBytes = await store.diskByteCount
             report(turn: 1, usage: first.usage, transcript: session.transcript)
@@ -438,7 +441,8 @@ struct Qwen35SessionPromptCacheTests {
             await store.waitForSpills()
             let firstTranscript = session.transcript
             let key = ExecutorPromptCacheKey(
-                modelID: model.modelID, sessionID: try #require(firstTranscript.first?.id))
+                modelID: .init(model.modelID),
+                sessionID: .init(try #require(firstTranscript.first?.id)))
             let file = try await readTheSpilledFile(in: directory, key: key, container: container)
             expectTheFileHoldsTheTurn(file)
 

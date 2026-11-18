@@ -69,7 +69,7 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
             modelID: Self.modelID, kvCache: nil)
 
         #expect(firstTurn == secondTurn)
-        #expect(firstTurn?.sessionID == "session-a")
+        #expect(firstTurn?.sessionID == .init("session-a"))
     }
 
     @Test("two sessions never name the same cache")
@@ -168,19 +168,21 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     func evictingOneModelReleasesOnlyTheCachesOfThatModel() async {
         let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1]))
-        await store.checkIn(key("a", modelID: Self.otherModelID), entry(tokens: [2]))
+        await store.checkIn(key(.init("a"), modelID: .init(Self.otherModelID)), entry(tokens: [2]))
 
-        await store.evict(modelID: Self.modelID)
+        await store.evict(modelID: .init(Self.modelID))
 
         #expect(await store.checkOut(key("a")) == .none)
-        #expect(await store.checkOut(key("a", modelID: Self.otherModelID)).entry?.tokens == [2])
+        #expect(
+            await store.checkOut(key(.init("a"), modelID: .init(Self.otherModelID))).entry?.tokens
+                == [2])
     }
 
     @Test("evicting every model releases every cache")
     func evictingEveryModelReleasesEveryCache() async {
         let store = makeStore()
         await store.checkIn(key("a"), entry(tokens: [1]))
-        await store.checkIn(key("a", modelID: Self.otherModelID), entry(tokens: [2]))
+        await store.checkIn(key(.init("a"), modelID: .init(Self.otherModelID)), entry(tokens: [2]))
 
         await store.evict(modelID: nil)
 
@@ -348,7 +350,7 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
         let large = largeEntry()
         let small = smallEntry()
         await store.checkIn(key("a"), large)
-        await store.checkIn(key("b", modelID: Self.otherModelID), small)
+        await store.checkIn(key(.init("b"), modelID: .init(Self.otherModelID)), small)
         #expect(await store.retainedByteCount == large.byteCount + small.byteCount)
 
         // Checking in a new entry under a key already held replaces the old
@@ -360,7 +362,7 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
         #expect(await store.retainedByteCount == small.byteCount)
 
         await store.checkIn(key("a"), large)
-        await store.evict(modelID: Self.modelID)
+        await store.evict(modelID: .init(Self.modelID))
         #expect(await store.retainedByteCount == small.byteCount)
 
         await store.evict(modelID: nil)
@@ -413,7 +415,7 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @Test("an executor pass inside a bound store uses that store and not the shared one")
     func anExecutorPassInsideABoundStoreUsesThatStore() async throws {
         let modelID = "probe/bound-prompt-cache-store-\(UUID().uuidString)"
-        let sessionKey = key("bound-session", modelID: modelID)
+        let sessionKey = key(.init("bound-session"), modelID: .init(modelID))
         let store = makeStore()
         await store.checkIn(sessionKey, entry(tokens: [1, 2, 3]))
 
@@ -432,7 +434,7 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     func evictingAModelInsideABoundStoreReleasesTheCachesOfThatStore() async {
         let model = makeStubModel("probe/bound-evict-\(UUID().uuidString)")
         let store = makeStore()
-        await store.checkIn(key("a", modelID: model.modelID), smallEntry())
+        await store.checkIn(key(.init("a"), modelID: .init(model.modelID)), smallEntry())
 
         await ExecutorPromptCacheStore.$current.withValue(store) {
             await model.evict()
@@ -445,7 +447,7 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
     @Test("an eviction in another task leaves the caches of a store this task binds")
     func anEvictionInAnotherTaskLeavesTheCachesOfABoundStore() async {
         let model = makeStubModel("probe/foreign-evict-\(UUID().uuidString)")
-        let sessionKey = key("a", modelID: model.modelID)
+        let sessionKey = key(.init("a"), modelID: .init(model.modelID))
         let store = makeStore()
         await ExecutorPromptCacheStore.shared.checkIn(sessionKey, smallEntry())
 

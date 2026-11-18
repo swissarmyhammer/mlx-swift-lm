@@ -336,7 +336,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// may not be `CancellationError`.
     public func evict() async {
         await Self.cache.remove(modelID: modelID)
-        await ExecutorPromptCacheStore.current.evict(modelID: modelID)
+        await ExecutorPromptCacheStore.current.evict(modelID: .init(modelID))
         // Last, and outside both actors: the released buffers reach the pool only when the last
         // reference above drops, and this call waits for any eval that holds the MLX eval lock.
         MLX.Memory.clearCache()
@@ -390,7 +390,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///   host binds no scope, it is the identifier of the first transcript
     ///   entry of the session.
     public func releasePromptCache(sessionID: String) async {
-        await ExecutorPromptCacheStore.current.evict(modelID: modelID, sessionID: sessionID)
+        await ExecutorPromptCacheStore.current.evict(
+            modelID: .init(modelID), sessionID: .init(sessionID))
     }
 
     /// The bytes the prompt cache holds now, for a host that sizes its pool.
@@ -1019,17 +1020,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             for request: LanguageModelExecutorGenerationRequest, modelID: String,
             kvCache: KVCacheConfiguration?
         ) -> ExecutorPromptCacheKey? {
-            switch MLXLanguageModel.promptCacheScope {
-            case .some(.session(let sessionID)):
-                return ExecutorPromptCacheKey(
-                    modelID: modelID, sessionID: sessionID, kvCache: kvCache)
-            case .some(.uncached):
-                return nil
-            case nil:
-                guard let firstEntry = request.transcript.first else { return nil }
-                return ExecutorPromptCacheKey(
-                    modelID: modelID, sessionID: firstEntry.id, kvCache: kvCache)
-            }
+            let sessionID: String? =
+                switch MLXLanguageModel.promptCacheScope {
+                case .some(.session(let sessionID)): sessionID
+                case .some(.uncached): nil
+                case nil: request.transcript.first?.id
+                }
+            guard let sessionID else { return nil }
+            return ExecutorPromptCacheKey(
+                modelID: .init(modelID), sessionID: .init(sessionID), kvCache: kvCache)
         }
 
         /// Checks the prompt cache of a session out of the store the task uses.

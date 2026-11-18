@@ -332,8 +332,9 @@ struct KVCacheConfigurationPromptCacheTests: PromptCachePlanFixtures {
             over: ScriptedSessionModel.transcript(firstEntryID: Self.sessionID), model: model,
             inside: store)
         let entry = await store.peek(
-            ExecutorPromptCacheKey(
-                modelID: model.modelID, sessionID: Self.sessionID, kvCache: model.kvCache))
+            PromptCacheTestKey.make(
+                modelID: .init(model.modelID), sessionID: .init(Self.sessionID),
+                kvCache: model.kvCache))
         await model.evict()
 
         #expect(entry?.caches.first is QuantizedKVCache)
@@ -369,8 +370,9 @@ struct KVCacheConfigurationPromptCacheTests: PromptCachePlanFixtures {
         let store = makeStore()
         for kvCache in [nil, KVCacheOptionFixtures.eightBit, KVCacheOptionFixtures.fourBit] {
             await store.checkIn(
-                ExecutorPromptCacheKey(
-                    modelID: model.modelID, sessionID: Self.sessionID, kvCache: kvCache),
+                PromptCacheTestKey.make(
+                    modelID: .init(model.modelID), sessionID: .init(Self.sessionID),
+                    kvCache: kvCache),
                 entry(tokens: [1, 2, 3]))
         }
 

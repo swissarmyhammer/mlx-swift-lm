@@ -255,7 +255,7 @@ struct KVCacheSessionPromptCacheTests {
         of session: LanguageModelSession, model: MLXLanguageModel
     ) throws -> ExecutorPromptCacheKey {
         ExecutorPromptCacheKey(
-            modelID: model.modelID, sessionID: try #require(session.transcript.first?.id),
+            modelID: .init(model.modelID), sessionID: .init(try #require(session.transcript.first?.id)),
             kvCache: model.kvCache)
     }
 }

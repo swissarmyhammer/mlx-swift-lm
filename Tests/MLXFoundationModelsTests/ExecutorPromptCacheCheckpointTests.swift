@@ -145,6 +145,10 @@ struct ExecutorPromptCacheCheckpointTests {
     /// then the generation prompt and the generated turn of the pass.
     private static let ledger = checkpointTokens + [4, 5, 6]
 
+    /// The key that the report lines of the checkpoint fixture name.
+    private static let checkpointKey = PromptCacheTestKey.make(
+        modelID: .init("test/checkpoint"), sessionID: .init("s"))
+
     /// The model the plan fixtures make fresh caches with: one attention
     /// layer and one recurrent layer.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -189,7 +193,7 @@ struct ExecutorPromptCacheCheckpointTests {
             model: hybridModel())
 
         let line = ExecutorPromptCacheReport.planLine(
-            key: ExecutorPromptCacheKey(modelID: "test/checkpoint", sessionID: "s"),
+            key: Self.checkpointKey,
             source: .memory, plan: planned,
             decodeTokens: { $0.map(String.init).joined(separator: " ") })
 
@@ -291,17 +295,33 @@ struct ExecutorPromptCacheCheckpointTests {
         #expect(split.caches.allSatisfy { $0.offset == Self.checkpointTokens.count })
     }
 
+    /// Plans a pass of `slot` over `render` without a report of its tokens.
+    private static func plan(
+        in slot: ExecutorPromptCacheSlot, render: [Int], model: any MLXLMCommon.LanguageModel,
+        transcriptBoundary: Int?
+    ) throws -> ExecutorPromptCachePlan? {
+        try slot.plan(
+            input: LMInput(tokens: MLXArray(render)), model: model,
+            parameters: GenerateParameters(), transcriptBoundary: transcriptBoundary,
+            decodeTokens: { _ in "" })
+    }
+
+    /// Plans a pass over the checkpoint tokens whose transcript ends with the prompt.
+    private static func promptEndPlan(
+        in slot: ExecutorPromptCacheSlot, model: any MLXLMCommon.LanguageModel
+    ) throws -> ExecutorPromptCachePlan? {
+        try plan(
+            in: slot, render: checkpointTokens, model: model,
+            transcriptBoundary: checkpointTokens.count)
+    }
+
     @Test("a boundary at the end of the prompt is taken when the prefill ends")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBoundaryAtTheEndOfThePromptIsTakenWhenThePrefillEnds() throws {
         let model = hybridModel()
         let slot = ExecutorPromptCacheSlot(nil, report: { _ in })
         let planned = try #require(
-            try slot.plan(
-                input: LMInput(tokens: MLXArray(Self.checkpointTokens)), model: model,
-                parameters: GenerateParameters(),
-                transcriptBoundary: Self.checkpointTokens.count,
-                decodeTokens: { _ in "" }))
+            try Self.promptEndPlan(in: slot, model: model))
         #expect(slot.prefilledTokenCount == 0)
 
         feed(planned.caches, tokenCount: Self.checkpointTokens.count)
@@ -312,11 +332,36 @@ struct ExecutorPromptCacheCheckpointTests {
         #expect(slot.entry?.checkpoint?.tokens == Self.checkpointTokens)
     }
 
+    /// The render of the pass after the stale pass: it parts from the ledger
+    /// at its first token, thus the hybrid caches rebuild from fresh caches
+    /// and the caches of the earlier pass keep their position.
+    private static let partedRender = [9, 9]
+
+    @Test("a commit drops the prompt-end plan of a pass whose prefill did not report its end")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aCommitDropsThePromptEndPlanOfAPassWhosePrefillDidNotReportItsEnd() throws {
+        let model = hybridModel()
+        let slot = ExecutorPromptCacheSlot(nil, report: { _ in })
+        let stale = try #require(
+            try Self.promptEndPlan(in: slot, model: model))
+        feed(stale.caches, tokenCount: Self.checkpointTokens.count)
+        slot.commit(stale, generatedTokens: [])
+
+        let next = try #require(
+            try Self.plan(
+                in: slot, render: Self.partedRender, model: model, transcriptBoundary: nil))
+        feed(next.caches, tokenCount: Self.partedRender.count)
+        slot.prefillDidEnd(state: nil)
+        slot.commit(next, generatedTokens: [])
+
+        #expect(slot.entry?.checkpoint == nil)
+    }
+
     @Test("the commit line names the position of the checkpoint")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func theCommitLineNamesThePositionOfTheCheckpoint() throws {
         let line = ExecutorPromptCacheReport.commitLine(
-            key: ExecutorPromptCacheKey(modelID: "test/checkpoint", sessionID: "s"),
+            key: Self.checkpointKey,
             outcome: .checkedIn(try entryWithCheckpoint()))
 
         #expect(line == "prompt cache commit model=test/checkpoint session=s ledger=6 checkpoint=3")

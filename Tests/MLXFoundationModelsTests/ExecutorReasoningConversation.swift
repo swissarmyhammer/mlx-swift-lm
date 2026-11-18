@@ -224,7 +224,8 @@ enum ExecutorReasoningConversation {
             tokenizer: setup.tokenizer, toolCallFormat: .qwen35,
             speculativeDecoding: speculates ? try Qwen35MTPFixture.makeSpeculativeDecoding() : nil)
         let store = ExecutorPromptCacheStore(directory: folder, writer: { _, _ in })
-        let key = ExecutorPromptCacheKey(modelID: model.modelID, sessionID: sessionID)
+        let key = PromptCacheTestKey.make(
+            modelID: .init(model.modelID), sessionID: .init(sessionID))
         let options = GenerationOptions(
             samplingMode: .greedy, maximumResponseTokens: setup.generatedTokenCount)
 

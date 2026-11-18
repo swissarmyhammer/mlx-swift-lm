@@ -43,7 +43,7 @@ struct PromptCachePublicAPITests: PromptCacheSpoolFixtures, PromptCacheKeyFixtur
 
     /// The key of the released session under ``otherModelID``.
     private static var otherModelKey: ExecutorPromptCacheKey {
-        key(releasedSessionID, modelID: otherModelID)
+        key(.init(releasedSessionID), modelID: .init(otherModelID))
     }
 
     /// Checks in one entry for the released session, one for the kept session, and one for the

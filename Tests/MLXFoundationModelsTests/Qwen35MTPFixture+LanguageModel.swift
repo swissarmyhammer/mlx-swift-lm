@@ -57,6 +57,49 @@ extension Qwen35MTPFixture {
             load: { _, _ in container })
     }
 
+    /// The target of one fixture as a FoundationModels language model, once plain and once with
+    /// the MTP drafter of the fixture.
+    struct LanguageModels {
+
+        /// The fixture whose target both models load.
+        let fixture: Qwen35MTPFixture
+
+        /// The model that decodes without a drafter.
+        let plain: MLXLanguageModel
+
+        /// The model that speculates with the drafter of the fixture.
+        let speculative: MLXLanguageModel
+    }
+
+    /// Makes a new fixture and its plain and speculative language models, which share every
+    /// argument but the speculative decoding.
+    ///
+    /// - Parameters:
+    ///   - weights: The directory that makes the models available.
+    ///   - capabilities: The capabilities each model declares.
+    ///   - resolver: The resolver that patches the configuration of each call.
+    ///   - eosTokenIds: The tokens that end a generation.
+    ///   - tokenizer: The tokenizer that renders the prompts and decodes the replies, or `nil`
+    ///     for the fixture's own.
+    /// - Returns: The fixture and its two models.
+    /// - Throws: The error of the fixture or of the speculative decoding.
+    static func makeLanguageModels(
+        weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
+        resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
+        eosTokenIds: Set<Int> = [], tokenizer: (any Tokenizer)? = nil
+    ) throws -> LanguageModels {
+        let fixture = try Qwen35MTPFixture()
+        return LanguageModels(
+            fixture: fixture,
+            plain: fixture.makeLanguageModel(
+                weights: weights, capabilities: capabilities, resolver: resolver,
+                eosTokenIds: eosTokenIds, tokenizer: tokenizer),
+            speculative: fixture.makeLanguageModel(
+                weights: weights, capabilities: capabilities, resolver: resolver,
+                eosTokenIds: eosTokenIds, tokenizer: tokenizer,
+                speculativeDecoding: try makeSpeculativeDecoding()))
+    }
+
     /// Speculative decoding with the drafter of a fixture, in rounds of ``blockSize``.
     ///
     /// Each load makes a new fixture and hands out its drafter, thus `log` sees every load the
