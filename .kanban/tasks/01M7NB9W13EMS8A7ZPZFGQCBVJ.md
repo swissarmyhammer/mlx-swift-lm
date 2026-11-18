@@ -47,8 +47,22 @@ comments:
     - evidence: review sha 5207deb5..b5fb7567 — 2 findings (2 confirmed, 0 refuted): Tests/MLXLMTests/Qwen35FusedProjectionTests.swift:284, Tests/MLXLMTests/Qwen38Tests.swift:355
     - next: implement the 2 Review Findings items (both reuse/reuse), then re-review. The push + notify acceptance item is an orchestrator step, not a code finding.
   timestamp: 2026-11-17T19:01:28.067388+00:00
-position_column: doing
-position_ordinal: '8480'
+- actor: claude-code
+  id: 01m7nh73v4b4t576dc54adwxzf
+  text: |-
+    ### review — clean
+    - evidence: review sha e7094d60~1..e7094d60 — 0 findings (7 attempted, 0 failed); 4 source files reviewed, 2 .kanban files skipped. Both 12:57 findings verified fixed: Fixture.visionLanguageTarget shared by makeTarget and vlmFusionStates; one looped testQwen38MTPRegistryConfigurationsNameTheirRegisteredDrafters over the 4-bit and 8-bit configs. Push+notify acceptance item ticked (e7094d60 sent to ACPAgent and Router).
+    - next: none — moved to done
+  timestamp: 2026-11-17T19:54:50.084756+00:00
+- actor: claude-code
+  id: 01m7nh7fd9zht3dgy93jfge41t
+  text: |-
+    ### acceptance evidence for items 1–2 (not ticked by the reviewer)
+    - Item 1 (unit tests first): the registry test failed before the registration and passes after; the 8-bit fast-path tests (fusion, verify rows, prefill tail, compiled decode/verify with bf16 and KV8 caches) pass. They passed on first run because no 4-bit-only routing existed (recorded by the implementer).
+    - Item 2 (real model): mlx-community/Qwen3.8-27B-8bit + MTP-8bit at 2k: bf16 KV plain 31.64 / MTP 11.76 ms/tok, acceptance 0.974; kv8 31.89 / 13.21, 0.984. MTP greedy ids equal plain except two exact bf16 ties (gap 0.0000); 4-bit pair 12/12 identical to the stable baseline.
+  timestamp: 2026-11-17T19:55:01.929209+00:00
+position_column: done
+position_ordinal: ffffc680
 title: 'Qwen3.8: register and verify the 8-bit MTP drafter (mlx-community/Qwen3.8-27B-MTP-8bit) with the 8-bit target'
 ---
 ## Why
@@ -62,7 +76,7 @@ ACPAgent (for the user) wants to run `mlx-community/Qwen3.8-27B-8bit` with the 8
 ## Acceptance
 - [ ] Unit tests first (failing first): registry lookup of the 8-bit id; any 8-bit kernel/fallback routing.
 - [ ] Real model (if downloadable within the ~65 GiB weight ceiling, 8-bit 27B ≈ 29 GB plus drafter): target + drafter load and draft through the VLM Qwen35 path; MTP greedy ids equal plain greedy ids on a short prompt; acceptance rate reported; with kvBits 8 too. Real-model runs take scratchpad bench.lock.
-- [ ] All 5 test bundles green; swift-format; pushed to stable; SHA sent to ACPAgent (foundationmodelsacpagent-22) and Router (foundationmodelsrouter-da). #mtp-8bit
+- [x] All 5 test bundles green; swift-format; pushed to stable; SHA sent to ACPAgent (foundationmodelsacpagent-22) and Router (foundationmodelsrouter-da). #mtp-8bit
 
 ## Review Findings (2026-11-17 12:57)
 
