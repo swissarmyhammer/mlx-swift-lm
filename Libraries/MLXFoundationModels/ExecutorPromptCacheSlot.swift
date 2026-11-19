@@ -184,7 +184,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         do {
             let restored = try ExecutorPromptCacheTiming.measure {
                 try ExecutorPromptCacheFile.read(
-                    from: handle.url, key: handle.key,
+                    from: handle.url, key: handle.fileKey,
                     templates: model.newCache(parameters: parameters),
                     drafter: speculation?.resumableDrafter, parameters: parameters, report: report)
             }

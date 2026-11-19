@@ -15,6 +15,13 @@ extension MLXLanguageModel {
     /// sessions can set a better name: a fork copies the transcript of its
     /// parent, thus it also copies the first entry, and a compaction that
     /// removes the first entry changes the name.
+    ///
+    /// A fork binds its own session identifier, not the identifier of its
+    /// parent. To reuse the cache of the parent, call
+    /// ``MLXLanguageModel/copyPromptCache(fromSession:toSession:)`` before the
+    /// first pass of the fork. A pass of the fork under the scope of the parent
+    /// takes the cache of the parent, rewinds it, and leaves the tokens of the
+    /// fork in it: the parent then loses its own tokens.
     public enum PromptCacheScope: Sendable, Hashable {
         /// The pass belongs to this session. The host owns the identifier.
         case session(String)

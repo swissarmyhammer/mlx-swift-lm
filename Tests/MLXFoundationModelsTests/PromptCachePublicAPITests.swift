@@ -139,6 +139,37 @@ struct PromptCachePublicAPITests: PromptCacheSpoolFixtures, PromptCacheKeyFixtur
         #expect(await store.checkOut(Self.key(Self.keptSessionID)) == .memory(kept))
     }
 
+    // MARK: - Copy of one session
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("a copy of a session gives the new session its own cache, and the source stays")
+    func aCopyOfASessionGivesTheNewSessionItsOwnCache() async throws {
+        let directory = Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = Self.entry()
+        let store = await Self.store(in: directory, budget: Self.sessionCount * source.byteCount)
+        await store.checkIn(Self.key(Self.keptSessionID), source)
+
+        let results = await ExecutorPromptCacheStore.$current.withValue(store) {
+            let model = Self.model()
+            let copied = await model.copyPromptCache(
+                fromSession: Self.keptSessionID, toSession: Self.releasedSessionID)
+            let again = await model.copyPromptCache(
+                fromSession: Self.keptSessionID, toSession: Self.releasedSessionID)
+            let unknown = await model.copyPromptCache(
+                fromSession: "unknown", toSession: "fork")
+            return (copied, again, unknown)
+        }
+
+        #expect(results.0 == .copied(tokenCount: source.tokens.count))
+        #expect(results.1 == .refused(.destinationHasCache))
+        #expect(results.2 == .sourceNotFound)
+        #expect(await store.peek(Self.key(Self.keptSessionID)) === source)
+        let copy = try #require(await store.peek(Self.key(Self.releasedSessionID)))
+        #expect(copy !== source)
+        #expect(copy.tokens == source.tokens)
+    }
+
     // MARK: - Budgets
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

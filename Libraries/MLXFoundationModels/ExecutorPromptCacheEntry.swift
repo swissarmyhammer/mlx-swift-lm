@@ -105,10 +105,14 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     ///     `tokens`, or nil.
     ///   - drafterState: the MTP drafter continuation at the end of
     ///     `tokens`, or nil.
+    ///   - minimumByteCount: the fewest bytes ``byteCount`` counts. A copy
+    ///     gives the count of its source here, because its arrays keep the
+    ///     whole buffers of the source alive until a write.
     init(
         caches: [KVCache], tokens: [Int], renderTokens: [Int] = [],
         uncommittedTokens: [Int] = [], state: LMOutput.State? = nil,
-        checkpoint: PromptCacheCheckpoint? = nil, drafterState: MTPDrafterContinuation? = nil
+        checkpoint: PromptCacheCheckpoint? = nil, drafterState: MTPDrafterContinuation? = nil,
+        minimumByteCount: Int = 0
     ) {
         self.caches = caches
         self.tokens = tokens
@@ -117,9 +121,10 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         self.state = state
         self.checkpoint = checkpoint
         self.drafterState = drafterState
-        self.byteCount =
+        self.byteCount = max(
+            minimumByteCount,
             caches.reduce(0) { $0 + $1.residentByteCount } + (state?.residentByteCount ?? 0)
-            + (checkpoint?.byteCount ?? 0) + (drafterState?.byteCount ?? 0)
+                + (checkpoint?.byteCount ?? 0) + (drafterState?.byteCount ?? 0))
     }
 
     /// The drafter state a pass that extends `tokens` with the drafter
@@ -138,6 +143,32 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         }
         return drafterState
     }
+
+    /// An entry that holds the same tokens and the same state as this entry, and that a pass
+    /// can write without a change to this entry.
+    ///
+    /// Each cache is a new object (``KVCache/copy()``), thus the two entries never share a
+    /// mutable cache. The arrays of a copied cache share their buffers with the arrays of this
+    /// entry: an MLX array does not change in place, and a write into a cache makes a new
+    /// array. A buffer that two arrays hold is not donated to a write, thus the first write of
+    /// one session copies the buffer, and the other session keeps the old buffer
+    /// (copy-on-write). The drafter state is copied with ``MTPDrafterContinuation/copy()``.
+    /// The model state and the checkpoint are values that no pass writes: a checkpoint gives a
+    /// new copy of its caches at each restore. Thus the two entries share them.
+    ///
+    /// The copy counts at least the ``byteCount`` of this entry. A copied cache holds slices
+    /// of the buffers of this entry, and a slice keeps its whole buffer alive, the step
+    /// padding included, until a write or until this entry is released. While both entries
+    /// live, the memory budget of the store thus counts the shared bytes two times, which is
+    /// conservative.
+    ///
+    /// - Returns: the new entry.
+    func copy() -> ExecutorPromptCacheEntry {
+        ExecutorPromptCacheEntry(
+            caches: caches.map { $0.copy() }, tokens: tokens, renderTokens: renderTokens,
+            uncommittedTokens: uncommittedTokens, state: state, checkpoint: checkpoint,
+            drafterState: drafterState?.copy(), minimumByteCount: byteCount)
+    }
 }
 
 // MARK: - What a check-out gives
@@ -153,6 +184,25 @@ struct ExecutorPromptCacheSpilledHandle: Equatable, Sendable {
 
     /// The session the file belongs to.
     let key: ExecutorPromptCacheKey
+
+    /// The key that the metadata of the file names, which the read of the file checks.
+    ///
+    /// It is `key`, unless the file is a copy of the file of another session
+    /// (``ExecutorPromptCacheStore/copy(modelID:from:to:)``): a copy keeps the bytes, thus
+    /// also the metadata, of the file of the source.
+    let fileKey: ExecutorPromptCacheKey
+
+    /// Creates the handle of the file at `url` of `key`.
+    ///
+    /// - Parameters:
+    ///   - url: the URL of the file.
+    ///   - key: the session the file belongs to.
+    ///   - fileKey: the key that the metadata of the file names, or nil when it is `key`.
+    init(url: URL, key: ExecutorPromptCacheKey, fileKey: ExecutorPromptCacheKey? = nil) {
+        self.url = url
+        self.key = key
+        self.fileKey = fileKey ?? key
+    }
 }
 
 /// What ``ExecutorPromptCacheStore/checkOut(_:)`` finds for one session.

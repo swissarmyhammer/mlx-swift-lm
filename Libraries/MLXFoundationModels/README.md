@@ -149,6 +149,23 @@ A cold drafter start can lower the acceptance; it does not change the output.
 
 On an M5 Ultra, Qwen3.8-27B-4bit with its 4-bit MTP head decoded a text turn at 90.4 tokens per second against 58.5 without MTP, the second turn of a cached session at 80.9 against 57.5, and guided JSON at 68.2 against 50.8. See "Multi-token prediction (MTP)" in the MLXLMCommon `using` article for the full numbers.
 
+### Copy the cache of a session to a fork
+
+A fork is a new session with its own identifier. To reuse the cache of its parent, call `copyPromptCache(fromSession:toSession:)` before the first pass of the fork, then bind `.session(forkID)` for the passes of the fork. Do not bind the scope of the parent for the fork: that pass takes the cache of the parent and leaves the tokens of the fork in it.
+
+```swift
+switch await model.copyPromptCache(fromSession: parentID, toSession: forkID) {
+case .copied(let tokenCount): print("the fork starts with \(tokenCount) cached tokens")
+case .sourceNotFound, .sourceInUse, .refused: break  // The fork reads its prompt in full.
+}
+```
+
+- **Whole copy.** The copy has every token of the parent, for each KV-cache configuration of the parent. The first pass of the fork rewinds it to the common prefix with its render. A hybrid model goes back to the checkpoint of the copy, or reads the prompt in full: the fork never resumes a recurrent state past the point where the two renders part.
+- **Independent sessions.** A pass of one session does not change the cache of the other. `releasePromptCache(sessionID:)` of one session leaves the other.
+- **Copy-on-write.** Each cache of the copy is a new object whose arrays share their buffers with the parent until one session writes. A parent on disk gives a clone of its file.
+- **Budget.** The copy counts the bytes of the parent in `promptCacheUsage` and the memory budget, also the bytes it shares with the parent: while both sessions live, the shared bytes count two times. It is the most recently used entry.
+- **No wait.** When a pass of the parent runs, the call returns `.sourceInUse` at once. A destination that has a cache gives `.refused(.destinationHasCache)`.
+
 ## Memory
 
 `MLXLanguageModel` does not set `Memory.cacheLimit`, so the MLX buffer pool follows MLX's default, as it does under `ChatSession`. Plain, MTP and guided decode (schema output and required-tool calls) clear the pool on the first token and every 256 emitted tokens after it, and the pool can still hold several GiB between clears on a long context: 16.0 GiB at most in a guided Qwen3.8-27B-4bit decode of 9,502 tokens at 110,647 rendered tokens of context on an M5 Ultra.

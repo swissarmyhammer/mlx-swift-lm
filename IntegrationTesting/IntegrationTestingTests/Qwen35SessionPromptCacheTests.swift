@@ -386,7 +386,7 @@ struct Qwen35SessionPromptCacheTests {
             await store.waitForSpills()
             let firstEntryID = try #require(session.transcript.first?.id)
             let key = ExecutorPromptCacheKey(
-            modelID: .init(model.modelID), sessionID: .init(firstEntryID))
+                modelID: .init(model.modelID), sessionID: .init(firstEntryID))
             let wasInMemory = await store.peek(key) != nil
             let diskBytes = await store.diskByteCount
             report(turn: 1, usage: first.usage, transcript: session.transcript)
@@ -467,6 +467,84 @@ struct Qwen35SessionPromptCacheTests {
             #expect(
                 warm.content == uncached.content,
                 "A turn restored from disk must give the text of an uncached turn. \(line)")
+        }
+        await releaseAllGPUMemory()
+    }
+
+    /// A fork that copies the prompt cache of its parent reads only the tokens after the
+    /// history of the parent, gives the text of an uncached fork, and leaves the cache of the
+    /// parent as it was (D205 (f)).
+    @Test func aForkWithACopyOfTheParentCacheGivesTheUncachedText() async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectAForkWithACopyGivesTheUncachedText()
+        } else {
+            Issue.record("The executor needs iOS 27, macOS 27 or visionOS 27.")
+        }
+    }
+
+    /// Runs turn 1 of a parent session, copies its cache to a fork, and runs turn 2 two times
+    /// over the transcript of the parent: in the fork, warm from the copy, and uncached.
+    /// Records an issue unless the fork reuses the render of turn 1, the two runs give the same
+    /// text, and the cache of the parent does not change.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectAForkWithACopyGivesTheUncachedText() async throws {
+        await releaseAllGPUMemory()
+        let model = makeReasoningTestModel(hybridModelID)
+        try model.requireLocalWeights()
+        _ = try await model.loadContainer()
+        let options = GenerationOptions(
+            samplingMode: .greedy, temperature: 0, maximumResponseTokens: generatedTokenBudget)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Qwen35SessionPromptCacheTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ExecutorPromptCacheStore(directory: directory)
+        let parentID = "parent-\(UUID().uuidString)"
+        let forkID = "fork-\(UUID().uuidString)"
+        let parentKey = ExecutorPromptCacheKey(
+            modelID: .init(model.modelID), sessionID: .init(parentID))
+
+        try await ExecutorPromptCacheStore.$current.withValue(store) {
+            let parent = LanguageModelSession(
+                model: model, tools: [], instructions: sessionInstructions)
+            let first = try await MLXLanguageModel.$promptCacheScope.withValue(.session(parentID)) {
+                try await parent.respond(to: firstPrompt, options: options)
+            }
+            let parentEntry = try #require(await store.peek(parentKey))
+            let parentTokens = parentEntry.tokens
+            let parentOffsets = parentEntry.caches.map(\.offset)
+
+            let copy = await model.copyPromptCache(fromSession: parentID, toSession: forkID)
+            let warm = try await MLXLanguageModel.$promptCacheScope.withValue(.session(forkID)) {
+                try await LanguageModelSession(
+                    model: model, tools: [], transcript: parent.transcript
+                )
+                .respond(to: secondPrompt, options: options)
+            }
+            let uncached = try await MLXLanguageModel.$promptCacheScope.withValue(.uncached) {
+                try await LanguageModelSession(
+                    model: model, tools: [], transcript: parent.transcript
+                )
+                .respond(to: secondPrompt, options: options)
+            }
+            let line =
+                "\(measurementPrefix) fork copy \(copy); fork turn 2 cached "
+                + "\(warm.usage.input.cachedTokenCount) of \(warm.usage.input.totalTokenCount); "
+                + "uncached cached \(uncached.usage.input.cachedTokenCount); "
+                + "warm <<<\(warm.content)>>> uncached <<<\(uncached.content)>>>"
+            measurementLog.info("\(line, privacy: .public)")
+
+            #expect(copy == .copied(tokenCount: parentTokens.count), "\(line)")
+            #expect(
+                warm.usage.input.cachedTokenCount >= first.usage.input.totalTokenCount,
+                "The fork must reuse the whole render of turn 1 of the parent. \(line)")
+            #expect(uncached.usage.input.cachedTokenCount == 0, "\(line)")
+            #expect(
+                warm.content == uncached.content,
+                "A fork warm from the copy must give the text of an uncached fork. \(line)")
+            let parentAfter = try #require(await store.peek(parentKey))
+            #expect(parentAfter === parentEntry)
+            #expect(parentAfter.tokens == parentTokens)
+            #expect(parentAfter.caches.map(\.offset) == parentOffsets)
         }
         await releaseAllGPUMemory()
     }

@@ -156,6 +156,9 @@ actor ExecutorPromptCacheStore {
 
         /// The size of the file in bytes.
         let byteCount: Int
+
+        /// The length of the token ledger of the entry in the file.
+        let tokenCount: Int
     }
 
     /// The files of the entries on disk, by session, least recently used
@@ -184,6 +187,18 @@ actor ExecutorPromptCacheStore {
 
     /// The tasks that wait in ``waitForSpills()``.
     private var spillWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// How many check-outs of each key have no check-in yet: the passes that hold the cache of
+    /// the key now. ``copy(modelID:from:to:)`` reads it, because a held cache is in no tier.
+    private var checkOutCounts: [ExecutorPromptCacheKey: Int] = [:]
+
+    /// Whether a pass holds the cache of `key` now: a check-out of `key` has no check-in yet.
+    ///
+    /// - Parameter key: the session of the cache.
+    /// - Returns: true when a pass holds the cache.
+    func isCheckedOut(_ key: ExecutorPromptCacheKey) -> Bool {
+        checkOutCounts[key] != nil
+    }
 
     /// Creates a store that spills to the folder of this process,
     /// ``processSpoolDirectory``, and that deletes the spool folders of
@@ -423,11 +438,15 @@ actor ExecutorPromptCacheStore {
     /// `.memory`: the write then records nothing and deletes its own file. A
     /// file on disk comes back as `.spilled`, and the caller then owns it.
     ///
+    /// Each check-out counts as a pass that holds the cache of `key` until
+    /// the next ``checkIn(_:_:)`` of `key`, also when it finds nothing.
+    ///
     /// - Parameter key: the session of the turn.
     /// - Returns: the entry, its file, or `.none` when the store holds nothing
     ///   for `key`.
     func checkOut(_ key: ExecutorPromptCacheKey) -> ExecutorPromptCacheCheckout {
         removeStaleFoldersAtFirstUse()
+        checkOutCounts[key, default: 0] += 1
         if let entry = entries.remove(key) {
             return .memory(entry)
         }
@@ -471,14 +490,134 @@ actor ExecutorPromptCacheStore {
     ///     start cold.
     func checkIn(_ key: ExecutorPromptCacheKey, _ entry: ExecutorPromptCacheEntry?) {
         removeStaleFoldersAtFirstUse()
+        endCheckOut(of: key)
         remove(key)
         guard let entry else { return }
+        keepInMemory(entry, for: key)
+    }
+
+    /// Counts one check-out of `key` as ended. A check-in with no check-out changes no count.
+    ///
+    /// - Parameter key: the session of the check-in.
+    private func endCheckOut(of key: ExecutorPromptCacheKey) {
+        guard let count = checkOutCounts[key] else { return }
+        checkOutCounts[key] = count > 1 ? count - 1 : nil
+    }
+
+    /// Keeps `entry` under `key` as the most recently used entry, then applies the memory
+    /// budget. An entry larger than the whole budget goes to ``spill(_:_:)`` at once, and no
+    /// other entry leaves for it.
+    ///
+    /// - Parameters:
+    ///   - entry: the entry.
+    ///   - key: the session of the entry. The store holds nothing for it on any tier.
+    private func keepInMemory(_ entry: ExecutorPromptCacheEntry, for key: ExecutorPromptCacheKey) {
         guard entry.byteCount <= memoryBudgetBytes else {
             spill(key, entry)
             return
         }
         entries.insert(entry, for: key)
         evictToBudget()
+    }
+
+    // MARK: - Copy of a session
+
+    /// Copies the cache of `source` of `modelID`, under each KV-cache configuration, to
+    /// `destination`. The cache of `source` does not change.
+    ///
+    /// The copy reads each entry in place on the actor, and it never checks an entry out.
+    ///
+    /// - An entry in memory, or an entry whose write to disk has not ended, gives a new entry
+    ///   (``ExecutorPromptCacheEntry/copy()``). The copy goes in like a check-in: it is the
+    ///   most recently used entry, it counts its whole ``ExecutorPromptCacheEntry/byteCount``,
+    ///   and the memory budget applies. The entry of the source becomes the most recently used
+    ///   entry before the copy, thus the budget does not send it to disk for its own copy.
+    /// - A file on disk gives a clone of the file under a new name of `destination` (on APFS,
+    ///   the two files share their blocks until one changes). The new file keeps the metadata
+    ///   of the source, thus its handle records the key of the source for the read. The disk
+    ///   budget applies to the new file.
+    ///
+    /// The store copies nothing when a pass holds a cache of `source` or of `destination`, or
+    /// when it holds a cache of `destination`.
+    ///
+    /// - Parameters:
+    ///   - modelID: the model of the two sessions.
+    ///   - source: the session to copy.
+    ///   - destination: the new session.
+    /// - Returns: what the copy did.
+    func copy(
+        modelID: ExecutorPromptCacheKey.ModelID, from source: ExecutorPromptCacheKey.SessionID,
+        to destination: ExecutorPromptCacheKey.SessionID
+    ) -> PromptCacheCopyResult {
+        removeStaleFoldersAtFirstUse()
+        guard source != destination else { return .refused(.sameSession) }
+        let storedKeys = Set(entries.keys).union(spilling.keys).union(onDisk.keys)
+        let names = { (session: ExecutorPromptCacheKey.SessionID) in
+            { (key: ExecutorPromptCacheKey) in key.modelID == modelID && key.sessionID == session }
+        }
+        if storedKeys.contains(where: names(destination)) {
+            return .refused(.destinationHasCache)
+        }
+        if checkOutCounts.keys.contains(where: names(destination)) {
+            return .refused(.destinationInUse)
+        }
+        if checkOutCounts.keys.contains(where: names(source)) {
+            return .sourceInUse
+        }
+        let sourceKeys = storedKeys.filter(names(source))
+        guard !sourceKeys.isEmpty else { return .sourceNotFound }
+        var tokenCounts: [Int] = []
+        for key in sourceKeys {
+            let copyKey = ExecutorPromptCacheKey(
+                modelID: modelID, sessionID: destination, kvCache: key.kvCache)
+            if let tokenCount = copyEntry(of: key, to: copyKey) {
+                tokenCounts.append(tokenCount)
+            }
+        }
+        guard let tokenCount = tokenCounts.max() else { return .refused(.copyFailed) }
+        return .copied(tokenCount: tokenCount)
+    }
+
+    /// Copies what the store holds for `key`, on its tier, to `copyKey`.
+    ///
+    /// - Parameters:
+    ///   - key: a key of the source that the store holds on one tier.
+    ///   - copyKey: the key of the copy. The store holds nothing for it.
+    /// - Returns: the length of the token ledger of the copy, or nil when the file could not
+    ///   be cloned.
+    private func copyEntry(
+        of key: ExecutorPromptCacheKey, to copyKey: ExecutorPromptCacheKey
+    ) -> Int? {
+        if let entry = entries[key] {
+            entries.insert(entry, for: key)
+            keepInMemory(entry.copy(), for: copyKey)
+            return entry.tokens.count
+        }
+        if let spill = spilling[key] {
+            keepInMemory(spill.entry.copy(), for: copyKey)
+            return spill.entry.tokens.count
+        }
+        guard let file = onDisk[key] else { return nil }
+        lastGeneration += 1
+        let url = directory.appendingPathComponent(
+            ExecutorPromptCacheFile.fileName(for: copyKey, generation: lastGeneration))
+        do {
+            try FileManager.default.copyItem(at: file.handle.url, to: url)
+        } catch {
+            ExecutorPromptCacheLog.info(
+                "prompt cache cannot copy the file of \(key.sessionID.rawValue) to "
+                    + "\(copyKey.sessionID.rawValue): \(error)")
+            return nil
+        }
+        onDisk.insert(file, for: key)
+        onDisk.insert(
+            DiskFile(
+                handle: ExecutorPromptCacheSpilledHandle(
+                    url: url, key: copyKey, fileKey: file.handle.fileKey),
+                byteCount: file.byteCount, tokenCount: file.tokenCount),
+            for: copyKey)
+        evictDiskToBudget()
+        return file.tokenCount
     }
 
     /// Releases the cache of every session of `modelID`, or of every session
@@ -552,11 +691,15 @@ actor ExecutorPromptCacheStore {
     /// Records the file of a write that ended as the most recently used file
     /// of its key, and applies the disk budget.
     ///
-    /// - Parameter handle: the file and its session.
-    private func recordDiskFile(_ handle: ExecutorPromptCacheSpilledHandle) {
+    /// - Parameters:
+    ///   - handle: the file and its session.
+    ///   - tokenCount: the length of the token ledger of the entry in the file.
+    private func recordDiskFile(_ handle: ExecutorPromptCacheSpilledHandle, tokenCount: Int) {
         deleteDiskFile(of: handle.key)
         onDisk.insert(
-            DiskFile(handle: handle, byteCount: Self.fileByteCount(at: handle.url)),
+            DiskFile(
+                handle: handle, byteCount: Self.fileByteCount(at: handle.url),
+                tokenCount: tokenCount),
             for: handle.key)
         evictDiskToBudget()
     }
@@ -607,7 +750,7 @@ actor ExecutorPromptCacheStore {
     /// session starts cold.
     ///
     /// The job holds the store strongly until its write ends, thus each write
-    /// reaches ``writeDidEnd(_:generation:byteCount:result:duration:)``: its
+    /// reaches ``writeDidEnd(_:generation:byteCount:tokenCount:result:duration:)``: its
     /// file goes on record or is deleted, and ``pendingWriteCount`` drops, so
     /// no task in ``waitForSpills()`` waits forever. The store outlives its
     /// last caller by at most the writes in the queue.
@@ -640,7 +783,7 @@ actor ExecutorPromptCacheStore {
                 await self.writeDidEnd(
                     ExecutorPromptCacheSpilledHandle(url: url, key: key),
                     generation: spill.generation, byteCount: spill.byteCount,
-                    result: result, duration: duration)
+                    tokenCount: spill.entry.tokens.count, result: result, duration: duration)
             })
     }
 
@@ -656,11 +799,12 @@ actor ExecutorPromptCacheStore {
     ///   - handle: the file of the write and its session.
     ///   - generation: the generation of the write.
     ///   - byteCount: the bytes of the entry, for the log line.
+    ///   - tokenCount: the length of the token ledger of the entry.
     ///   - result: the result of the write.
     ///   - duration: how long the write took.
     private func writeDidEnd(
         _ handle: ExecutorPromptCacheSpilledHandle, generation: UInt64, byteCount: Int,
-        result: Result<Void, any Error>, duration: Duration
+        tokenCount: Int, result: Result<Void, any Error>, duration: Duration
     ) {
         defer { finishPendingWrite() }
         let isCurrent = spilling[handle.key]?.generation == generation
@@ -670,7 +814,7 @@ actor ExecutorPromptCacheStore {
         let outcome: ExecutorPromptCacheSpillOutcome
         switch (result, isCurrent) {
         case (.success, true):
-            recordDiskFile(handle)
+            recordDiskFile(handle, tokenCount: tokenCount)
             outcome = .onDisk
         case (.success, false):
             ExecutorPromptCacheFile.removeFile(at: handle.url)
