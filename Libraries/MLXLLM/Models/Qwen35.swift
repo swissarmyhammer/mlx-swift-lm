@@ -1257,9 +1257,18 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize``.
     public var defaultPrefillStepSize: Int { Qwen35PrefillPolicy.defaultStepSize }
 
+    /// The largest prefill step, also when the caller sets a step:
+    /// ``MLXLMCommon/Qwen35PrefillPolicy/maximumStepSize(queryHeads:kvHeads:headDimension:)``.
+    public var maximumPrefillStepSize: Int? {
+        Qwen35PrefillPolicy.maximumStepSize(
+            queryHeads: configuration.attentionHeads, kvHeads: configuration.kvHeads,
+            headDimension: configuration.headDim
+                ?? configuration.hiddenSize / configuration.attentionHeads)
+    }
+
     /// Prefills the prompt in steps of at most ``defaultPrefillStepSize``
-    /// tokens unless `prefill` sets its own, and leaves the rest for the
-    /// iterator.
+    /// tokens unless `prefill` sets its own, never above
+    /// ``maximumPrefillStepSize``, and leaves the rest for the iterator.
     ///
     /// - Parameters:
     ///   - input: The prompt.
@@ -1275,7 +1284,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     ) throws -> PrepareResult {
         try prepareInChunks(
             input, cache: cache, state: state, prefill: prefill,
-            defaultStepSize: defaultPrefillStepSize)
+            defaultStepSize: defaultPrefillStepSize, maximumStepSize: maximumPrefillStepSize)
     }
 
     /// The logits of the tokens and, when `state` asks for it, the drafter
@@ -1505,6 +1514,9 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
 
     /// The prefill step of the text model when the caller sets none.
     public var defaultPrefillStepSize: Int { languageModel.defaultPrefillStepSize }
+
+    /// The largest prefill step of the text model.
+    public var maximumPrefillStepSize: Int? { languageModel.maximumPrefillStepSize }
 
     /// Prefills the prompt through the prepare of the text model, thus in its
     /// prefill step unless `prefill` sets its own.

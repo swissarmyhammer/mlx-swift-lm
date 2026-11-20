@@ -2284,6 +2284,15 @@ public class Qwen35: Module, VLMModel {
     /// text models too.
     public var defaultPrefillStepSize: Int { Qwen35PrefillPolicy.defaultStepSize }
 
+    /// The largest prefill step, also when the caller sets a step:
+    /// ``MLXLMCommon/Qwen35PrefillPolicy/maximumStepSize(queryHeads:kvHeads:headDimension:)``.
+    public var maximumPrefillStepSize: Int? {
+        let text = config.textConfiguration
+        return Qwen35PrefillPolicy.maximumStepSize(
+            queryHeads: text.attentionHeads, kvHeads: text.kvHeads,
+            headDimension: text.headDim ?? text.hiddenSize / text.attentionHeads)
+    }
+
     /// The decoder layers of the language model, where LoRA adapters go.
     public var loraLayers: [Module] {
         languageModel.model.layers
@@ -2462,7 +2471,8 @@ public class Qwen35: Module, VLMModel {
         // the cache offset plus the rope delta carried in `state` — never
         // back at zero. The windowed forward is single-sequence; batched
         // inputs keep the single-shot path below.
-        let window = prefill.resolvedStepSize(defaultStepSize: defaultPrefillStepSize)
+        let window = prefill.resolvedStepSize(
+            defaultStepSize: defaultPrefillStepSize, maximumStepSize: maximumPrefillStepSize)
         if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
             cacheOffset > 0 || inputIds2D.dim(-1) > window
         {
@@ -2595,7 +2605,8 @@ public class Qwen35: Module, VLMModel {
         }
 
         let processed = try prefill.forEachChunk(
-            total: remainderLength, defaultStepSize: defaultPrefillStepSize
+            total: remainderLength, defaultStepSize: defaultPrefillStepSize,
+            maximumStepSize: maximumPrefillStepSize
         ) { range in
             let output = forward(range)
             state?.feedMTPPrefillChunk(
