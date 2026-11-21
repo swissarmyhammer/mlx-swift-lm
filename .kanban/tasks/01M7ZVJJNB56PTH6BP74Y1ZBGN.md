@@ -29,8 +29,15 @@ comments:
     - evidence: 6 files — IntegrationTesting/IntegrationTesting.xcodeproj/project.pbxproj, README.md, Libraries/MLXLMCommon/Documentation.docc/using.md, skills/mlx-swift-lm/references/supported-models.md, Libraries/MLXVLM/Models/Inkling2Vision.swift, Tests/MLXLMTests/Inkling2Tests.swift. IntegrationTesting Release build-for-testing from clean resolve: TEST BUILD SUCCEEDED; Inkling2CheckpointIntegrationTests 4/4 pass (tool turn called get_weather {location: Paris}). Unit bundles: MLXLMTests 2523 Swift Testing (3 known issues, pre-existing) + 1258 XCTest, MLXFoundationModelsTests 557, MLXGuidedGenerationTests 86, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11 XCTest — 0 failures. swift-format lint clean.
     - next: /review
   timestamp: 2026-11-21T20:22:27.029563+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m7zwf0m1vfe1jyh5t6jb41pg
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (e531879e) — 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed; 2 files reviewed; 12 files had no matching validator (.kanban/*, project.pbxproj, README.md, Documentation.docc/using.md, skills/.../supported-models.md)
+    - next: none; task moved to done
+  timestamp: 2026-11-21T20:23:47.585574+00:00
+position_column: done
+position_ordinal: ffffcd80
 title: 'Inkling 2: raise swift-transformers / swift-jinja minimums so Inkling tool templates render'
 ---
 Inkling 2's chat template calls `tojson(separators=…)`. swift-jinja 2.5.x rejects that ("Unexpected keyword argument 'separators' for filter"), so tool prompts fail to render. swift-transformers 1.4.0 still allows swift-jinja 2.4.2..<4.0, so raising transformers alone does not fix it.
