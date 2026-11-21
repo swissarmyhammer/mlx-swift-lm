@@ -10,15 +10,16 @@ import Testing
 @testable import MLXLLM
 @testable import MLXLMCommon
 
-/// A tiny model with a `MambaCache` for each recurrent layer.
+/// A tiny model with a `MambaCache` or an `ArraysCache` for each recurrent layer.
 ///
-/// Each of these models feeds its conv or SSM layer through a `MambaCache`. The executor prompt
-/// cache keeps a cache only when the offset of each cache is the length of its token ledger, thus
-/// the recurrent layer must move the offset of its `MambaCache` as an attention layer does.
+/// Each of these models feeds its conv or SSM layer through a `MambaCache` (Inkling 2 through an
+/// `ArraysCache`). The executor prompt cache keeps a cache only when the offset of each cache is
+/// the length of its token ledger, thus the recurrent layer must move the offset of its cache as
+/// an attention layer does.
 ///
 /// BaichuanM1 and FalconH1 put a `MambaCache` and an attention cache in one `CacheList` for each
-/// layer. The executor prompt cache reads the offset of the `CacheList`, thus the offset of the
-/// list must also move.
+/// layer, and Inkling 2 an `ArraysCache` and an attention cache. The executor prompt cache reads
+/// the offset of the `CacheList`, thus the offset of the list must also move.
 enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case nemotronH
     case jamba
@@ -39,6 +40,7 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
     case qwen35MoEVL
     case prismHadamardQwen35
     case prismHadamardQwen35VL
+    case inkling2
 
     /// The seed of the initializer weights of each tiny model.
     private static let weightSeed: UInt64 = 43
@@ -138,6 +140,12 @@ enum HybridRecurrentModelFixture: String, CaseIterable, Sendable {
             return try PrismHadamardQwen35(
                 try Self.decode(MLXVLM.Qwen35Configuration.self, Self.qwen35VLJSON()),
                 manifest: Self.prismHadamardManifest)
+        case .inkling2:
+            // The tiny looped Inkling 2 model of `Inkling2ModelTests`, with its NVFP4 experts.
+            // Each layer visit has a `CacheList` of an attention cache and an `ArraysCache` of
+            // four convolution states. Layers 0, 1, 2 and 4 have a window of 8 tokens, thus the
+            // prompt and its tail wrap their rotating caches.
+            return try Inkling2ModelTests.makeModel()
         }
     }
 
@@ -546,7 +554,7 @@ struct HybridRecurrentCacheOffsetTests {
         _ = Self.lastLogits(model, Self.prompt, run: run)
 
         #expect(
-            KVCacheTree.leaves(in: run.caches).contains { $0.cache is MambaCache },
+            KVCacheTree.leaves(in: run.caches).contains { $0.cache is ArraysCache },
             "\(fixture): has a recurrent cache")
         Self.expectOffsets(run.caches, Self.prompt.count, "\(fixture) after the prefill")
     }
