@@ -533,9 +533,13 @@ struct Inkling2ModelTests {
 
     /// A tiny model with random weights and NVFP4 experts. In bfloat16, the tensors that the
     /// checkpoint stores in float32 stay float32, and the model is prepared as after a load.
-    static func makeModel(bfloat16: Bool = false) throws -> Inkling2 {
+    ///
+    /// - Parameters:
+    ///   - bfloat16: whether the model runs in bfloat16 as a loaded checkpoint does.
+    ///   - json: the `config.json` of the model, by default ``tinyJSON``.
+    static func makeModel(bfloat16: Bool = false, json: String = tinyJSON) throws -> Inkling2 {
         let config = try JSONDecoder().decode(
-            Inkling2Configuration.self, from: Data(tinyJSON.utf8))
+            Inkling2Configuration.self, from: Data(json.utf8))
         let model = Inkling2(config)
         MLXRandom.seed(5)
         var parameters = [String: MLXArray]()

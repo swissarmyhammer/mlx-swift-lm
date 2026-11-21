@@ -692,7 +692,10 @@ func canRewindConvolutionCache(_ cache: KVCache, positions: Int) -> Bool {
 /// A trimmable entry rewinds what it holds. A ``RotatingKVCache`` rewinds the drafts once its
 /// ring has wrapped too: a write of several rows keeps the window before its oldest row, thus
 /// `positions - 1` rows more than the window, and the rewind cuts only those. Each Mamba entry
-/// keeps a snapshot slot for each verified token instead, as deep as its model advertises.
+/// keeps a snapshot slot for each verified token instead, as deep as its model advertises. A
+/// ``SpeculativeConvolutionCache`` keeps the input windows of a verify of up to its
+/// ``SpeculativeConvolutionCache/maximumVerifyPositions`` tokens. The entries of a ``CacheList``
+/// answer each for itself.
 ///
 /// - Parameters:
 ///   - cache: The cache of each layer.
@@ -702,7 +705,11 @@ func canRewindConvolutionCache(_ cache: KVCache, positions: Int) -> Bool {
 package func canRewindSpeculativeVerify(_ cache: [KVCache], positions: Int) -> Bool {
     cache.allSatisfy { entry in
         switch entry {
+        case let list as CacheList:
+            canRewindSpeculativeVerify(list.children, positions: positions)
         case let convolution as RewindableConvolutionCache:
+            convolution.isTrimmable(after: positions)
+        case let convolution as SpeculativeConvolutionCache:
             convolution.isTrimmable(after: positions)
         case is MambaCache: true
         case is RotatingKVCache: positions > 1
@@ -733,7 +740,8 @@ package func rewindSpeculativePromptCache(
 ) -> Int {
     let rewound = rewindSpeculativeEntries(cache, numTokens: numTokens)
     if rewound > 0 {
-        asyncEval(cache.compactMap { $0 as? MambaCache }.flatMap(\.state))
+        asyncEval(
+            KVCacheTree.leaves(in: cache).filter { !$0.isAttentionCache }.flatMap(\.cache.state))
     }
     return rewound
 }
@@ -769,8 +777,12 @@ private func rewindSpeculativeEntries(
 }
 
 package func discardSpeculativePromptCacheCheckpoints(_ cache: [KVCache]) {
-    for case let entry as MambaCache in cache {
-        entry.discardSpeculativeCheckpoint()
+    for leaf in KVCacheTree.leaves(in: cache) {
+        switch leaf.cache {
+        case let recurrent as MambaCache: recurrent.discardSpeculativeCheckpoint()
+        case let convolution as SpeculativeConvolutionCache: convolution.discardVerifyWindows()
+        default: break
+        }
     }
 }
 

@@ -551,3 +551,115 @@ extension RewindableConvolutionCache: PromptCacheRestorable {
         write(state: state, layout: layout)
     }
 }
+
+/// Convolution states that rewind the rejected tokens of a speculative verify pass.
+///
+/// Each slot holds the last inputs of one causal convolution, as an ``ArraysCache`` does. A
+/// verify pass of a few tokens also hands the cache its input window for each slot: the state
+/// before the pass, then the input of each token. A rewind of `n` tokens then takes the state
+/// after the kept tokens from those windows, without replaying the model.
+///
+/// The windows are transient. The next forward pass drops them (``advance(_:)``), and they are
+/// never part of the state, a copy, a prompt cache checkpoint or a saved prompt cache: the cache
+/// saves and restores as an ``ArraysCache``, under its name.
+public final class SpeculativeConvolutionCache: ArraysCache {
+
+    /// The windows of the last verify pass and the tokens of the pass the cache holds.
+    private struct VerifyWindows {
+        /// One window per slot: the state rows before the pass, then one row per token.
+        var windows: [MLXArray]
+        /// The tokens of the pass.
+        var tokenCount: Int
+        /// The tokens of the pass the cache holds: all of them after the pass, the kept tokens
+        /// after a rewind.
+        var keptTokenCount: Int
+    }
+
+    /// The most tokens of a verify pass whose windows the cache keeps.
+    public let maximumVerifyPositions: Int
+
+    /// The windows of the last verify pass, or `nil` when the cache keeps none.
+    private var verify: VerifyWindows?
+
+    /// Creates the cache.
+    ///
+    /// - Parameters:
+    ///   - size: the slots, one for each convolution of the layer.
+    ///   - maximumVerifyPositions: the most tokens of a verify pass whose windows the cache
+    ///     keeps, thus the deepest rewind.
+    public init(size: Int, maximumVerifyPositions: Int) {
+        precondition(maximumVerifyPositions > 0)
+        self.maximumVerifyPositions = maximumVerifyPositions
+        super.init(size: size)
+    }
+
+    /// Keeps the input windows of the forward pass that just moved the cache, so that a rewind
+    /// can take the state after any of its tokens.
+    ///
+    /// Call after the pass set each slot and called ``advance(_:)``. A window holds the state
+    /// rows before the pass, then one row per token of the pass, along axis 1.
+    ///
+    /// - Parameter windows: one window for each slot, in slot order.
+    public func keepVerifyWindows(_ windows: [MLXArray]) {
+        guard let window = windows.first, windows.count == slotCount else {
+            verify = nil
+            return
+        }
+        let stateLength = self[0]?.dim(1) ?? 0
+        let tokens = window.dim(1) - stateLength
+        verify =
+            (1 ... maximumVerifyPositions).contains(tokens)
+            ? VerifyWindows(windows: windows, tokenCount: tokens, keptTokenCount: tokens) : nil
+    }
+
+    /// Drops the windows of the last verify pass.
+    public func discardVerifyWindows() {
+        verify = nil
+    }
+
+    /// Moves the cache past a forward pass and drops the windows of the previous pass.
+    ///
+    /// - Parameter tokenCount: the tokens the layer fed.
+    public override func advance(_ tokenCount: Int) {
+        verify = nil
+        super.advance(tokenCount)
+    }
+
+    /// Whether a verify pass of `positions` tokens keeps the windows of its every token.
+    public override func isTrimmable(after positions: Int) -> Bool {
+        positions >= 0 && positions <= maximumVerifyPositions
+    }
+
+    /// The tokens of the last verify pass the cache holds, or zero without windows.
+    public override var maxTrimCount: Int {
+        verify?.keptTokenCount ?? 0
+    }
+
+    /// Rewinds the newest `n` tokens of the last verify pass: each slot takes the state after the
+    /// kept tokens from its window. The windows stay, so that a later rewind of the same pass
+    /// rewinds further.
+    ///
+    /// - Parameter n: the tokens to remove.
+    /// - Returns: `n`, or zero, leaving the cache as it was, when the windows do not hold them.
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        guard n > 0, var verify, n <= verify.keptTokenCount else { return 0 }
+        let kept = verify.keptTokenCount - n
+        for (slot, window) in verify.windows.enumerated() {
+            let stateLength = window.dim(1) - verify.tokenCount
+            self[slot] = contiguous(window[0..., kept ..< (kept + stateLength), 0...])
+        }
+        verify.keptTokenCount = kept
+        self.verify = verify
+        offset -= n
+        return n
+    }
+
+    /// A copy of the states, without the windows of the last verify pass.
+    public override func copy() -> any KVCache {
+        let new = SpeculativeConvolutionCache(
+            size: slotCount, maximumVerifyPositions: maximumVerifyPositions)
+        copyContents(to: new)
+        return new
+    }
+}

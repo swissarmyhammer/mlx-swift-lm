@@ -110,8 +110,9 @@ struct Inkling2CheckpointIntegrationTests {
     private static let lowEffort: [String: any Sendable] = ["reasoning_effort": "low"]
 
     /// A prompt of about 4k tokens: a generated Swift listing and a question about it. The
-    /// suite makes it locally, so the measurement downloads no benchmark text.
-    private static let longPrompt: String = {
+    /// suite makes it locally, so the measurement downloads no benchmark text. The MTP suite
+    /// measures at the same prompt.
+    static let longPrompt: String = {
         let functions = (0 ..< 240).map { index in
             "func step\(index)(_ x: Int) -> Int { x * \(index % 17 + 2) + \(index * 7 % 31) }"
         }

@@ -650,7 +650,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         let nativeRewindDepth =
             (mainModel as? any SpeculativeCacheRewindModel)?.maximumNativeTargetCacheRewind ?? 0
         return nativeRewindDepth >= drafts
-            && mainCache.contains { $0 is MambaCache }
+            && KVCacheTree.leaves(in: mainCache).contains { !$0.isAttentionCache }
             && canRewindSpeculativeVerify(mainCache, positions: drafts + 1)
     }
 

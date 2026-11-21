@@ -135,6 +135,28 @@ KV caches can be full precision or affine quantized (`kvBits`); TurboQuant and t
 variance-normalized caches are not supported. Rotating capacity can retain a tail,
 but not a pinned prefix.
 
+### Inkling 2 MTP
+
+The DSpark head an Inkling 2 checkpoint ships in `mtp.safetensors` drafts up to seven
+tokens per round for greedy decoding. `MTPDrafterRegistration.inkling2` registers it, and
+`MTPDrafterRegistry.inkling2_mini_oq4e_mtp` names the checkpoint that ships the Mini head;
+the drafter loads `mtp.safetensors` alone and leaves the target weights beside it:
+
+```swift
+let speculative = try SpeculativeDecodingConfig(
+    mtpDrafterConfiguration: MTPDrafterRegistry.inkling2_mini_oq4e_mtp,
+    mtpDrafterBytes: 740_000_000, from: downloader, using: tokenizerLoader,
+    registration: .inkling2, blockSize: 3)
+let session = ChatSession(container, speculativeDecoding: speculative)
+```
+
+A verify pass runs its few tokens through the decode kernels as rows, so below the sliding
+window each token gets the logits of a decode step bit for bit, and greedy MTP writes the
+tokens of plain greedy decoding. Rejected drafts rewind in place: each convolution cache
+keeps the input windows of the verify pass. On an M5, rounds of three tokens decode a
+prose prompt about 1.1 times and a 5k-token code prompt about 1.4 times as fast as plain
+decoding; the shared default of four tokens, 1.0 and 1.4 times.
+
 See [llm-tool](../../Tools/llm-tool)
 
 # Adding a Model
