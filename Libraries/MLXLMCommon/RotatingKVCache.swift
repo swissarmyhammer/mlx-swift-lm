@@ -216,10 +216,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     /// The slot after the newest key when the last ``update(keys:values:)`` returned the
     /// whole ring out of temporal order, or `nil` when it returned the keys oldest first.
+    /// The ring holds the slots after the pinned `keep` prefix.
     ///
     /// Models with relative position biases use it to find the distance of each key.
     package var ringWriteIndex: Int? {
-        guard rewindCapacity == 0, keep == 0, vacantRows == 0, wrapped, let keys,
+        guard rewindCapacity == 0, vacantRows == 0, wrapped, let keys,
             idx < keys.dim(HeadRowsAxis.row)
         else {
             return nil
