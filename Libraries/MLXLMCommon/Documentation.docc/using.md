@@ -521,8 +521,14 @@ You can use the <doc:#MLXHuggingFace-Macros> like this:
 
 ```swift
 .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
-.package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+.package(url: "https://github.com/huggingface/swift-transformers", from: "1.4.0"),
+.package(url: "https://github.com/huggingface/swift-jinja.git", from: "3.0.0"),
 ```
+
+The swift-jinja requirement is there to force swift-jinja 3.0.0 or later. Chat
+templates that call `tojson(separators=…)`, such as the Inkling 2 tool template,
+need it, and swift-transformers 1.4.0 still allows swift-jinja 2.4.2 and later.
+No target needs to use a swift-jinja product.
 
 ```swift
 .target(

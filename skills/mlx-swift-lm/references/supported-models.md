@@ -190,6 +190,18 @@ VLMRegistry.paligemma3bMix448_8bit // mlx-community/paligemma-3b-mix-448-8bit
 | `muse_glimmer` | Meta Muse Glimmer (text, image, reasoning, and ATEM tool calls) |
 | `inkling2`, `inkling2_loop` | Thinking Machines Inkling 2 Small and Inkling 2 Mini (text, image, reasoning, and Inkling tool calls; the vision tower loads on the first image) |
 
+### Inkling 2 template requirements
+
+The Inkling 2 chat template calls `tojson(separators=…)` when the prompt
+declares tools. swift-jinja accepts `separators` from
+[3.0.0](https://github.com/huggingface/swift-jinja/releases/tag/3.0.0) on, and
+the first swift-transformers release that allows swift-jinja 3 is
+[1.4.0](https://github.com/huggingface/swift-transformers/releases/tag/1.4.0).
+swift-transformers 1.4.0 still allows swift-jinja 2.4.2 and later, so add a
+direct `swift-jinja` requirement `from: "3.0.0"` beside `swift-transformers`
+`from: "1.4.0"`. With an older swift-jinja, `Inkling2Processor` throws
+`VLMError.processing` with a message that names swift-jinja 3.0.0.
+
 ## Loading Any Model
 
 Models not in registries can be loaded by ID:

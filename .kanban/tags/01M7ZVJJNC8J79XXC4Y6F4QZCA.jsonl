@@ -1,0 +1,1 @@
+{"id":"01M7ZVJJNC3BVXQP4T9N24AC5H","timestamp":"2026-11-21T20:08:15.788790Z","op":"create","item_id":"01M7ZVJJNC8J79XXC4Y6F4QZCA","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: b60205\n+tag_name: inkling\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: b60205\n-tag_name: inkling\n","transaction_id":null}

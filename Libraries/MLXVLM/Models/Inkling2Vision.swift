@@ -388,13 +388,41 @@ public struct Inkling2Processor: UserInputProcessor {
 
     private static let context = CIContext()
 
+    /// The oldest swift-jinja release whose `tojson` filter accepts `separators`.
+    private static let minimumSwiftJinjaVersion = "3.0.0"
+
+    /// The oldest swift-transformers release that lets swift-jinja 3 resolve.
+    private static let minimumSwiftTransformersVersion = "1.4.0"
+
+    /// The message an older swift-jinja gives when the template passes `separators` to `tojson`.
+    private static let unsupportedSeparatorsMessage = "Unexpected keyword argument 'separators'"
+
+    /// Renders the chat template, and names the swift-jinja release the Inkling template
+    /// needs when the renderer rejects its `tojson(separators=…)` call.
+    private func renderChatTemplate(
+        messages: [Message], input: UserInput
+    ) throws -> [Int] {
+        do {
+            return try tokenizer.applyChatTemplate(
+                messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+        } catch {
+            guard error.localizedDescription.contains(Self.unsupportedSeparatorsMessage) else {
+                throw error
+            }
+            throw VLMError.processing(
+                "The Inkling 2 chat template calls tojson(separators=…), which needs swift-jinja "
+                    + "\(Self.minimumSwiftJinjaVersion) or later (swift-transformers "
+                    + "\(Self.minimumSwiftTransformersVersion) or later can resolve it). "
+                    + "Template error: \(error.localizedDescription)")
+        }
+    }
+
     public func prepare(input: UserInput) async throws -> LMInput {
         guard input.videos.isEmpty else { throw VLMError.singleMediaTypeAllowed }
 
         let messages = Qwen2VLMessageGenerator().generate(
             from: input.removingSpecialTokenLabels(using: tokenizer))
-        var tokens = try tokenizer.applyChatTemplate(
-            messages: messages, tools: input.tools, additionalContext: input.additionalContext)
+        var tokens = try renderChatTemplate(messages: messages, input: input)
 
         guard !input.images.isEmpty else {
             return LMInput(text: .init(tokens: MLXArray(tokens).expandedDimensions(axis: 0)))

@@ -673,10 +673,16 @@ private final class InklingTestTokenizer: Tokenizer, @unchecked Sendable {
         "<|content_model_end_sampling|>": 200_006, "<|content_thinking|>": 200_008,
         "<|end_message|>": 200_010, "<|content_invoke_tool_json|>": 200_049,
     ]
+    /// The error `applyChatTemplate` throws, or `nil` to render an empty prompt.
+    private let templateError: (any Error)?
     private var nextID = 1
     private var textToID = InklingTestTokenizer.controls
     private var idToText = Dictionary(
         uniqueKeysWithValues: InklingTestTokenizer.controls.map { ($1, $0) })
+
+    init(templateError: (any Error)? = nil) {
+        self.templateError = templateError
+    }
 
     func id(_ text: String) -> Int {
         if let id = textToID[text] { return id }
@@ -701,7 +707,16 @@ private final class InklingTestTokenizer: Tokenizer, @unchecked Sendable {
     func applyChatTemplate(
         messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
-    ) throws -> [Int] { [] }
+    ) throws -> [Int] {
+        if let templateError { throw templateError }
+        return []
+    }
+}
+
+/// A template renderer error, spelled as swift-jinja 2.5 spells its runtime errors.
+private struct TemplateRenderError: LocalizedError {
+    let message: String
+    var errorDescription: String? { "Runtime error: \(message)" }
 }
 
 @Suite("Inkling2 stream protocol")
@@ -869,5 +884,27 @@ struct Inkling2ProcessorTests {
         // The first pixel is red.
         #expect(abs(patches[0, 0].item(Float.self) - 1) < 1e-3)
         #expect(abs(patches[0, 1].item(Float.self) + 1) < 1e-3)
+    }
+
+    @Test("A renderer without tojson separators names the swift-jinja release that has them")
+    func separatorsErrorNamesSwiftJinjaRelease() async throws {
+        let tokenizer = InklingTestTokenizer(
+            templateError: TemplateRenderError(
+                message: "Unexpected keyword argument 'separators' for filter."))
+        let processor = Inkling2Processor(Inkling2ProcessorConfiguration(), tokenizer: tokenizer)
+        let error = await #expect(throws: VLMError.self) {
+            try await processor.prepare(input: UserInput(prompt: "hi"))
+        }
+        #expect(error?.localizedDescription.contains("swift-jinja 3.0.0") == true)
+    }
+
+    @Test("Other template errors pass through unchanged")
+    func otherTemplateErrorsPassThrough() async throws {
+        let tokenizer = InklingTestTokenizer(
+            templateError: TemplateRenderError(message: "Unknown filter 'frobnicate'."))
+        let processor = Inkling2Processor(Inkling2ProcessorConfiguration(), tokenizer: tokenizer)
+        await #expect(throws: TemplateRenderError.self) {
+            try await processor.prepare(input: UserInput(prompt: "hi"))
+        }
     }
 }

@@ -70,7 +70,8 @@ See also [MLXLMCommon](Libraries/MLXLMCommon). The simplest way to get started i
 dependencies: [
     .package(url: "https://github.com/ml-explore/mlx-swift-lm", .upToNextMinor(from: "3.32.3")),
     .package(url: "https://github.com/huggingface/swift-huggingface", from: "0.9.0"),
-    .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+    .package(url: "https://github.com/huggingface/swift-transformers", from: "1.4.0"),
+    .package(url: "https://github.com/huggingface/swift-jinja.git", from: "3.0.0"),
 ],
 targets: [
     .target(
@@ -84,6 +85,13 @@ targets: [
         ]),
 ]
 ```
+
+The minimums are swift-transformers 1.4.0 and swift-jinja 3.0.0. Some chat
+templates, such as the Inkling 2 tool template, call `tojson(separators=…)`, and
+swift-jinja accepts `separators` from 3.0.0 on. swift-transformers 1.4.0 still
+allows swift-jinja 2.4.2 and later, so a resolve can keep an older swift-jinja.
+The direct swift-jinja requirement above prevents that. No target needs to use
+a swift-jinja product.
 
 ## Usage
 
