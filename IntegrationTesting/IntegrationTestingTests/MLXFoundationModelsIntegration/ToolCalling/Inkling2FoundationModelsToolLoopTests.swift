@@ -27,10 +27,6 @@ import os
 
 @testable import MLXFoundationModels
 
-/// The log every result line of this suite goes to.
-private let resultLog = Logger(
-    subsystem: "com.apple.FoundationModels-MLX", category: "Inkling2FoundationModelsToolLoop")
-
 // MARK: - The tools
 
 /// The argument of the customer tool.
@@ -128,11 +124,6 @@ struct Inkling2FoundationModelsToolLoopTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static var options: GenerationOptions {
         GenerationOptions(samplingMode: .greedy, temperature: 0, maximumResponseTokens: maxTokens)
-    }
-
-    /// Writes one result line, which the unified log of the run can be searched for.
-    private static func report(_ line: String) {
-        resultLog.info("[INKLING2 FM TOOLS] \(line, privacy: .public)")
     }
 
     /// The snapshot directory of the pinned checkpoint in the Hugging Face cache.
@@ -266,12 +257,16 @@ struct Inkling2FoundationModelsToolLoopTests {
             to: Inkling2BankFixture.followUp, options: Self.options)
 
         for entry in session.transcript {
-            Self.report("session[\(label)] entry: \(String(describing: entry).prefix(400))")
+            Inkling2ResultLog.report(
+                "INKLING2 FM TOOLS",
+                "session[\(label)] entry: \(String(describing: entry).prefix(400))")
         }
-        Self.report(
+        Inkling2ResultLog.report(
+            "INKLING2 FM TOOLS",
             "session[\(label)] answer cached \(answer.usage.input.cachedTokenCount) of "
                 + "\(answer.usage.input.totalTokenCount) <<<\(answer.content)>>>")
-        Self.report(
+        Inkling2ResultLog.report(
+            "INKLING2 FM TOOLS",
             "session[\(label)] follow-up cached \(followUp.usage.input.cachedTokenCount) of "
                 + "\(followUp.usage.input.totalTokenCount) <<<\(followUp.content)>>>")
         #expect(log.isTheTwoStepLoop, "[\(label)] calls \(log.calls)")
@@ -327,8 +322,11 @@ struct Inkling2FoundationModelsToolLoopTests {
         for number in 0 ..< Self.maxRounds {
             let round = try await Self.runRound(
                 entries, thinking: thinking, model: model, executor: executor)
-            Self.report("executor[\(label)] round \(number): \(round.summary)")
-            Self.report("executor[\(label)] round \(number) reasoning: \(round.reasoning)")
+            Inkling2ResultLog.report(
+                "INKLING2 FM TOOLS", "executor[\(label)] round \(number): \(round.summary)")
+            Inkling2ResultLog.report(
+                "INKLING2 FM TOOLS",
+                "executor[\(label)] round \(number) reasoning: \(round.reasoning)")
             rounds.append(round)
             guard !round.toolCalls.isEmpty else { break }
             entries += try Self.entries(after: round, number: number, log: log)
@@ -339,7 +337,8 @@ struct Inkling2FoundationModelsToolLoopTests {
         entries.append(Self.prompt(Inkling2BankFixture.followUp))
         let followUp = try await Self.runRound(
             entries, thinking: thinking, model: model, executor: executor)
-        Self.report("executor[\(label)] follow-up: \(followUp.summary)")
+        Inkling2ResultLog.report(
+            "INKLING2 FM TOOLS", "executor[\(label)] follow-up: \(followUp.summary)")
 
         #expect(log.isTheTwoStepLoop, "[\(label)] calls \(log.calls)")
         #expect(Inkling2BankFixture.namesTheBalance(answer.text), "[\(label)] \(answer.text)")

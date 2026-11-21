@@ -77,9 +77,16 @@ comments:
     - evidence: swift build --build-tests: Build complete, 0 errors, 0 repo warnings. xctest MLXLMTests: 1258 XCTest + 2540 Swift Testing passed (3 pre-existing known issues), 0 failures. MLXFoundationModelsTests: 562 passed. IntegrationTesting build-for-testing Release (ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES): TEST BUILD SUCCEEDED; test-without-building Inkling2ToolLoopIntegrationTests + Inkling2FoundationModelsToolLoopTests: 3 tests in 2 suites passed. swift-format applied. Files (12): IntegrationTesting/IntegrationTestingTests/Inkling2ToolLoopIntegrationTests.swift, IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift, Tests/MLXLMTestSupport/InklingFrameTokenizer.swift, Tests/MLXLMTestSupport/InklingWeatherToolLoop.swift (new), Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift, Tests/MLXLMTests/InklingCommittedTurnRuleTests.swift, Tests/MLXLMTests/CommittedTurnThinkBlockTests.swift, Tests/MLXLMTests/PromptCacheState+Aligned.swift (new), Tests/MLXLMTests/InklingFrameTokenizerTests.swift (new), Tests/MLXFoundationModelsTests/InklingExecutorToolLoopTests.swift. All 16 findings checked. Not committed.
     - next: /review ^1sg8f5t
   timestamp: 2026-11-21T21:26:06.036083+00:00
+- actor: claude-code
+  id: 01m8006160kgt1phtqbva77gky
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (5ba4a62b) — 1 finding (confirmed 1, refuted 2, attempted 7): IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift:135 (reuse/reuse). All 16 items of the 15:04 section are checked.
+    - next: implement the 2026-11-21 15:26 finding (share the Logger and report helper in the IntegrationTesting target), commit, re-review.
+  timestamp: 2026-11-21T21:28:47.552877+00:00
 depends_on:
 - 01M7ZVJJNB56PTH6BP74Y1ZBGN
-position_column: doing
+position_column: review
 position_ordinal: '80'
 title: 'Inkling 2 Mini: tool calling usable end to end (ChatSession and MLXFoundationModels), with cache reuse'
 ---
@@ -140,3 +147,13 @@ Acceptance:
 - [x] `Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift:71` `reuse/reuse` — The `writtenCall` fixture, with the `weather` table, the `weatherTool` spec and the `tokenizer` built from them, duplicates the same fixture in `InklingExecutorToolLoopTests`. Both suites now define the model's written-call text, the same weather table and the same tool declaration independently. The two copies must stay in step by hand, and a change to one that is not made in the other makes the two suites test different wire formats. Move `writtenCall`, the `weather` table, `toolName`, and the tokenizer construction next to `InklingFrameTokenizer` in `Tests/MLXLMTestSupport`, which both bundles already import. Call that shared fixture from both suites. Keep each suite's own assertions local.
 - [x] `Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift:110` `reuse/reuse` — `callingTurn` and `answeringTurn` rebuild the model's scripted turn frame by frame, duplicating the scripted-turn builders in `InklingExecutorToolLoopTests`. Both build the thinking frame, the calls and `<|content_model_end_sampling|>` with the same marker sequence. The duplicate hard-codes the Inkling frame order once more. Put the calling and answering turn builders in the shared Inkling test-support file together with the fixture from the previous finding, and have both suites call them. This removes the second copy of the frame ordering.
 - [x] `Tests/MLXLMTests/InklingCommittedTurnRuleTests.swift:77` `reuse/reuse` — The new `alignedCache(_:previousRender:)` helper reimplements an existing helper with the same signature and the same body. Each copy builds a `PromptCacheState` with `mainCacheIsAligned: true` and `processedTokenCount` equal to the cache count. A later change to the aligned-cache shape has to be made in several files, and this copy can drift from the others. Use the existing helper instead of a fourth copy. Move one `alignedCache(_:previousRender:)` to a shared internal test-support location (for example beside `MarkerTokenizer` in MLXLMTests) and call it from both `CommittedTurnThinkBlockTests` and `InklingCommittedTurnRuleTests`. Delete the local copy.
+
+## Review Findings (2026-11-21 15:26)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7ZVJS05JRXMZZXBS1SG8F5T.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7ZVJS05JRXMZZXBS1SG8F5T.md` — no validator matches this file
+
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift:135` `reuse/reuse` — The new `report` helper and its `resultLog` Logger in this file reimplement the same logging helper that already exists in `Inkling2ToolLoopIntegrationTests.swift`. Only the category string and the tag prefix differ, so the logging setup is duplicated in the same test target and will drift. Move the Logger and a `report(_ prefix: String, _ line: String)` helper into one shared file in the IntegrationTesting target (for example, next to `Inkling2BankFixture`) and call it from both suites, passing the tag prefix as a parameter.

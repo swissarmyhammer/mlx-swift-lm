@@ -23,10 +23,6 @@ import os
 /// checkpoint, with the download of the checkpoint when it is not in the cache.
 private let suiteTimeLimitMinutes = 30
 
-/// The log every result line of this suite goes to.
-private let resultLog = Logger(
-    subsystem: "com.apple.FoundationModels-MLX", category: "Inkling2ToolLoop")
-
 // MARK: - The bank
 
 /// The bank both tool-loop suites query: one customer, a tool that finds the id of a customer
@@ -213,11 +209,6 @@ struct Inkling2ToolLoopIntegrationTests {
     /// Tokens each pass may generate.
     private static let maxTokens = 1_024
 
-    /// Writes one result line, which the unified log of the run can be searched for.
-    private static func report(_ line: String) {
-        resultLog.info("[INKLING2 TOOLS] \(line, privacy: .public)")
-    }
-
     /// The one string argument of `call`, or an empty text.
     private static func argument(of call: ToolCall) -> String {
         call.function.arguments.values.first?.anyValue as? String ?? ""
@@ -268,15 +259,17 @@ struct Inkling2ToolLoopIntegrationTests {
         let passes = try await Inkling2Pass.collect(
             session.streamDetails(to: Inkling2BankFixture.question))
         for (index, pass) in passes.enumerated() {
-            Self.report("chat[\(label)] pass \(index): \(pass.summary)")
-            Self.report("chat[\(label)] pass \(index) reasoning: \(pass.reasoning)")
+            Inkling2ResultLog.report(
+                "INKLING2 TOOLS", "chat[\(label)] pass \(index): \(pass.summary)")
+            Inkling2ResultLog.report(
+                "INKLING2 TOOLS", "chat[\(label)] pass \(index) reasoning: \(pass.reasoning)")
         }
         let followUp = try await Inkling2Pass.collect(
             session.streamDetails(to: Inkling2BankFixture.followUp))
         for pass in followUp {
-            Self.report("chat[\(label)] follow-up: \(pass.summary)")
+            Inkling2ResultLog.report("INKLING2 TOOLS", "chat[\(label)] follow-up: \(pass.summary)")
         }
-        Self.report("chat[\(label)] dispatched \(log.calls)")
+        Inkling2ResultLog.report("INKLING2 TOOLS", "chat[\(label)] dispatched \(log.calls)")
 
         #expect(log.isTheTwoStepLoop, "[\(label)] calls \(log.calls)")
         let answer = try #require(passes.last, "[\(label)] no pass")

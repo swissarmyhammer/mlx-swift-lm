@@ -100,11 +100,6 @@ private struct Inkling2Turn {
 /// The peak memory since the last reset, in GiB.
 private var peakGiB: Double { Double(Memory.peakMemory) / bytesPerGiB }
 
-/// Writes one result line that the run log can be searched for.
-private func report(_ line: String) {
-    print("[INKLING2] \(line)")
-}
-
 // MARK: - Tests
 
 @Suite(.serialized, .timeLimit(.minutes(60)))
@@ -137,9 +132,10 @@ struct Inkling2CheckpointIntegrationTests {
                 to: "Write a Python function `is_prime(n)` that returns whether n is prime. "
                     + "Reply with only the code."))
 
-        report("coding reasoning: \(turn.reasoning)")
-        report("coding answer: \(turn.text)")
-        report("coding turn: \(turn.summary), peak \(String(format: "%.2f", peakGiB)) GiB")
+        Inkling2ResultLog.report("INKLING2", "coding reasoning: \(turn.reasoning)")
+        Inkling2ResultLog.report("INKLING2", "coding answer: \(turn.text)")
+        Inkling2ResultLog.report(
+            "INKLING2", "coding turn: \(turn.summary), peak \(String(format: "%.2f", peakGiB)) GiB")
         #expect(turn.text.contains("def is_prime"), "answer: \(turn.text)")
         #expect(turn.text.contains("return"), "answer: \(turn.text)")
     }
@@ -155,7 +151,8 @@ struct Inkling2CheckpointIntegrationTests {
             prompt: "Write a long, detailed story about a lighthouse keeper and a storm.",
             maxTokens: 256, runs: 3)
         short.logSummary(label: "Inkling-2-Mini-4bit short context")
-        report(
+        Inkling2ResultLog.report(
+            "INKLING2",
             "short: prompt \(short.promptTokenCount) tok, "
                 + "prefill \(String(format: "%.1f", short.prefillTokensPerSecond)) tok/s, "
                 + "decode \(short.generationTokenCount) tok "
@@ -166,7 +163,8 @@ struct Inkling2CheckpointIntegrationTests {
         let long = try await Benchmark.llmGeneration(
             container: container, prompt: Self.longPrompt, maxTokens: 128, runs: 3)
         long.logSummary(label: "Inkling-2-Mini-4bit 4k context")
-        report(
+        Inkling2ResultLog.report(
+            "INKLING2",
             "long: prompt \(long.promptTokenCount) tok, "
                 + "prefill \(String(format: "%.1f", long.prefillTokensPerSecond)) tok/s, "
                 + "decode \(long.generationTokenCount) tok "
@@ -208,10 +206,12 @@ struct Inkling2CheckpointIntegrationTests {
         var turns: [Inkling2Turn] = []
         for question in questions {
             let turn = try await Inkling2Turn.collect(session.streamDetails(to: question))
-            report("chat[\(effort)] turn \(turns.count): \(turn.summary) -> \(turn.text)")
+            Inkling2ResultLog.report(
+                "INKLING2", "chat[\(effort)] turn \(turns.count): \(turn.summary) -> \(turn.text)")
             turns.append(turn)
         }
-        report("chat[\(effort)] peak \(String(format: "%.2f", peakGiB)) GiB")
+        Inkling2ResultLog.report(
+            "INKLING2", "chat[\(effort)] peak \(String(format: "%.2f", peakGiB)) GiB")
 
         for (index, turn) in turns.enumerated().dropFirst() {
             let cached = turn.info?.cachedPromptTokenCount ?? 0
@@ -252,8 +252,9 @@ struct Inkling2CheckpointIntegrationTests {
         let turn = try await Inkling2Turn.collect(
             session.streamDetails(to: "What is the weather in Paris right now?"))
 
-        report("tool turn: \(turn.summary), calls \(turn.toolCalls), text \(turn.text)")
-        report("tool peak \(String(format: "%.2f", peakGiB)) GiB")
+        Inkling2ResultLog.report(
+            "INKLING2", "tool turn: \(turn.summary), calls \(turn.toolCalls), text \(turn.text)")
+        Inkling2ResultLog.report("INKLING2", "tool peak \(String(format: "%.2f", peakGiB)) GiB")
         let call = try #require(turn.toolCalls.first, "no tool call; text: \(turn.text)")
         #expect(call.function.name == "get_weather")
         guard case .string(let location) = call.function.arguments["location"] else {
