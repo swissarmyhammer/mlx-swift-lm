@@ -125,6 +125,8 @@ public enum VLMTypeRegistry {
         // into the text config, because they have no `text_config` or
         // `vision_config` level to unwrap.
         "minimax_m3": create(MiniMaxM3TextConfiguration.self, MiniMaxM3Model.init),
+        "inkling2": create(Inkling2Configuration.self, Inkling2.init),
+        "inkling2_loop": create(Inkling2Configuration.self, Inkling2.init),
     ])
 }
 
@@ -174,6 +176,8 @@ public enum VLMProcessorTypeRegistry {
             MuseGlimmerProcessorConfiguration.self, MuseGlimmerProcessor.init),
         "MiniMaxM3VLProcessor": create(
             MiniMaxM3ProcessorConfiguration.self, MiniMaxM3Processor.init),
+        "Inkling2Processor": create(
+            Inkling2ProcessorConfiguration.self, Inkling2Processor.init),
     ])
 }
 
