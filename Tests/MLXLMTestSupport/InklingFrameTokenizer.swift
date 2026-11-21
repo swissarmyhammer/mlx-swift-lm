@@ -50,6 +50,19 @@ public struct InklingFrameTokenizer: Tokenizer {
         case toolDeclaration = "<|tool_declaration|>"
     }
 
+    /// The error of a render whose tool call has arguments that are not a JSON object.
+    public struct ArgumentsAreNotJSON: Error, Equatable {
+        /// The name of the tool of the call.
+        public let toolName: String
+
+        /// Makes the error of a call of `toolName`.
+        ///
+        /// - Parameter toolName: the name of the tool of the call.
+        public init(toolName: String) {
+            self.toolName = toolName
+        }
+    }
+
     /// The text of the thinking-effort frame before its level.
     public static let effortPrefix = "Thinking effort level: "
 
@@ -108,17 +121,33 @@ public struct InklingFrameTokenizer: Tokenizer {
     ///   - name: the name of the tool.
     ///   - arguments: the arguments of the call.
     /// - Returns: the JSON text of the payload.
-    public static func renderedCall(name: String, arguments: [String: any Sendable]) -> String {
-        let data =
-            (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]))
-            ?? Data("{}".utf8)
+    /// - Throws: ``ArgumentsAreNotJSON`` when `arguments` is not a JSON object, or the error of
+    ///   `JSONSerialization`.
+    private static func renderedCall(name: String, arguments: [String: any Sendable]) throws
+        -> String
+    {
+        guard JSONSerialization.isValidJSONObject(arguments) else {
+            throw ArgumentsAreNotJSON(toolName: name)
+        }
+        let data = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])
         return #"{"name":"\#(name)","args":"# + String(decoding: data, as: UTF8.self) + "}"
     }
 
+    /// The vocabulary has no beginning-of-sequence token.
     public var bosToken: String? { nil }
+
+    /// The end of the turn of the model, `<|content_model_end_sampling|>`.
     public var eosToken: String? { Marker.endSampling.rawValue }
+
+    /// The vocabulary names no unknown token as text; ``unknownTokenID`` stands for it.
     public var unknownToken: String? { nil }
 
+    /// The one token of `text`: its marker, its piece, or ``unknownTokenID``.
+    ///
+    /// - Parameters:
+    ///   - text: a marker or a piece of the vocabulary.
+    ///   - addSpecialTokens: ignored, the vocabulary has no special tokens to add.
+    /// - Returns: the one token of `text`.
     public func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         if let marker = Marker(rawValue: text) {
             return [token(marker)]
@@ -126,10 +155,20 @@ public struct InklingFrameTokenizer: Tokenizer {
         return [token(text)]
     }
 
+    /// The joined text of `tokenIds`, with an empty text for a token outside the vocabulary.
+    ///
+    /// - Parameters:
+    ///   - tokenIds: the tokens to decode.
+    ///   - skipSpecialTokens: ignored, every marker decodes to its text.
+    /// - Returns: the text of the tokens.
     public func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
         tokenIds.map { convertIdToToken($0) ?? "" }.joined()
     }
 
+    /// The token of the marker or piece `token`, or nil outside the vocabulary.
+    ///
+    /// - Parameter token: a marker or a piece.
+    /// - Returns: its token, or nil.
     public func convertTokenToId(_ token: String) -> Int? {
         if let marker = Marker(rawValue: token) {
             return self.token(marker)
@@ -137,6 +176,10 @@ public struct InklingFrameTokenizer: Tokenizer {
         return tokenOfPiece[token]
     }
 
+    /// The marker or piece of `id`, or nil for the unknown token and outside the vocabulary.
+    ///
+    /// - Parameter id: a token.
+    /// - Returns: its text, or nil.
     public func convertIdToToken(_ id: Int) -> String? {
         if Marker.allCases.indices.contains(id) {
             return Marker.allCases[id].rawValue
@@ -165,7 +208,7 @@ public struct InklingFrameTokenizer: Tokenizer {
                 tokens += effort
                 wroteEffort = true
             }
-            tokens += render(message, role: role, in: messages)
+            tokens += try render(message, role: role, in: messages)
         }
         return wroteEffort ? tokens : tokens + effort
     }
@@ -173,7 +216,7 @@ public struct InklingFrameTokenizer: Tokenizer {
     /// The frames of one message.
     private func render(
         _ message: [String: any Sendable], role: String?, in messages: [[String: any Sendable]]
-    ) -> [Int] {
+    ) throws -> [Int] {
         let content = Self.text(of: message["content"])
         switch role {
         case "system":
@@ -182,7 +225,7 @@ public struct InklingFrameTokenizer: Tokenizer {
             let name = message["name"] as? String ?? toolName(of: message, in: messages)
             return frame(.messageTool, header: name, .contentText, payload: content)
         case "assistant":
-            return assistantFrames(message, content: content)
+            return try assistantFrames(message, content: content)
         default:
             return frame(.messageUser, .contentText, payload: content)
         }
@@ -190,7 +233,9 @@ public struct InklingFrameTokenizer: Tokenizer {
 
     /// The frames of an assistant message: its reasoning, its text, its tool calls, then the end
     /// of its turn.
-    private func assistantFrames(_ message: [String: any Sendable], content: String) -> [Int] {
+    private func assistantFrames(_ message: [String: any Sendable], content: String) throws
+        -> [Int]
+    {
         let reasoning = message["reasoning_content"] as? String ?? ""
         let calls = message["tool_calls"] as? [[String: any Sendable]] ?? []
         var tokens: [Int] = []
@@ -206,7 +251,7 @@ public struct InklingFrameTokenizer: Tokenizer {
             let arguments = function["arguments"] as? [String: any Sendable] ?? [:]
             tokens += frame(
                 .messageModel, header: name, .contentToolJSON,
-                payload: Self.renderedCall(name: name, arguments: arguments))
+                payload: try Self.renderedCall(name: name, arguments: arguments))
         }
         return tokens + [token(.endSampling)]
     }

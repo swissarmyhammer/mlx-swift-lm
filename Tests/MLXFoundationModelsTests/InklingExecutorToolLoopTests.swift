@@ -35,67 +35,26 @@ struct InklingExecutorToolLoopTests {
     /// The question of the user.
     private static let question = "What is the weather in Rome?"
 
-    /// The reasoning the model writes before its call.
-    private static let reasoning = "I will look Rome up."
+    /// The scripted weather loop: the reasoning before the call, the answer after the result,
+    /// and the tokenizer whose vocabulary holds every text of the conversation.
+    private static let loop = InklingWeatherToolLoop(
+        reasoning: "I will look Rome up.", answer: "Rome is sunny.",
+        otherPieces: [instructions, question])
 
-    /// The answer the model writes after the tool result.
-    private static let answer = "Rome is sunny."
-
-    /// The name of the tool.
-    private static let toolName = "get_weather"
-
-    /// The weather of each city the tool knows.
-    private static let weather = ["Rome": "Sunny, 21 C", "Paris": "Rainy, 12 C"]
-
-    /// The call for `city` as the model writes it: JSON with spaces.
-    private static func writtenCall(_ city: String) -> String {
-        #"{"name": "\#(toolName)", "args": {"city": "\#(city)"}}"#
-    }
+    /// The tokenizer of ``loop``.
+    private static var tokenizer: InklingFrameTokenizer { loop.tokenizer }
 
     /// The identifier of the call for `city` in the transcript of the second pass.
     private static func callID(_ city: String) -> String {
         "call_\(city.lowercased())"
     }
 
-    /// The tokenizer whose vocabulary holds every text of the conversation.
-    private static let tokenizer = InklingFrameTokenizer(
-        pieces: [instructions, question, reasoning, answer, toolName]
-            + weather.keys.flatMap {
-                [
-                    writtenCall($0),
-                    InklingFrameTokenizer.renderedCall(name: toolName, arguments: ["city": $0]),
-                ]
-            } + Array(weather.values))
-
-    /// The tokens the model writes in the turn that calls the tool for each of `cities`.
-    private static func callingTurn(_ cities: [String]) -> [Int] {
-        let thinking = [
-            tokenizer.token(.messageModel), tokenizer.token(.contentThinking),
-            tokenizer.token(reasoning), tokenizer.token(.endMessage),
-        ]
-        let calls = cities.flatMap { city in
-            [
-                tokenizer.token(.messageModel), tokenizer.token(toolName),
-                tokenizer.token(.contentToolJSON), tokenizer.token(writtenCall(city)),
-                tokenizer.token(.endMessage),
-            ]
-        }
-        return thinking + calls + [tokenizer.token(.endSampling)]
-    }
-
-    /// The tokens the model writes in the turn that answers from the tool result.
-    private static var answeringTurn: [Int] {
-        [
-            tokenizer.token(.messageModel), tokenizer.token(.contentText),
-            tokenizer.token(answer), tokenizer.token(.endMessage), tokenizer.token(.endSampling),
-        ]
-    }
-
     /// The tool the transcript declares.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static var weatherTool: Transcript.ToolDefinition {
         Transcript.ToolDefinition(
-            name: toolName, description: "Get the current weather for a city",
+            name: InklingWeatherToolLoop.toolName,
+            description: InklingWeatherToolLoop.toolDescription,
             parameters: WeatherArguments.generationSchema)
     }
 
@@ -148,17 +107,22 @@ struct InklingExecutorToolLoopTests {
     private static func toolRoundEntries(_ cities: [String]) throws -> [Transcript.Entry] {
         let calls = try cities.map { city in
             Transcript.ToolCall(
-                id: callID(city), toolName: toolName,
-                arguments: try GeneratedContent(json: #"{"city":"\#(city)"}"#))
+                id: callID(city), toolName: InklingWeatherToolLoop.toolName,
+                arguments: try GeneratedContent(
+                    json: #"{"\#(InklingWeatherToolLoop.cityArgument)":"\#(city)"}"#))
         }
         let outputs = cities.map { city in
             Transcript.Entry.toolOutput(
                 Transcript.ToolOutput(
-                    id: callID(city), toolName: toolName,
-                    segments: [.text(Transcript.TextSegment(content: weather[city] ?? ""))]))
+                    id: callID(city), toolName: InklingWeatherToolLoop.toolName,
+                    segments: [
+                        .text(
+                            Transcript.TextSegment(
+                                content: InklingWeatherToolLoop.weather[city] ?? ""))
+                    ]))
         }
         return [
-            .reasoning(Transcript.Reasoning(segments: [.text(.init(content: reasoning))])),
+            .reasoning(Transcript.Reasoning(segments: [.text(.init(content: loop.reasoning))])),
             .toolCalls(Transcript.ToolCalls(id: "toolcalls_weather", calls)),
         ] + outputs
     }
@@ -188,7 +152,7 @@ struct InklingExecutorToolLoopTests {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
         let model = makeModel(
-            rounds: [callingTurn(cities), answeringTurn],
+            rounds: [loop.callingTurn(cities), loop.answeringTurn],
             capabilities: [.reasoning, .toolCalling], weights: weights)
         let store = PromptCacheTestStore.withoutWrites(folderNamed: "InklingExecutorToolLoop")
         let first = firstEntries(sessionID: "inkling-tool-round-\(UUID().uuidString)")
@@ -208,8 +172,8 @@ struct InklingExecutorToolLoopTests {
     func theCallingPassStreamsReasoningAndACall() async throws {
         let round = try await Self.runToolRound()
 
-        #expect(round.calling.reasoningText == Self.reasoning)
-        #expect(round.calling.toolCallNames == [Self.toolName])
+        #expect(round.calling.reasoningText == Self.loop.reasoning)
+        #expect(round.calling.toolCallNames == [InklingWeatherToolLoop.toolName])
         #expect(round.calling.responseText.isEmpty)
     }
 
@@ -220,8 +184,8 @@ struct InklingExecutorToolLoopTests {
 
         #expect(
             round.answering.reusedTokenCount
-                == round.calling.promptTokenCount + Self.callingTurn(["Rome"]).count)
-        #expect(round.answering.responseText == Self.answer)
+                == round.calling.promptTokenCount + Self.loop.callingTurn(["Rome"]).count)
+        #expect(round.answering.responseText == Self.loop.answer)
     }
 
     @Test("the pass after the results of parallel calls reuses every token of the calling pass")
@@ -230,10 +194,13 @@ struct InklingExecutorToolLoopTests {
         let cities = ["Rome", "Paris"]
         let round = try await Self.runToolRound(cities: cities)
 
-        #expect(round.calling.toolCallNames == [Self.toolName, Self.toolName])
+        #expect(
+            round.calling.toolCallNames == [
+                InklingWeatherToolLoop.toolName, InklingWeatherToolLoop.toolName,
+            ])
         #expect(
             round.answering.reusedTokenCount
-                == round.calling.promptTokenCount + Self.callingTurn(cities).count)
+                == round.calling.promptTokenCount + Self.loop.callingTurn(cities).count)
     }
 
     @Test("the history of the pass after the tool result renders the reasoning of the call")
@@ -242,7 +209,7 @@ struct InklingExecutorToolLoopTests {
         let round = try await Self.runToolRound()
 
         let render = try #require(round.entry?.renderTokens)
-        #expect(render.contains(Self.tokenizer.token(Self.reasoning)))
+        #expect(render.contains(Self.tokenizer.token(Self.loop.reasoning)))
     }
 
     @Test("a model that does not declare reasoning renders the effort none")
@@ -251,7 +218,7 @@ struct InklingExecutorToolLoopTests {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
         let model = Self.makeModel(
-            rounds: [Self.answeringTurn], capabilities: [.toolCalling], weights: weights)
+            rounds: [Self.loop.answeringTurn], capabilities: [.toolCalling], weights: weights)
         let store = PromptCacheTestStore.withoutWrites(folderNamed: "InklingExecutorToolLoop")
         let request = Self.request(
             Self.firstEntries(sessionID: "inkling-thinking-off-\(UUID().uuidString)"),
@@ -267,7 +234,7 @@ struct InklingExecutorToolLoopTests {
         let effortNone = Self.tokenizer.token(
             InklingFrameTokenizer.effortPrefix + InklingReasoningProtocol.thinkingOffEffort)
         #expect(render.contains(effortNone))
-        #expect(pass.responseText == Self.answer)
+        #expect(pass.responseText == Self.loop.answer)
     }
 }
 

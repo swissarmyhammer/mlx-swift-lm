@@ -23,8 +23,13 @@ import HuggingFace
 import MLX
 import MLXLMCommon
 import Testing
+import os
 
 @testable import MLXFoundationModels
+
+/// The log every result line of this suite goes to.
+private let resultLog = Logger(
+    subsystem: "com.apple.FoundationModels-MLX", category: "Inkling2FoundationModelsToolLoop")
 
 // MARK: - The tools
 
@@ -125,9 +130,9 @@ struct Inkling2FoundationModelsToolLoopTests {
         GenerationOptions(samplingMode: .greedy, temperature: 0, maximumResponseTokens: maxTokens)
     }
 
-    /// Writes one result line that the run log can be searched for.
+    /// Writes one result line, which the unified log of the run can be searched for.
     private static func report(_ line: String) {
-        print("[INKLING2 FM TOOLS] \(line)")
+        resultLog.info("[INKLING2 FM TOOLS] \(line, privacy: .public)")
     }
 
     /// The snapshot directory of the pinned checkpoint in the Hugging Face cache.

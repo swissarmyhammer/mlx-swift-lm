@@ -42,6 +42,41 @@ comments:
     - evidence: swift build --build-tests clean; xctest MLXLMTests 1258 XCTest + 2539 Swift Testing passed (3 pre-existing known issues), MLXFoundationModelsTests 562 passed, MLXGuidedGenerationTests 86, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11 — 0 failures, 0 skipped. IntegrationTesting Release (serial): Inkling2CheckpointIntegrationTests 4, Inkling2ToolLoopIntegrationTests 1, Inkling2FoundationModelsToolLoopTests 2 (3 cases) passed. Files: Libraries/MLXLMCommon/{InklingReasoningProtocol,ReasoningConfig}.swift, Tool/ToolCallFormat.swift, Tool/Parsers/{InklingCommittedTurnRule (new),CommittedTurnSplice}.swift, Libraries/MLXVLM/Models/Inkling2Vision.swift, Libraries/MLXVLM/README.md, Tests/MLXLMTestSupport/InklingFrameTokenizer.swift (new), Tests/MLXLMTests/{InklingCommittedTurnRuleTests,InklingReasoningProtocolTests,Inkling2ToolLoopSessionTests (new),CommittedTurnThinkBlockTests,MarkerTokenizer,Inkling2Tests}.swift, Tests/MLXFoundationModelsTests/InklingExecutorToolLoopTests.swift (new), IntegrationTesting: Inkling2ToolLoopIntegrationTests.swift (new), MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift (new), Inkling2CheckpointIntegrationTests.swift (shared checkpoint/revision made internal).
     - next: /review (not committed)
   timestamp: 2026-11-21T21:03:22.460302+00:00
+- actor: claude-code
+  id: 01m7zz8es7m4ewz3tkzarrcm7j
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (e047b956) — 16 confirmed, 6 refuted. IntegrationTesting/IntegrationTestingTests/Inkling2ToolLoopIntegrationTests.swift:122,144,204; IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift:130; Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:113,118,119,120,122,129,133,140; Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift:24,71,110; Tests/MLXLMTests/InklingCommittedTurnRuleTests.swift:77. No confirmed finding on library (non-test) code, including the committed-turn splice and the non-Inkling formats.
+    - next: resolve the 16 items in the 2026-11-21 15:04 Review Findings section, then re-run /review ^1sg8f5t.
+  timestamp: 2026-11-21T21:12:38.439247+00:00
+- actor: claude-code
+  id: 01m7zz903jhmgqhbhbdd8x2nwr
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 17 files
+    - test: green — 5 bundles; Inkling integration 7/7
+    - commit: e047b956
+    - review: findings — 16 in test code (Inkling2ToolLoopIntegrationTests:122,144,204; Inkling2FoundationModelsToolLoopTests:130; InklingFrameTokenizer:113-140; Inkling2ToolLoopSessionTests:24,71,110; InklingCommittedTurnRuleTests:77)
+  timestamp: 2026-11-21T21:12:56.178617+00:00
+- actor: claude-code
+  id: 01m8000ybnmca0ex4h3y8vp45r
+  text: |-
+    Resolved the 16 findings of the 2026-11-21 15:04 review (test code only, no library change):
+    - @unchecked Sendable gone from both files: DispatchLog (now a Sendable struct) and Inkling2ToolCallLog (Sendable final class) hold an OSAllocatedUnfairLock, the prevailing test pattern (PrefillProgressLog, ChatSessionReasoningHistoryTests).
+    - Magic numbers in Inkling2ToolLoopIntegrationTests: Inkling2ToolCallLog.twoStepCallCount; the suite time limit is the file-level suiteTimeLimitMinutes (as in the DeepseekV4 and KVCacheSession suites).
+    - print -> os Logger (subsystem com.apple.FoundationModels-MLX, categories Inkling2ToolLoop / Inkling2FoundationModelsToolLoop, privacy .public), as the other integration suites log. Result lines now go to the unified log, not stdout.
+    - InklingFrameTokenizer.renderedCall is private and throws: a guard on JSONSerialization.isValidJSONObject throws ArgumentsAreNotJSON (JSONSerialization raises an NSException for a non-JSON value, which try? never caught anyway), and render/assistantFrames propagate through applyChatTemplate. New InklingFrameTokenizerTests covers it. Docs on bosToken/eosToken/unknownToken/encode/decode/convertTokenToId/convertIdToToken.
+    - New shared fixture Tests/MLXLMTestSupport/InklingWeatherToolLoop.swift: toolName, toolDescription, cityArgument, weather, toolSpec, writtenCall, renderedCall, tokenizer construction, thinking/call/result frames, callingTurn, answeringTurn. Both Inkling2ToolLoopSessionTests and InklingExecutorToolLoopTests use it; each keeps its own question/reasoning/answer and assertions. renderedCall in the fixture is the literal compact sorted-key text, so the tokenizer's render is checked against an independent statement of the wire format (a mismatch renders the unknown token and fails the suites).
+    - alignedCache(_:previousRender:) -> PromptCacheState.aligned(_:previousRender:) in Tests/MLXLMTests/PromptCacheState+Aligned.swift, used by CommittedTurnThinkBlockTests and InklingCommittedTurnRuleTests; both local copies deleted. The other alignedCache helpers (Qwen, DSML, Harmony, PromptCacheReusePolicy, CommittedTurnUncommittedToken) have different signatures and pre-date this card, left alone.
+    Note: Inkling2CheckpointIntegrationTests.swift still has a print (report helper); it was not in the findings.
+  timestamp: 2026-11-21T21:26:00.821381+00:00
+- actor: claude-code
+  id: 01m80013emvecf3cyd6x205pp9
+  text: |-
+    ### implement — changed
+    - evidence: swift build --build-tests: Build complete, 0 errors, 0 repo warnings. xctest MLXLMTests: 1258 XCTest + 2540 Swift Testing passed (3 pre-existing known issues), 0 failures. MLXFoundationModelsTests: 562 passed. IntegrationTesting build-for-testing Release (ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES): TEST BUILD SUCCEEDED; test-without-building Inkling2ToolLoopIntegrationTests + Inkling2FoundationModelsToolLoopTests: 3 tests in 2 suites passed. swift-format applied. Files (12): IntegrationTesting/IntegrationTestingTests/Inkling2ToolLoopIntegrationTests.swift, IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift, Tests/MLXLMTestSupport/InklingFrameTokenizer.swift, Tests/MLXLMTestSupport/InklingWeatherToolLoop.swift (new), Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift, Tests/MLXLMTests/InklingCommittedTurnRuleTests.swift, Tests/MLXLMTests/CommittedTurnThinkBlockTests.swift, Tests/MLXLMTests/PromptCacheState+Aligned.swift (new), Tests/MLXLMTests/InklingFrameTokenizerTests.swift (new), Tests/MLXFoundationModelsTests/InklingExecutorToolLoopTests.swift. All 16 findings checked. Not committed.
+    - next: /review ^1sg8f5t
+  timestamp: 2026-11-21T21:26:06.036083+00:00
 depends_on:
 - 01M7ZVJJNB56PTH6BP74Y1ZBGN
 position_column: doing
@@ -75,3 +110,33 @@ Acceptance:
 - [x] All 5 bundles are green, and the new integration tests pass.
 
 #inkling
+
+## Review Findings (2026-11-21 15:04)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 17 file(s) reviewed, 7 not reviewed.
+
+> 7 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7ZVJJNB56PTH6BP74Y1ZBGN.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7ZVJJNB56PTH6BP74Y1ZBGN.md` — no validator matches this file
+> - `.kanban/tasks/01M7ZVJS05JRXMZZXBS1SG8F5T.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7ZVJS05JRXMZZXBS1SG8F5T.md` — no validator matches this file
+> - `.kanban/tasks/01M7ZY1J67SCA1EF7WN8AFGJAJ.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7ZY1J67SCA1EF7WN8AFGJAJ.md` — no validator matches this file
+> - `Libraries/MLXVLM/README.md` — no validator matches this file
+
+- [x] `IntegrationTesting/IntegrationTestingTests/Inkling2ToolLoopIntegrationTests.swift:122` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
+- [x] `IntegrationTesting/IntegrationTestingTests/Inkling2ToolLoopIntegrationTests.swift:144` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `IntegrationTesting/IntegrationTestingTests/Inkling2ToolLoopIntegrationTests.swift:204` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift:130` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:113` `swift/preconditions` — `renderedCall` swallows a JSON serialization failure with `try?` and substitutes `"{}"`. A failure to serialize the test's arguments is an unexpected condition, and the silent fallback hides the defect from both the test author and the log, so a broken call renders as an empty argument object without any trace. Make the failure visible. Either make `renderedCall` `throws` and propagate the error, or validate the arguments first with a `guard` and call `assertionFailure` plus a logged message before returning the `{}` fallback, so the default is recorded and not silent.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:118` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'bosToken'.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:119` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'eosToken'.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:120` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'unknownToken'.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:122` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'encode(text:addSpecialTokens:)'.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:129` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'decode(tokenIds:skipSpecialTokens:)'.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:133` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'convertTokenToId(_:)'.
+- [x] `Tests/MLXLMTestSupport/InklingFrameTokenizer.swift:140` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'convertIdToToken(_:)'.
+- [x] `Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift:24` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
+- [x] `Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift:71` `reuse/reuse` — The `writtenCall` fixture, with the `weather` table, the `weatherTool` spec and the `tokenizer` built from them, duplicates the same fixture in `InklingExecutorToolLoopTests`. Both suites now define the model's written-call text, the same weather table and the same tool declaration independently. The two copies must stay in step by hand, and a change to one that is not made in the other makes the two suites test different wire formats. Move `writtenCall`, the `weather` table, `toolName`, and the tokenizer construction next to `InklingFrameTokenizer` in `Tests/MLXLMTestSupport`, which both bundles already import. Call that shared fixture from both suites. Keep each suite's own assertions local.
+- [x] `Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift:110` `reuse/reuse` — `callingTurn` and `answeringTurn` rebuild the model's scripted turn frame by frame, duplicating the scripted-turn builders in `InklingExecutorToolLoopTests`. Both build the thinking frame, the calls and `<|content_model_end_sampling|>` with the same marker sequence. The duplicate hard-codes the Inkling frame order once more. Put the calling and answering turn builders in the shared Inkling test-support file together with the fixture from the previous finding, and have both suites call them. This removes the second copy of the frame ordering.
+- [x] `Tests/MLXLMTests/InklingCommittedTurnRuleTests.swift:77` `reuse/reuse` — The new `alignedCache(_:previousRender:)` helper reimplements an existing helper with the same signature and the same body. Each copy builds a `PromptCacheState` with `mainCacheIsAligned: true` and `processedTokenCount` equal to the cache count. A later change to the aligned-cache shape has to be made in several files, and this copy can drift from the others. Use the existing helper instead of a fourth copy. Move one `alignedCache(_:previousRender:)` to a shared internal test-support location (for example beside `MarkerTokenizer` in MLXLMTests) and call it from both `CommittedTurnThinkBlockTests` and `InklingCommittedTurnRuleTests`. Delete the local copy.

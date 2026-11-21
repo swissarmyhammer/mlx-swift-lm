@@ -73,13 +73,6 @@ struct InklingCommittedTurnRuleTests {
         [messageModel, toolName, toolJSON, call, endMessage]
     }
 
-    /// A cache whose timeline agrees with its ledger.
-    private static func alignedCache(_ cached: [Int], previousRender: [Int]) -> PromptCacheState {
-        PromptCacheState(
-            cachedTokens: cached, previousRenderTokens: previousRender,
-            processedTokenCount: cached.count, mainCacheIsAligned: true)
-    }
-
     /// The rule the Inkling format contributes.
     private static func rule() throws -> any PromptCacheReuseRule {
         try #require(ToolCallFormat.inkling.promptCacheReuseRules(tokenizer: tokenizer).first)
@@ -95,7 +88,7 @@ struct InklingCommittedTurnRuleTests {
 
         let decision = try Self.rule().reuse(
             turn: PromptCacheTurn(promptTokens: prompt, isToolResultContinuation: true),
-            cache: Self.alignedCache(
+            cache: .aligned(
                 Self.conversation + written, previousRender: Self.conversation))
 
         #expect(
@@ -116,7 +109,7 @@ struct InklingCommittedTurnRuleTests {
 
         let decision = try Self.rule().reuse(
             turn: PromptCacheTurn(promptTokens: prompt, isToolResultContinuation: true),
-            cache: Self.alignedCache(
+            cache: .aligned(
                 Self.conversation + written, previousRender: Self.conversation))
 
         #expect(

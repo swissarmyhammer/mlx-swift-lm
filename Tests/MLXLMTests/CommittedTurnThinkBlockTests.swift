@@ -156,7 +156,7 @@ struct CommittedTurnThinkBlockTests {
 
         let decision = made.reuse(
             turn: PromptCacheTurn(promptTokens: row.prompt),
-            cache: Self.alignedCache(row.cached, previousRender: row.previousRender))
+            cache: .aligned(row.cached, previousRender: row.previousRender))
 
         let expected =
             row.splices ? try Self.spliceAtTheCommit(of: row.prompt, onto: row.cached) : nil
@@ -175,16 +175,9 @@ struct CommittedTurnThinkBlockTests {
 
         let decision = rule.markerlessRule(Self.commit).reuse(
             turn: PromptCacheTurn(promptTokens: prompt),
-            cache: Self.alignedCache(cached, previousRender: Self.thinkingOnRender))
+            cache: .aligned(cached, previousRender: Self.thinkingOnRender))
 
         #expect(decision == (try Self.spliceAtTheCommit(of: prompt, onto: cached)))
-    }
-
-    /// A cache whose timeline agrees with its ledger.
-    private static func alignedCache(_ cached: [Int], previousRender: [Int]) -> PromptCacheState {
-        PromptCacheState(
-            cachedTokens: cached, previousRenderTokens: previousRender,
-            processedTokenCount: cached.count, mainCacheIsAligned: true)
     }
 
     /// The splice onto a ledger that does not hold the commit: it starts AT

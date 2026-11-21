@@ -17,6 +17,15 @@ import Foundation
 import MLXLMCommon
 import MLXVLM
 import Testing
+import os
+
+/// The minutes the suite may run: two tool loops and their follow-up turns on the real
+/// checkpoint, with the download of the checkpoint when it is not in the cache.
+private let suiteTimeLimitMinutes = 30
+
+/// The log every result line of this suite goes to.
+private let resultLog = Logger(
+    subsystem: "com.apple.FoundationModels-MLX", category: "Inkling2ToolLoop")
 
 // MARK: - The bank
 
@@ -117,11 +126,14 @@ enum Inkling2BankFixture {
 /// The calls a tool loop dispatched, in order: the tool name and its one argument.
 ///
 /// The session dispatches on its generation task and the test reads the log on its own, thus a
-/// lock guards the calls. The conformance is `@unchecked` because every access to the one
-/// stored list takes the lock.
-final class Inkling2ToolCallLog: @unchecked Sendable {
-    private let lock = NSLock()
-    private var dispatched: [(tool: String, argument: String)] = []
+/// lock guards the calls.
+final class Inkling2ToolCallLog: Sendable {
+
+    /// The number of calls of the two-step loop: the customer lookup, then the balance read.
+    static let twoStepCallCount = 2
+
+    private let dispatched = OSAllocatedUnfairLock<[(tool: String, argument: String)]>(
+        initialState: [])
 
     /// Records one call and gives the result the bank answers it with.
     ///
@@ -130,22 +142,24 @@ final class Inkling2ToolCallLog: @unchecked Sendable {
     ///   - argument: the value of its one argument.
     /// - Returns: the result of the call.
     func dispatch(_ tool: String, argument: String) -> String {
-        lock.withLock { dispatched.append((tool, argument)) }
+        dispatched.withLock { $0.append((tool, argument)) }
         return Inkling2BankFixture.result(of: tool, argument: argument)
     }
 
     /// The calls so far.
-    var calls: [(tool: String, argument: String)] { lock.withLock { dispatched } }
+    var calls: [(tool: String, argument: String)] { dispatched.withLock { $0 } }
 
     /// Whether the calls are the two-step loop: the customer id of the customer, then the
     /// balance of that id.
     var isTheTwoStepLoop: Bool {
         let calls = calls
-        guard calls.count >= 2 else { return false }
-        return calls[0].tool == Inkling2BankFixture.findCustomerTool
-            && calls[0].argument.localizedCaseInsensitiveContains("lovelace")
-            && calls[1].tool == Inkling2BankFixture.getBalanceTool
-            && calls[1].argument == Inkling2BankFixture.customerID
+        guard calls.count >= Self.twoStepCallCount else { return false }
+        let lookup = calls[0]
+        let read = calls[1]
+        return lookup.tool == Inkling2BankFixture.findCustomerTool
+            && lookup.argument.localizedCaseInsensitiveContains("lovelace")
+            && read.tool == Inkling2BankFixture.getBalanceTool
+            && read.argument == Inkling2BankFixture.customerID
     }
 }
 
@@ -193,15 +207,15 @@ private struct Inkling2Pass {
 
 // MARK: - Tests
 
-@Suite(.serialized, .timeLimit(.minutes(30)))
+@Suite(.serialized, .timeLimit(.minutes(suiteTimeLimitMinutes)))
 struct Inkling2ToolLoopIntegrationTests {
 
     /// Tokens each pass may generate.
     private static let maxTokens = 1_024
 
-    /// Writes one result line that the run log can be searched for.
+    /// Writes one result line, which the unified log of the run can be searched for.
     private static func report(_ line: String) {
-        print("[INKLING2 TOOLS] \(line)")
+        resultLog.info("[INKLING2 TOOLS] \(line, privacy: .public)")
     }
 
     /// The one string argument of `call`, or an empty text.
