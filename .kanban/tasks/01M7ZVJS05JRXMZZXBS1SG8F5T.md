@@ -84,10 +84,26 @@ comments:
     - evidence: review sha HEAD~1..HEAD (5ba4a62b) — 1 finding (confirmed 1, refuted 2, attempted 7): IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/ToolCalling/Inkling2FoundationModelsToolLoopTests.swift:135 (reuse/reuse). All 16 items of the 15:04 section are checked.
     - next: implement the 2026-11-21 15:26 finding (share the Logger and report helper in the IntegrationTesting target), commit, re-review.
   timestamp: 2026-11-21T21:28:47.552877+00:00
+- actor: claude-code
+  id: 01m800chp23xqq1q665zwnhaze
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (d69b2f54) — 0 findings, 0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed; 4 files reviewed, 2 .kanban files unmatched. All 17 prior findings checked.
+    - next: none — task moved to done.
+  timestamp: 2026-11-21T21:32:21.058116+00:00
+- actor: claude-code
+  id: 01m800cxw4xpnsyswf8p0c9h2p
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — shared Inkling2ResultLog (iteration 2: 5ba4a62b, 16 test findings fixed)
+    - test: green — Inkling integration 7/7
+    - commit: d69b2f54
+    - review: clean — 0 findings
+  timestamp: 2026-11-21T21:32:33.540150+00:00
 depends_on:
 - 01M7ZVJJNB56PTH6BP74Y1ZBGN
-position_column: review
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffce80
 title: 'Inkling 2 Mini: tool calling usable end to end (ChatSession and MLXFoundationModels), with cache reuse'
 ---
 Make Inkling 2 Mini usable as a coding agent with tools. This means both of these, not just one parsed call:
