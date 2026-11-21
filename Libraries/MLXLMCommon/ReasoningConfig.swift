@@ -38,6 +38,17 @@ public enum ThinkingOffRender: Sendable, Equatable {
     /// The value is the exact text that the template writes after its
     /// generation prompt when the flag is `false`.
     case closedBlock(String)
+
+    /// The render passes this value under the template key when thinking is
+    /// off, and passes no value when thinking is on.
+    ///
+    /// A template whose key takes a level and not a Boolean cannot read
+    /// `true` or `false`. The Inkling 2 template reads `reasoning_effort` as
+    /// a level name or a number in `[0, 0.99]`: `none` turns thinking off,
+    /// and `true` fails its range check. With thinking on, the render states
+    /// no value, thus the template keeps its own default level, or the level
+    /// the caller set in its own template variables.
+    case templateValue(String)
 }
 
 // MARK: - ReasoningPromptStrategy
@@ -79,6 +90,9 @@ public enum ReasoningPromptStrategy: Sendable, Equatable {
         switch self {
         case .templateFlag(let key, let defaultOn, let thinkingOff):
             let enabled = thinkingEnabled ?? defaultOn
+            if case .templateValue(let offValue) = thinkingOff {
+                return enabled ? nil : [key: offValue]
+            }
             if case .closedBlock = thinkingOff, !enabled {
                 return [key: true]
             }

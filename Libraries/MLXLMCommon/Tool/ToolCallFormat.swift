@@ -301,8 +301,10 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return DSMLCommittedTurnRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .qwen35:
             return QwenCommittedTurnRule(tokenizer: tokenizer).map { [$0] } ?? []
+        case .inkling:
+            return InklingCommittedTurnRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .json, .lfm2, .xmlFunction, .glm4, .gemma, .gemma4, .kimiK2,
-            .minimaxM2, .minimaxM3, .miniCPM5, .mistral, .llama3, .inkling:
+            .minimaxM2, .minimaxM3, .miniCPM5, .mistral, .llama3:
             return []
         }
     }

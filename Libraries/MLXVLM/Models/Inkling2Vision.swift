@@ -289,6 +289,25 @@ public struct Inkling2ProcessorConfiguration: Codable, Sendable {
     }
 }
 
+/// The message generator of Inkling 2: the content parts of ``Qwen2VLMessageGenerator``, images
+/// first, and the reasoning of a past assistant turn as `reasoning_content`.
+///
+/// The Inkling template writes that reasoning in a `<|content_thinking|>` frame before the rest
+/// of the turn, which is the frame the model wrote. Without it the history render drops the
+/// thinking of every past turn, thus the render of a later turn holds a history the model never
+/// read, and a cold render of the conversation differs from the tokens the caches hold.
+struct Inkling2MessageGenerator: MessageGenerator {
+
+    /// The generator whose content layout this one keeps.
+    private let contentLayout = Qwen2VLMessageGenerator()
+
+    func generate(message: Chat.Message) -> Message {
+        var dictionary = contentLayout.generate(message: message)
+        addReasoningMetadata(to: &dictionary, for: message)
+        return dictionary
+    }
+}
+
 /// Builds the processor from `config.json`, as Inkling 2 checkpoints ship no processor
 /// configuration.
 public struct Inkling2ProcessorLoadingResolver: VLMProcessorLoadingResolver {
@@ -420,7 +439,7 @@ public struct Inkling2Processor: UserInputProcessor {
     public func prepare(input: UserInput) async throws -> LMInput {
         guard input.videos.isEmpty else { throw VLMError.singleMediaTypeAllowed }
 
-        let messages = Qwen2VLMessageGenerator().generate(
+        let messages = Inkling2MessageGenerator().generate(
             from: input.removingSpecialTokenLabels(using: tokenizer))
         var tokens = try renderChatTemplate(messages: messages, input: input)
 

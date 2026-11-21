@@ -3,6 +3,7 @@
 import CoreImage
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import Testing
 
@@ -884,6 +885,22 @@ struct Inkling2ProcessorTests {
         // The first pixel is red.
         #expect(abs(patches[0, 0].item(Float.self) - 1) < 1e-3)
         #expect(abs(patches[0, 1].item(Float.self) + 1) < 1e-3)
+    }
+
+    /// The template writes the reasoning of every past assistant message in its own thinking
+    /// frame, thus the render of a later turn holds what the model read while it wrote.
+    @Test("The history render keeps the reasoning of a past turn")
+    func historyKeepsReasoning() async throws {
+        let tokenizer = InklingFrameTokenizer(pieces: ["Look it up.", "What is 2 + 2?", "4"])
+        let processor = Inkling2Processor(Inkling2ProcessorConfiguration(), tokenizer: tokenizer)
+        let input = UserInput(chat: [
+            .user("What is 2 + 2?"), .assistant("4", reasoning: "Look it up."),
+            .user("What is 2 + 2?"),
+        ])
+
+        let prompt = try await processor.prepare(input: input)
+
+        #expect(prompt.text.tokens.asArray(Int.self).contains(tokenizer.token("Look it up.")))
     }
 
     @Test("A renderer without tojson separators names the swift-jinja release that has them")

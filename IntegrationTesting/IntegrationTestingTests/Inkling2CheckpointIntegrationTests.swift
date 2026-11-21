@@ -27,17 +27,20 @@ import Tokenizers
 
 // MARK: - Pinned checkpoint
 
-/// Inkling 2 Mini at affine 4 bits, at the revision of 2026-11-20.
-private let inkling2Mini4Bit = ModelConfiguration(
-    id: "mlx-community/Inkling-2-Mini-4bit",
-    revision: "9856dc53edead71405f8348930937c3638ff21a2")
+/// The revision of 2026-11-20 of Inkling 2 Mini at affine 4 bits.
+let inkling2Mini4BitRevision = "9856dc53edead71405f8348930937c3638ff21a2"
+
+/// Inkling 2 Mini at affine 4 bits, at ``inkling2Mini4BitRevision``. The tool-loop suites
+/// load the same checkpoint.
+let inkling2Mini4Bit = ModelConfiguration(
+    id: "mlx-community/Inkling-2-Mini-4bit", revision: inkling2Mini4BitRevision)
 
 /// The bytes of one GiB.
 private let bytesPerGiB = 1_073_741_824.0
 
 /// The checkpoint, loaded at most once per test process, on the first
-/// ``container()`` call.
-private actor Inkling2MiniCheckpoint {
+/// ``container()`` call. The tool-loop suites share it.
+actor Inkling2MiniCheckpoint {
     static let shared = Inkling2MiniCheckpoint()
 
     /// The load the first ``container()`` call started.

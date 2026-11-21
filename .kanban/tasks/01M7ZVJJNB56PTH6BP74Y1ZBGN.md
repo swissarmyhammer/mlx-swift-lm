@@ -36,6 +36,15 @@ comments:
     - evidence: review sha HEAD~1..HEAD (e531879e) — 0 findings, 0 confirmed, 0 refuted, 7 attempted, 0 failed; 2 files reviewed; 12 files had no matching validator (.kanban/*, project.pbxproj, README.md, Documentation.docc/using.md, skills/.../supported-models.md)
     - next: none; task moved to done
   timestamp: 2026-11-21T20:23:47.585574+00:00
+- actor: claude-code
+  id: 01m7zwfdr5nv0kjfg0qkr2qm2m
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 6 files
+    - test: green — 5 bundles + Inkling2CheckpointIntegrationTests from clean resolve
+    - commit: e531879e
+    - review: clean — 0 findings
+  timestamp: 2026-11-21T20:24:01.029876+00:00
 position_column: done
 position_ordinal: ffffcd80
 title: 'Inkling 2: raise swift-transformers / swift-jinja minimums so Inkling tool templates render'

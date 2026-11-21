@@ -12,10 +12,10 @@
 ///
 /// This splice keeps the live trajectory, which is the text the model itself
 /// read while it wrote, and it feeds only the tokens the new render adds after
-/// the commit that closes the last assistant turn. ``DSMLCommittedTurnRule``
-/// and ``QwenCommittedTurnRule`` differ only in which commit of the render
-/// closes that turn and in the markers they resolve, thus they share this one
-/// body.
+/// the commit that closes the last assistant turn. ``DSMLCommittedTurnRule``,
+/// ``QwenCommittedTurnRule`` and ``InklingCommittedTurnRule`` differ only in
+/// which commit of the render closes that turn and in the markers they resolve,
+/// thus they share this one body.
 ///
 /// The splice declines a turn whose written tokens — those the caches hold, and
 /// the last ones a speculative round returned unfed — end inside an open think

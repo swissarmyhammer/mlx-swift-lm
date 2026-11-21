@@ -6,13 +6,27 @@
 /// leave it at `<|end_message|>`, the boundary that ends every frame. As in
 /// ``OnyxReasoningProtocol``, the frame syntax is declared once and each family
 /// adds only the transition it was measured with.
+///
+/// The template reads the thinking effort from `reasoning_effort`, a level name
+/// or a number and not a Boolean. Thinking off is the level `none`; thinking on
+/// keeps the default level of the template, or the level the caller set. The
+/// template writes the reasoning of every past assistant message in its own
+/// thinking frame, thus the history replays it.
 public enum InklingReasoningProtocol {
+    /// The template variable that sets the thinking effort.
+    public static let effortKey = "reasoning_effort"
+
+    /// The effort level that turns thinking off.
+    public static let thinkingOffEffort = "none"
+
     /// The thinking frame, without claiming that a hard-budget transition is
     /// safe for the model.
     public static let frames = ReasoningConfig(
         startDelimiter: "<|content_thinking|>", endDelimiter: "<|end_message|>",
-        promptStrategy: .none,
-        isSpecialToken: true)
+        promptStrategy: .templateFlag(
+            key: effortKey, defaultOn: true, thinkingOff: .templateValue(thinkingOffEffort)),
+        isSpecialToken: true,
+        replaysReasoningIntoHistory: true)
 
     /// Inkling 2, which answers from a frame that was only closed.
     ///

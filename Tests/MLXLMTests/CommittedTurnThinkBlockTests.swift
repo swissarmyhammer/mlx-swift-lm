@@ -5,7 +5,7 @@ import Testing
 
 @testable import MLXLMCommon
 
-/// Unit tests of the think-block check that the two committed-turn rules share
+/// Unit tests of the think-block check that the committed-turn rules share
 /// through ``CommittedTurnSplice``.
 ///
 /// A turn that stops inside its reasoning leaves no close of the think block in
@@ -88,6 +88,13 @@ struct CommittedTurnThinkBlockTests {
             closeThinkMarker: DeepSeekV4ChatEncoder.SpecialToken.thinkEnd,
             rule: { DSMLCommittedTurnRule(tokenizer: $0) },
             markerlessRule: { DSMLCommittedTurnRule(endOfSentenceToken: $0) }),
+        RuleCase(
+            name: "inkling",
+            endOfTurnMarker: InklingCommittedTurnRule.endOfTurnMarker,
+            openThinkMarker: InklingCommittedTurnRule.openThinkMarker,
+            closeThinkMarker: InklingCommittedTurnRule.closeThinkMarker,
+            rule: { InklingCommittedTurnRule(tokenizer: $0) },
+            markerlessRule: { InklingCommittedTurnRule(endOfTurnToken: $0) }),
     ]
 
     /// One way the previous turn ended, and what the rule decides for the
