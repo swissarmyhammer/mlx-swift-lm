@@ -461,7 +461,7 @@ struct PromptCacheCopyTests: PromptCacheSpoolFixtures, PromptCacheKeyFixtures {
         let copied = try #require(await session.peek(Self.destination))
         #expect(copied.checkpointPosition == checkpoint)
         let warm = try await session.respond(turns: 2, as: Self.destination)
-        let cold = try await session.respond(turns: 2, as: "cold")
+        _ = try await session.respond(turns: 2, as: "cold")
 
         // The render of the second turn parts from the ledger at the end of the first
         // message, which is where the checkpoint stands. The pass reuses the checkpoint, not

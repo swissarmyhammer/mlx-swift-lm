@@ -457,7 +457,8 @@ public final class ChatSession {
 
         /// The checkpoints of a hybrid model that the last prefill took: one at
         /// the end of the last message and one at the end of the prompt, plus
-        /// one at the end of the instructions that later prefills keep. A next
+        /// one at the end of the instructions that later prefills keep, and in
+        /// a tool loop those of the pass that answered the last user message. A next
         /// render that parts from `cachedTokens` where the recurrent caches
         /// cannot rewind goes back to the longest one it starts with.
         var checkpoints = PromptCacheCheckpoints()
@@ -828,7 +829,13 @@ public final class ChatSession {
                 cache: stored.main.cache,
                 plan: stored.main.plan,
                 phase: .realized,
-                processedTokenCount: stored.main.processedTokenCount)
+                processedTokenCount: stored.main.processedTokenCount,
+                checkpoint: stored.conversation.flatMap { conversation in
+                    let checkpoints = conversation.checkpoints.all
+                    return checkpoints.map(\.tokens.count).max().map {
+                        .init(tokens: $0, memory: checkpoints.map(\.byteCount).reduce(0, +))
+                    }
+                })
         }) {
             return realized
         }
@@ -1916,9 +1923,12 @@ public final class ChatSession {
                         // A hybrid or sliding-window model keeps checkpoints of the caches
                         // that can lose their rewind, for a text prompt that it generates
                         // from without a draft model, or with an MTP drafter that can start
-                        // at the warm position a checkpoint feed leaves.
+                        // at the warm position a checkpoint feed leaves. An explicit
+                        // `.unchunked` or `.remainder` prefill keeps its own forwards, which
+                        // a checkpoint feed would split.
                         let keepsCheckpoints =
                             (speculativeDecoding == nil || (usesMTP && mtpSpeculativeStateIsReady))
+                            && generateParameters.prefill.chunking == .balanced
                             && !carriesPreparedMedia
                             && !containsNewMedia && preparedInput.text.mask == nil
                             // No checkpoint keeps caches that cannot lose their rewind, so
@@ -1993,6 +2003,13 @@ public final class ChatSession {
                                 structuredToolCallCount: structuredToolCallCount,
                                 usesSpeculativeDecoding: speculationIsEligible,
                                 canSplitPreparedMedia: model is PreparedInputSplitting)
+                            // The checkpoint a restore goes back to: the longest one the
+                            // prompt starts with, of those this session keeps (see
+                            // `keepsCheckpoints`).
+                            let checkpoint =
+                                keepsCheckpoints
+                                ? currentConversation.checkpoints.longest(serving: promptTokenIds)
+                                : nil
                             let cacheState = PromptCacheState(
                                 cachedTokens: cachedTokenIds,
                                 previousRenderTokens: currentConversation.renderedTokens,
@@ -2000,17 +2017,17 @@ public final class ChatSession {
                                 mainCacheIsAligned: mainCacheIsAligned,
                                 speculativeReuseCapability: speculativeReuseCapability,
                                 maxTrimCount: (kvCache.cache + (draftKVCache?.cache ?? []))
-                                    .map(\.maxTrimCount).min() ?? 0)
+                                    .map(\.maxTrimCount).min() ?? 0,
+                                checkpointLength: checkpoint?.tokens.count)
 
                             var decision = promptCachePolicy.decide(
                                 turn: turn, cache: cacheState)
 
-                            // Rewinding is the one decision that can fail while being
-                            // applied: a cache may trim fewer tokens than requested.
+                            // Rewinding can fail while being applied: a cache may trim
+                            // fewer tokens than requested, or refuse a checkpoint.
                             // Verify and downgrade to a rebuild before prefilling.
-                            if case .trimToCommonPrefix(let commonPrefixLength, let trimCount) =
-                                decision
-                            {
+                            switch decision {
+                            case .trimToCommonPrefix(let commonPrefixLength, let trimCount):
                                 let mainTrimmed = kvCache.trim(trimCount)
                                 let draftTrimmed = draftKVCache.map { $0.trim(trimCount) }
                                 let mainTrimIsAligned =
@@ -2021,26 +2038,41 @@ public final class ChatSession {
                                         draftTrimmed == trimCount
                                             && draftCache.processedTokenCount == commonPrefixLength
                                     } ?? true
-
                                 if !(mainTrimIsAligned && draftTrimIsAligned) {
                                     decision = .rebuild
-                                } else if !currentConversation.transcriptBuiltCache {
-                                    // A fork shares its source's arrays. A copy keeps only
-                                    // the prefix, so the next write does not copy the rest.
-                                    kvCache = kvCache.copy()
-                                    draftKVCache = draftKVCache?.copy()
                                 }
-                            } else if case .trimToCommonPrefixMainOnly(
-                                let commonPrefixLength, let trimCount) = decision
-                            {
+                            case .trimToCommonPrefixMainOnly(let commonPrefixLength, let trimCount):
                                 let mainTrimmed = kvCache.trim(trimCount)
                                 if mainTrimmed != trimCount
                                     || kvCache.processedTokenCount != commonPrefixLength
                                 {
                                     decision = .rebuild
-                                } else if !currentConversation.transcriptBuiltCache {
-                                    kvCache = kvCache.copy()
                                 }
+                            case .restoreCheckpoint(let prefixLength):
+                                if let checkpoint, checkpoint.tokens.count == prefixLength,
+                                    cachedTokenIds.starts(with: checkpoint.tokens),
+                                    let restore = Self.restoringCheckpoint(
+                                        checkpoint, onto: kvCache, plan: kvCachePlan)
+                                {
+                                    kvCache = restore
+                                    lmState = checkpoint.state
+                                    // The drafter resumes the continuation the checkpoint
+                                    // keeps when it stands there, and cold-starts there
+                                    // otherwise.
+                                    mtpDrafterContinuation = resumableDrafterID.flatMap {
+                                        checkpoint.drafterContinuation(resumableBy: $0)
+                                    }
+                                } else {
+                                    decision = .rebuild
+                                }
+                            default:
+                                break
+                            }
+                            if decision.rewinds, !currentConversation.transcriptBuiltCache {
+                                // A fork shares its source's arrays. A copy keeps only
+                                // the prefix, so the next write does not copy the rest.
+                                kvCache = kvCache.copy()
+                                draftKVCache = draftKVCache?.copy()
                             }
 
                             // Splitting a prepared input is the other decision that
@@ -2103,6 +2135,12 @@ public final class ChatSession {
                                 // with it: the drafter cold-starts at the common prefix.
                                 mtpDrafterContinuation = nil
 
+                            case .restoreCheckpoint(let prefixLength):
+                                // The restore above set the drafter continuation.
+                                input = LMInput(
+                                    tokens: MLXArray(Array(promptTokenIds.dropFirst(prefixLength))))
+                                cachedPromptTokenCount = prefixLength
+
                             case .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
                                 input = LMInput(
                                     tokens: MLXArray(
@@ -2156,8 +2194,8 @@ public final class ChatSession {
                                 .appendSuffixToMain(_, let representedTokens, _),
                                 .appendMediaSuffix(_, let representedTokens):
                                 currentConversation.cachedTokens = representedTokens
-                            case .prefillAll, .trimToCommonPrefix,
-                                .trimToCommonPrefixMainOnly, .rebuild:
+                            case .prefillAll, .trimToCommonPrefix, .trimToCommonPrefixMainOnly,
+                                .restoreCheckpoint, .rebuild:
                                 currentConversation.cachedTokens = promptTokenIds
                             }
                             // The render of THIS prefill, which the next turn
@@ -2170,9 +2208,11 @@ public final class ChatSession {
                             // The checkpoints of the previous prefill served this
                             // decision. This prefill takes its own, but keeps the one
                             // at the end of the instructions while the prompt starts
-                            // with it.
-                            currentConversation.checkpoints.removeAllButLeading(
-                                servingPrompt: promptTokenIds)
+                            // with it, and in a tool loop those of the pass that
+                            // answered the last user message.
+                            currentConversation.checkpoints.beginPass(
+                                servingPrompt: promptTokenIds,
+                                answeringTool: templateMessages.last?.role == .tool)
                             var prefillStart = cachedPromptTokenCount
                             // The first feed to a checkpoint feeds the unfed generated tokens
                             // ahead of the prompt, thus no later feed does.
@@ -2894,14 +2934,26 @@ extension ChatSession {
         onto storage: KVCacheStorage, plan: KVCachePlan
     ) -> (storage: KVCacheStorage, checkpoint: PromptCacheCheckpoint)? {
         guard let checkpoint = conversation.checkpoints.longest(serving: promptTokens),
-            let caches = checkpoint.restored(onto: storage.cache)
+            let restored = restoringCheckpoint(checkpoint, onto: storage, plan: plan)
         else {
             return nil
         }
-        return (
-            KVCacheStorage(caches, plan: plan, processedTokenCount: checkpoint.tokens.count),
-            checkpoint
-        )
+        return (restored, checkpoint)
+    }
+
+    /// The caches at `checkpoint`.
+    ///
+    /// - Parameters:
+    ///   - checkpoint: the checkpoint to go back to.
+    ///   - storage: the live caches. A restore trims their attention caches.
+    ///   - plan: the cache plan of the session.
+    /// - Returns: the caches at the checkpoint, or nil when a cache did not land
+    ///   on it. After a nil answer the caller must build new caches.
+    private static func restoringCheckpoint(
+        _ checkpoint: PromptCacheCheckpoint, onto storage: KVCacheStorage, plan: KVCachePlan
+    ) -> KVCacheStorage? {
+        guard let caches = checkpoint.restored(onto: storage.cache) else { return nil }
+        return KVCacheStorage(caches, plan: plan, processedTokenCount: checkpoint.tokens.count)
     }
 
     /// Feeds the prompt up to `boundary` into the caches, and takes a
@@ -2935,16 +2987,29 @@ extension ChatSession {
         drafterFeed: MTPDrafterPrefillFeed?
     ) throws -> CheckpointPrefill? {
         let begin = Date.timeIntervalSinceReferenceDate
+        let fedTokenCount = uncommittedTokens.count + boundary - start
+        var committed = false
+        // A tile-compressed cache plan converts the caches before the checkpoint, so the
+        // checkpoint keeps the converted layers that a later restore finds.
+        let realize: (() throws -> [KVCache])? =
+            storage.plan.requiresRealizedCheckpoint
+            ? {
+                storage.commitProcessedTokens(fedTokenCount)
+                committed = true
+                try storage.plan.applyAndValidate(to: storage)
+                return storage.cache
+            } : nil
         guard
             let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
                 at: boundary, of: promptTokens, representing: representedTokens, from: start,
                 after: uncommittedTokens, into: storage.cache, state: state, model: model,
-                prefill: parameters.prefill, drafterFeed: drafterFeed)
+                prefill: parameters.prefill, drafterFeed: drafterFeed, realize: realize)
         else {
             return nil
         }
-        let fedTokenCount = uncommittedTokens.count + boundary - start
-        storage.commitProcessedTokens(fedTokenCount)
+        if !committed {
+            storage.commitProcessedTokens(fedTokenCount)
+        }
         return CheckpointPrefill(
             remainingInput: LMInput(tokens: MLXArray(Array(promptTokens[boundary...]))),
             state: feed.state,

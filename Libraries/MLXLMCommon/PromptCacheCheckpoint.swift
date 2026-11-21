@@ -11,11 +11,16 @@ import MLX
 /// saw, and it cannot rewind. A rotating cache (a sliding-window layer) rewinds
 /// only until its window wraps, which a later prefill can do. The checkpoint
 /// thus keeps a copy of each cache that can lose its rewind, and nothing for
-/// any other cache: a restore trims that cache back to the checkpoint.
+/// any other cache: a restore trims that cache back to the checkpoint. A
+/// variance-normalized cache trims exactly only inside its raw tail, thus the
+/// checkpoint keeps that tail alone (``VarianceNormalizedKVCache/Checkpoint``),
+/// and a restore keeps the completed tiles of the live cache before it.
 ///
 /// A copy shares the arrays of the live cache. MLX does not write into an array
 /// that another array still holds, thus a copy keeps the state of the
-/// checkpoint while the live caches move on.
+/// checkpoint while the live caches move on. A rotating cache copy keeps only
+/// its configured history (``RotatingKVCache/copyForCheckpoint()``), so it does
+/// not pin the rows a multi-token prefill adds past the window.
 ///
 /// `ChatSession` and the executor of `MLXFoundationModels` both keep
 /// checkpoints. Each one takes a checkpoint at the end of the last message of a
@@ -32,9 +37,27 @@ package struct PromptCacheCheckpoint {
     /// The tokens the caches represented at the checkpoint, in order.
     package let tokens: [Int]
 
-    /// For each layer, a copy of a cache that cannot rewind, or nil for a cache
-    /// that a trim takes back to the checkpoint.
-    private let copies: [KVCache?]
+    /// What a restore needs for one layer.
+    private enum Saved {
+        /// A trim takes the cache back to the checkpoint.
+        case trim
+        /// A copy of a cache that cannot rewind.
+        case copy(KVCache)
+        /// The raw tail of a variance-normalized cache.
+        case tile(VarianceNormalizedKVCache.Checkpoint)
+
+        /// The bytes this layer holds in memory.
+        var byteCount: Int {
+            switch self {
+            case .trim: 0
+            case .copy(let copy): copy.residentByteCount
+            case .tile(let checkpoint): checkpoint.retainedBytes
+            }
+        }
+    }
+
+    /// For each layer, what a restore needs.
+    private let copies: [Saved]
 
     /// The model state the prefill left at the checkpoint, or nil.
     package let state: LMOutput.State?
@@ -69,7 +92,7 @@ package struct PromptCacheCheckpoint {
         guard Self.applies(to: caches), caches.allSatisfy({ $0.offset == tokens.count }) else {
             return nil
         }
-        let copies = caches.map { Self.canLoseRewind($0) ? $0.copy() : nil }
+        let copies = caches.map(Self.saved)
         let storedContinuation = drafterContinuation.flatMap { continuation in
             continuation.isAligned(
                 withMainTokenCount: tokens.count, drafterID: continuation.drafterID)
@@ -80,7 +103,7 @@ package struct PromptCacheCheckpoint {
         self.state = state
         self.drafterContinuation = storedContinuation
         self.byteCount =
-            copies.reduce(0) { $0 + ($1?.residentByteCount ?? 0) }
+            copies.reduce(0) { $0 + $1.byteCount }
             + (state?.residentByteCount ?? 0) + (storedContinuation?.byteCount ?? 0)
     }
 
@@ -141,9 +164,24 @@ package struct PromptCacheCheckpoint {
     }
 
     /// Whether `cache` cannot rewind now or can stop being able to: a fresh
-    /// rotating cache rewinds until its window wraps.
+    /// rotating cache rewinds until its window wraps, and a variance-normalized
+    /// cache rewinds exactly only inside its raw tail.
     private static func canLoseRewind(_ cache: KVCache) -> Bool {
-        !cache.isTrimmable || cache is RotatingKVCache
+        !cache.isTrimmable || cache is RotatingKVCache || cache is VarianceNormalizedKVCache
+    }
+
+    /// What a restore of `cache` needs.
+    private static func saved(_ cache: KVCache) -> Saved {
+        switch cache {
+        case let tiles as VarianceNormalizedKVCache:
+            return .tile(tiles.checkpoint())
+        case let rotating as RotatingKVCache:
+            return .copy(rotating.copyForCheckpoint())
+        case _ where canLoseRewind(cache):
+            return .copy(cache.copy())
+        default:
+            return .trim
+        }
     }
 
     /// Whether this checkpoint can serve `promptTokens`: the prompt starts with
@@ -167,13 +205,19 @@ package struct PromptCacheCheckpoint {
     package func restored(onto caches: [KVCache]) -> [KVCache]? {
         guard caches.count == copies.count else { return nil }
         var restored: [KVCache] = []
-        for (cache, copy) in zip(caches, copies) {
-            if let copy {
+        for (cache, saved) in zip(caches, copies) {
+            switch saved {
+            case .copy(let copy):
                 restored.append(copy.copy())
-            } else if rewindPromptCache([cache], to: tokens.count) {
+            case .tile(let checkpoint):
+                guard let tiles = cache as? VarianceNormalizedKVCache,
+                    tiles.canRestore(checkpoint)
+                else { return nil }
+                tiles.restore(checkpoint)
+                restored.append(tiles)
+            case .trim:
+                guard rewindPromptCache([cache], to: tokens.count) else { return nil }
                 restored.append(cache)
-            } else {
-                return nil
             }
         }
         return restored
@@ -246,6 +290,10 @@ package struct PromptCacheCheckpoint {
     ///   - drafterFeed: the feed of an MTP drafter that stands at `start`, or
     ///     nil. The fed tokens go into the drafter too, so the drafter
     ///     continuation stands at `boundary` and the checkpoint keeps it.
+    ///   - realize: runs after the feed and before the checkpoint, and gives
+    ///     the caches to checkpoint, or nil to checkpoint `caches`. A cache
+    ///     plan whose conversion must run before a checkpoint (see
+    ///     ``KVCachePlan/requiresRealizedCheckpoint``) applies it here.
     /// - Returns: the model state the fed tokens left, the checkpoint at
     ///   `boundary`, which is nil when a cache did not stand there, and the live
     ///   drafter continuation at `boundary`, which is nil without a feed or
@@ -259,7 +307,8 @@ package struct PromptCacheCheckpoint {
         at boundary: Int, of promptTokens: [Int], representing representedTokens: [Int],
         from start: Int, after uncommittedTokens: [Int] = [], into caches: [KVCache],
         state: LMOutput.State?, model: any LanguageModel, prefill: PrefillParameters,
-        drafterFeed: MTPDrafterPrefillFeed? = nil
+        drafterFeed: MTPDrafterPrefillFeed? = nil,
+        realize: (() throws -> [KVCache])? = nil
     ) throws -> (
         state: LMOutput.State?, checkpoint: PromptCacheCheckpoint?,
         drafterContinuation: MTPDrafterContinuation?
@@ -270,7 +319,7 @@ package struct PromptCacheCheckpoint {
             model: model, prefill: prefill, drafterFeed: drafterFeed?.chunkHandler)
         let drafterContinuation = drafterFeed?.continuation
         let checkpoint = PromptCacheCheckpoint(
-            caches: caches,
+            caches: try realize?() ?? caches,
             tokens: Array(representedTokens.dropLast(promptTokens.count - boundary)),
             state: fedState, drafterContinuation: drafterContinuation)
         return (fedState, checkpoint, drafterContinuation)
@@ -402,8 +451,20 @@ package struct PromptCacheCheckpoint {
 /// new prompt goes back to.
 package struct PromptCacheCheckpoints {
 
-    /// The checkpoints, in the order the session took them.
+    /// The checkpoints of the last pass, in the order the session took them.
     private var checkpoints: [PromptCacheCheckpoint] = []
+
+    /// Whether the last pass answered a tool message.
+    private var lastPassAnsweredTool = false
+
+    /// The checkpoints of the last pass that answered a user message, kept
+    /// through the tool steps that follow it.
+    ///
+    /// A template such as Qwen3 drops the reasoning of every reply after the
+    /// last user message when it renders the next user turn. That render thus
+    /// parts from the ledger inside the first reply of a tool loop, and only a
+    /// checkpoint of the pass before that reply can serve it.
+    private var turn: [PromptCacheCheckpoint] = []
 
     /// The checkpoint at the end of the leading system messages, which outlives
     /// the other checkpoints while each prompt starts with it.
@@ -421,7 +482,32 @@ package struct PromptCacheCheckpoints {
     /// Forgets every checkpoint but the leading one, and that one too when
     /// `promptTokens` does not start with it.
     package mutating func removeAllButLeading(servingPrompt promptTokens: [Int]) {
+        beginPass(servingPrompt: promptTokens, answeringTool: false)
+    }
+
+    /// Forgets the checkpoints a new pass replaces.
+    ///
+    /// A pass that answers a tool message keeps the checkpoints of the last
+    /// pass that answered a user message, while `promptTokens` starts with
+    /// them, and drops those of the tool step before it: the next step
+    /// rewrites the call that step made. Any other pass keeps only the leading
+    /// checkpoint. The leading checkpoint is dropped too when `promptTokens`
+    /// does not start with it.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the whole rendered prompt of the new pass.
+    ///   - answeringTool: whether the new pass answers a tool message.
+    package mutating func beginPass(servingPrompt promptTokens: [Int], answeringTool: Bool) {
+        if answeringTool {
+            if !lastPassAnsweredTool {
+                turn = checkpoints
+            }
+            turn.removeAll { !$0.serves(promptTokens) }
+        } else {
+            turn.removeAll()
+        }
         checkpoints.removeAll()
+        lastPassAnsweredTool = answeringTool
         if let leading, !leading.serves(promptTokens) {
             self.leading = nil
         }
@@ -437,15 +523,18 @@ package struct PromptCacheCheckpoints {
         }
     }
 
-    /// Every checkpoint: the others in the order the session took them, then
-    /// the leading one.
+    /// Every checkpoint: those of the last user turn that a tool loop keeps,
+    /// those of the last pass in the order the session took them, then the
+    /// leading one.
     package var all: [PromptCacheCheckpoint] {
-        checkpoints + [leading].compactMap { $0 }
+        turn + checkpoints + [leading].compactMap { $0 }
     }
 
     /// Forgets every checkpoint.
     package mutating func removeAll() {
         checkpoints.removeAll()
+        turn.removeAll()
+        lastPassAnsweredTool = false
         leading = nil
     }
 

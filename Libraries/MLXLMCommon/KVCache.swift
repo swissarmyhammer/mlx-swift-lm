@@ -4,6 +4,12 @@ import Foundation
 import MLX
 import MLXNN
 
+/// Materializes a bounded state view. A contiguous slice can still pin its source's allocation.
+func materializedCacheState(_ array: MLXArray) -> MLXArray {
+    let input = array.ndim == 0 ? array.reshaped(1) : array
+    return take(input, MLXArray(0 ..< input.dim(0)), axis: 0).reshaped(array.shape)
+}
+
 /// Offset to use with ``applyRotaryPosition(_:to:offset:)``.
 ///
 /// See ``KVCache/ropeOffset``.

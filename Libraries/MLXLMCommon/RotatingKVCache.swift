@@ -658,6 +658,23 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return new
     }
 
+    /// Excludes a multi-token prefill's temporary rows beyond the configured history.
+    package func copyForCheckpoint() -> any KVCache {
+        let new = copy() as! RotatingKVCache
+        if (keys?.dim(HeadRowsAxis.row) ?? 0) > storageCapacity,
+            let (keys, values) = retainedView(tail: storageCapacity)
+        {
+            new.keys = keys
+            new.values = values
+            new.idx = keys.dim(HeadRowsAxis.row)
+            new.wrappedFlag = false
+            new.vacantRows = 0
+        }
+        new.keys = new.keys.map(materializedCacheState)
+        new.values = new.values.map(materializedCacheState)
+        return new
+    }
+
     /// Convert to a quantized cache.
     ///
     /// Rotating-cache quantization needs a representation that preserves temporal ordering and

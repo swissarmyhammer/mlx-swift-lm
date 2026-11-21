@@ -106,15 +106,17 @@ public class CacheList: BaseKVCache {
     /// Rewrite every non-composite child while preserving its stable tree path.
     func rewriteLeaves(
         path: [Int],
+        includingAuxiliary: Bool = false,
         using transform: (KVCacheLeaf) -> KVCache
     ) {
         caches = caches.enumerated().map { index, child in
             let childPath = path + [index]
             if let list = child as? CacheList {
-                list.rewriteLeaves(path: childPath, using: transform)
+                list.rewriteLeaves(
+                    path: childPath, includingAuxiliary: includingAuxiliary, using: transform)
                 return list
             }
-            guard KVCacheTree.isLeaf(child) else {
+            guard KVCacheTree.isLeaf(child, includingAuxiliary: includingAuxiliary) else {
                 return child
             }
             let leaf = KVCacheLeaf(path: childPath, cache: child)

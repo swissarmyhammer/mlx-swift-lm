@@ -234,13 +234,18 @@ enum SnapshotSlotFixture {
         return cache
     }
 
-    /// A cache that holds the same states and position, with no slots.
+    /// A cache that holds the same states, batch metadata and position, with no slots.
+    ///
+    /// The batch metadata (left padding and lengths) is part of the inner state of an
+    /// `ArraysCache` (upstream #716), thus of its byte count.
     ///
     /// - Parameter cache: The cache to match.
     /// - Returns: The cache without slots.
     static func plainCache(like cache: MambaCache) -> MambaCache {
         let plain = MambaCache()
         plain.state = cache.state
+        plain.leftPadding = cache.leftPadding
+        plain.lengths = cache.lengths
         plain.offset = cache.offset
         return plain
     }

@@ -27,7 +27,7 @@ public class ArraysCache: BaseKVCache {
     }
 
     public override func innerState() -> [MLXArray] {
-        cache.compactMap { $0 }
+        (cache + [leftPadding, lengths]).compactMap { $0 }
     }
 
     public subscript(index: Int) -> MLXArray? {
@@ -55,6 +55,14 @@ public class ArraysCache: BaseKVCache {
         new.offset = self.offset
         new.leftPadding = self.leftPadding
         new.lengths = self.lengths
+    }
+
+    package func copyForCheckpoint() -> any KVCache {
+        let new = copy() as! ArraysCache
+        new.cache = cache.map { $0.map(materializedCacheState) }
+        new.leftPadding = leftPadding.map(materializedCacheState)
+        new.lengths = lengths.map(materializedCacheState)
+        return new
     }
 
     internal var batchSize: Int {

@@ -4,6 +4,10 @@ import MLX
 
 /// A classified leaf in a potentially nested cache topology.
 struct KVCacheLeaf {
+    enum CheckpointStrategy: Equatable {
+        case trim, copy, varianceNormalized, unsupported
+    }
+
     enum Kind {
         case recurrent
         case rotating(RotatingKVCache)
@@ -32,6 +36,17 @@ struct KVCacheLeaf {
     var isAttentionCache: Bool {
         if case .recurrent = kind { return false }
         return true
+    }
+
+    var checkpointStrategy: CheckpointStrategy {
+        switch kind {
+        case .recurrent, .rotating: .copy
+        case .varianceNormalized: .varianceNormalized
+        case .simple where cache is ChunkedKVCache: .unsupported
+        case .simple, .affine, .turboQuant: .trim
+        case .unsupported:
+            cache is any AuxiliaryKVCache && cache.isTrimmable ? .trim : .unsupported
+        }
     }
 
     var isCompressed: Bool {
@@ -150,10 +165,16 @@ enum KVCacheTree {
         !(cache is CacheList) && !(cache is any AuxiliaryKVCache)
     }
 
-    static func leaves(in cache: [KVCache]) -> [KVCacheLeaf] {
+    /// Whether `cache` is a leaf, or with `includingAuxiliary` an ``AuxiliaryKVCache`` also.
+    static func isLeaf(_ cache: KVCache, includingAuxiliary: Bool) -> Bool {
+        includingAuxiliary ? !(cache is CacheList) : isLeaf(cache)
+    }
+
+    static func leaves(in cache: [KVCache], includingAuxiliary: Bool = false) -> [KVCacheLeaf] {
         var leaves: [KVCacheLeaf] = []
         for (index, entry) in cache.enumerated() {
-            appendLeaves(from: entry, path: [index], to: &leaves)
+            appendLeaves(
+                from: entry, path: [index], includingAuxiliary: includingAuxiliary, to: &leaves)
         }
         return leaves
     }
@@ -165,12 +186,14 @@ enum KVCacheTree {
 
     static func rewrite(
         _ cache: inout [KVCache],
+        includingAuxiliary: Bool = false,
         using transform: (KVCacheLeaf) -> KVCache
     ) {
         for index in cache.indices {
             if let list = cache[index] as? CacheList {
-                list.rewriteLeaves(path: [index], using: transform)
-            } else if isLeaf(cache[index]) {
+                list.rewriteLeaves(
+                    path: [index], includingAuxiliary: includingAuxiliary, using: transform)
+            } else if isLeaf(cache[index], includingAuxiliary: includingAuxiliary) {
                 let leaf = KVCacheLeaf(path: [index], cache: cache[index])
                 cache[index] = transform(leaf)
             }
@@ -200,13 +223,16 @@ enum KVCacheTree {
     private static func appendLeaves(
         from cache: KVCache,
         path: [Int],
+        includingAuxiliary: Bool,
         to leaves: inout [KVCacheLeaf]
     ) {
         if let list = cache as? CacheList {
             for (index, child) in list.children.enumerated() {
-                appendLeaves(from: child, path: path + [index], to: &leaves)
+                appendLeaves(
+                    from: child, path: path + [index], includingAuxiliary: includingAuxiliary,
+                    to: &leaves)
             }
-        } else if isLeaf(cache) {
+        } else if isLeaf(cache, includingAuxiliary: includingAuxiliary) {
             leaves.append(KVCacheLeaf(path: path, cache: cache))
         }
     }
