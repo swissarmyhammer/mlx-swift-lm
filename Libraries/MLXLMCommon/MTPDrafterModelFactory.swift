@@ -32,19 +32,20 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
     /// `Configuration`.
     ///
     /// A `config.json` matches when it decodes and `matches` holds for its configuration. The
-    /// creator decodes it, validates it and builds the drafter from it, so that every drafter
-    /// registered this way reads its configuration the same way.
+    /// creator is ``drafterCreator(_:create:)``, so that every drafter registered this way reads
+    /// its configuration the same way.
     ///
     /// - Parameters:
     ///   - modelTypes: The `model_type` values of the checkpoints that ship the drafter.
     ///   - configuration: The configuration the drafter is built from.
     ///   - matches: Whether a decoded configuration is one of this drafter.
     ///   - create: The drafter of a validated configuration.
-    public func registerDrafter<Configuration: Decodable & ModelConfigurationValidating>(
+    public func registerDrafter<Configuration: Decodable>(
         modelTypes: [String], configuration: Configuration.Type,
         matches: @escaping (Configuration) -> Bool,
         create: @escaping (Configuration) throws -> any MTPDrafterModel
     ) {
+        let creator = Self.drafterCreator(configuration, create: create)
         for modelType in modelTypes {
             registerModelType(
                 modelType,
@@ -52,21 +53,15 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
                     (try? JSONDecoder.json5().decode(Configuration.self, from: data))
                         .map(matches) ?? false
                 },
-                creator: { data in
-                    let decoded = try JSONDecoder.json5().decode(Configuration.self, from: data)
-                    try decoded.validateModelConfiguration()
-                    return try create(decoded)
-                })
+                creator: creator)
         }
     }
 
     /// Registers the only drafter of each of `modelTypes`, read from a `config.json` that decodes
     /// as `Configuration`, in place of any creator registered for those model types before.
     ///
-    /// The creator decodes the `config.json`, throwing the decoding error of one that does not
-    /// decode, validates the configuration when `Configuration` is
-    /// ``ModelConfigurationValidating``, and builds the drafter from it. Registering again
-    /// replaces the creator, so a registration that runs more than once leaves one creator.
+    /// The creator is ``drafterCreator(_:create:)``. Registering again replaces the creator, so a
+    /// registration that runs more than once leaves one creator.
     ///
     /// - Parameters:
     ///   - modelTypes: The `model_type` values of the checkpoints that ship the drafter.
@@ -76,12 +71,29 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
         modelTypes: [String], configuration: Configuration.Type,
         create: @escaping (Configuration) throws -> any MTPDrafterModel
     ) {
+        let creator = Self.drafterCreator(configuration, create: create)
         for modelType in modelTypes {
-            registerModelType(modelType) { data in
-                let decoded = try JSONDecoder.json5().decode(Configuration.self, from: data)
-                try (decoded as? any ModelConfigurationValidating)?.validateModelConfiguration()
-                return try create(decoded)
-            }
+            registerModelType(modelType, creator: creator)
+        }
+    }
+
+    /// The creator both `registerDrafter` variants register: it decodes the `config.json` as
+    /// `Configuration`, throwing the decoding error of one that does not decode, validates the
+    /// configuration when `Configuration` is ``ModelConfigurationValidating``, and builds the
+    /// drafter from it.
+    ///
+    /// - Parameters:
+    ///   - configuration: The configuration the drafter is built from.
+    ///   - create: The drafter of a validated configuration.
+    /// - Returns: The creator of the drafter of a `config.json`.
+    static func drafterCreator<Configuration: Decodable>(
+        _ configuration: Configuration.Type,
+        create: @escaping (Configuration) throws -> any MTPDrafterModel
+    ) -> (Data) throws -> any MTPDrafterModel {
+        { data in
+            let decoded = try JSONDecoder.json5().decode(Configuration.self, from: data)
+            try (decoded as? any ModelConfigurationValidating)?.validateModelConfiguration()
+            return try create(decoded)
         }
     }
 }
