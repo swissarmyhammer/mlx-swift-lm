@@ -35,6 +35,15 @@ public func verifyDifferenceFromDecodeSteps(
         return step
     }
     let verified = model(verify, cache: try advanced())
-    return abs(verified.asType(.float32) - concatenated(steps, axis: 1).asType(.float32)).max()
-        .item(Float.self)
+    return maxAbsoluteDifference(verified, concatenated(steps, axis: 1))
+}
+
+/// The largest absolute difference of `a` and `b`, in float32.
+///
+/// - Parameters:
+///   - a: one array.
+///   - b: the other array, of a shape that broadcasts with `a`.
+/// - Returns: the largest `|a - b|`; 0 when the two are equal.
+public func maxAbsoluteDifference(_ a: MLXArray, _ b: MLXArray) -> Float {
+    abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
 }

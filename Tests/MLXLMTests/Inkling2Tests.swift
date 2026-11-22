@@ -126,10 +126,6 @@ private func referenceRelativeAttention(
     return matmul(weights, vv).transposed(0, 2, 1, 3).reshaped(b, l, hq, d)
 }
 
-private func maxDifference(_ a: MLXArray, _ b: MLXArray) -> Float {
-    abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
-}
-
 /// The rows of each router logits call.
 private let routerLogitsRows = 3
 
@@ -177,7 +173,7 @@ struct Inkling2KernelTests {
         let expected = matmul(weights.swappedAxes(-1, -2), sources)
         #expect(out.shape == [2, 5, 4, 256])
         // MLX runs float32 matmuls in TF32 on GPUs with neural accelerators.
-        #expect(maxDifference(out, expected) < 1e-2)
+        #expect(maxAbsoluteDifference(out, expected) < 1e-2)
     }
 
     @Test(
@@ -209,7 +205,7 @@ struct Inkling2KernelTests {
         let expected = referenceRelativeAttention(
             q: q, k: k, v: v, rel: rel, sinks: sinks, scale: 0.125, window: window,
             distance: distance)
-        #expect(maxDifference(out, expected) < 2e-2)
+        #expect(maxAbsoluteDifference(out, expected) < 2e-2)
     }
 
     @Test(
@@ -267,7 +263,7 @@ struct Inkling2KernelTests {
             expected.asType(.float32).reshaped(b, hq * d)
             * sigmoid(gate.asType(.float32)).reshaped(b, hq * d)
         #expect(out.shape == [b, hq * d])
-        #expect(maxDifference(out, gated) < 1e-2)
+        #expect(maxAbsoluteDifference(out, gated) < 1e-2)
     }
 
     @Test("Expert routing picks the top bias-corrected scores")
@@ -284,7 +280,7 @@ struct Inkling2KernelTests {
         let expected = selected / selected.sum(axis: -1, keepDims: true) * 8
         #expect(
             indices.asType(.int32).asArray(Int32.self) == order.asType(.int32).asArray(Int32.self))
-        #expect(maxDifference(weights, expected) < 1e-5)
+        #expect(maxAbsoluteDifference(weights, expected) < 1e-5)
     }
 
     @Test(
@@ -295,7 +291,8 @@ struct Inkling2KernelTests {
         let x = MLXRandom.normal([rows, width])
         let weight = MLXRandom.normal([experts, width])
         let logits = inkling2RouterLogits(x, weight: weight)
-        #expect(maxDifference(logits, matmul(x, weight.transposed())) < routerLogitsTolerance)
+        #expect(
+            maxAbsoluteDifference(logits, matmul(x, weight.transposed())) < routerLogitsTolerance)
     }
 
     @Test(
@@ -341,7 +338,7 @@ struct Inkling2KernelTests {
         let expectedActivations = tanh(gate / 4) * 4 * sigmoid(gate) * tanh(up / 25) * 25
         #expect(activations.shape == [rows, k, inner])
         // One bfloat16 step at the largest activations is 0.03.
-        #expect(maxDifference(activations, expectedActivations) < 5e-2)
+        #expect(maxAbsoluteDifference(activations, expectedActivations) < 5e-2)
 
         let fused = inkling2ExpertDown(
             activations, experts: down, indices: indices, weights: weights, residual: residual,
@@ -349,8 +346,8 @@ struct Inkling2KernelTests {
         let expected = inkling2ExpertEpilogue(
             outputs: gathered(activations.reshaped(rows, k, 1, inner), down), weights: weights,
             residual: residual, state: state, convolutionWeight: convolution)
-        #expect(maxDifference(fused.hidden, expected.hidden) < 2e-2)
-        #expect(maxDifference(fused.state, expected.state) < 2e-2)
+        #expect(maxAbsoluteDifference(fused.hidden, expected.hidden) < 2e-2)
+        #expect(maxAbsoluteDifference(fused.state, expected.state) < 2e-2)
     }
 
     @Test(
@@ -391,8 +388,8 @@ struct Inkling2KernelTests {
             ((acc.asType(.bfloat16).asType(.float32) + input.asType(.float32))
             / Float(5).squareRoot()).asType(.bfloat16)
         #expect(out.shape == [b, l, c])
-        #expect(maxDifference(out, base + y.asType(.float32)) < 2e-2)
-        #expect(maxDifference(nextState, window[0..., l...]) < 2e-2)
+        #expect(maxAbsoluteDifference(out, base + y.asType(.float32)) < 2e-2)
+        #expect(maxAbsoluteDifference(nextState, window[0..., l...]) < 2e-2)
     }
 
     @Test("The prefill convolution adds the dynamic taps of each head")
@@ -419,8 +416,8 @@ struct Inkling2KernelTests {
             acc = acc + window[0..., (3 - lag) ..< (3 - lag + l), 0...] * weights
         }
         let expected = ((acc + x.asType(.float32)) / 3).asType(.bfloat16)
-        #expect(maxDifference(out, expected) < 2e-2)
-        #expect(maxDifference(nextState, window[0..., l...]) == 0)
+        #expect(maxAbsoluteDifference(out, expected) < 2e-2)
+        #expect(maxAbsoluteDifference(nextState, window[0..., l...]) == 0)
     }
 
     @Test(
@@ -453,11 +450,11 @@ struct Inkling2KernelTests {
         let keys = k.reshaped(b, l, hkv, dh).asType(.float32)
         let norm = sqrt(keys.square().sum(axis: -1, keepDims: true))
         let values = v.reshaped(b, l, hkv, dh).asType(.float32)
-        #expect(maxDifference(out[0], clipped(q.reshaped(b, l, hq, dh), qScale, 20)) < 5e-2)
-        #expect(maxDifference(out[1], clipped(r.reshaped(b, l, hq, dr), rScale, 8)) < 5e-2)
-        #expect(maxDifference(out[2], keys * minimum(20 / (norm + 1e-6), 1)) < 5e-2)
+        #expect(maxAbsoluteDifference(out[0], clipped(q.reshaped(b, l, hq, dh), qScale, 20)) < 5e-2)
+        #expect(maxAbsoluteDifference(out[1], clipped(r.reshaped(b, l, hq, dr), rScale, 8)) < 5e-2)
+        #expect(maxAbsoluteDifference(out[2], keys * minimum(20 / (norm + 1e-6), 1)) < 5e-2)
         #expect(
-            maxDifference(
+            maxAbsoluteDifference(
                 out[3], values * rsqrt(values.square().mean(axis: -1, keepDims: true) + 1e-6))
                 < 5e-2)
     }
@@ -490,10 +487,10 @@ struct Inkling2KernelTests {
         let expected = normWeight.asType(.float32).expandedDimensions(axis: 1) * rmsNormed(blend)
 
         #expect(out.dtype == .bfloat16)
-        #expect(maxDifference(out, expected) < 2e-2)
+        #expect(maxAbsoluteDifference(out, expected) < 2e-2)
         #expect((outF32 != nil) == f32Copy)
         if let outF32 {
-            #expect(maxDifference(outF32, out) == 0)
+            #expect(maxAbsoluteDifference(outF32, out) == 0)
         }
     }
 
@@ -531,13 +528,13 @@ struct Inkling2KernelTests {
             normWeight.asType(.float32)
             * readout * rsqrt(readout.square().mean(axis: -1, keepDims: true) + 1e-6)
 
-        #expect(maxDifference(mix.residual, residual) < 1e-4)
-        #expect(maxDifference(mix.normed, normed) < 1e-4)
-        #expect(maxDifference(mix.readout, expected) < 2e-2)
-        #expect(maxDifference(mix.readoutF32!, mix.readout) == 0)
+        #expect(maxAbsoluteDifference(mix.residual, residual) < 1e-4)
+        #expect(maxAbsoluteDifference(mix.normed, normed) < 1e-4)
+        #expect(maxAbsoluteDifference(mix.readout, expected) < 2e-2)
+        #expect(maxAbsoluteDifference(mix.readoutF32!, mix.readout) == 0)
         let expectedState = concatenated(
             [state[0..., 1...], x.expandedDimensions(axis: 1)], axis: 1)
-        #expect(maxDifference(mix.state!, expectedState) == 0)
+        #expect(maxAbsoluteDifference(mix.state!, expectedState) == 0)
     }
 }
 
@@ -647,7 +644,7 @@ struct Inkling2ModelTests {
         let view = try decode(rewind: 8)
         let tolerance: Float = bfloat16 ? 0.1 : 1e-2
         for (position, (a, b)) in zip(5..., zip(ring, view)) {
-            #expect(maxDifference(a, b) < tolerance, "position \(position)")
+            #expect(maxAbsoluteDifference(a, b) < tolerance, "position \(position)")
         }
     }
 
@@ -663,11 +660,11 @@ struct Inkling2ModelTests {
         // Prefill 5 tokens, then decode the rest one at a time past the window of 8.
         let prefill = model(tokens[0..., ..<5], cache: cache)
         // The tolerance allows for TF32 float32 matmuls; a wrong cache is off by far more.
-        #expect(maxDifference(prefill, full[0..., ..<5]) < 1e-2)
+        #expect(maxAbsoluteDifference(prefill, full[0..., ..<5]) < 1e-2)
         for position in 5 ..< 21 {
             let step = model(tokens[0..., position ..< (position + 1)], cache: cache)
             #expect(
-                maxDifference(step, full[0..., position ..< (position + 1)]) < 1e-2,
+                maxAbsoluteDifference(step, full[0..., position ..< (position + 1)]) < 1e-2,
                 "position \(position)")
         }
     }
@@ -683,7 +680,7 @@ struct Inkling2ModelTests {
         var worst: Float = 0
         for position in 5 ..< 21 {
             let step = model(tokens[0..., position ..< (position + 1)], cache: cache)
-            worst = max(worst, maxDifference(step, full[0..., position ..< (position + 1)]))
+            worst = max(worst, maxAbsoluteDifference(step, full[0..., position ..< (position + 1)]))
         }
         #expect(worst < 0.1)
     }
@@ -735,7 +732,7 @@ struct Inkling2ModelTests {
             return
         }
         #expect(a.logits.shape == [1, 1, 48])
-        #expect(maxDifference(a.logits, b.logits) < 1e-2)
+        #expect(maxAbsoluteDifference(a.logits, b.logits) < 1e-2)
     }
 }
 

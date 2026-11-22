@@ -116,10 +116,6 @@ private func emitState(taps: [Int]? = tinyTaps) -> LMOutput.State {
     return state
 }
 
-private func maxDifference(_ a: MLXArray, _ b: MLXArray) -> Float {
-    abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
-}
-
 // MARK: - Configuration and loading
 
 @Suite("Inkling2 DSpark drafter loading")
@@ -192,7 +188,7 @@ struct Inkling2DraftLoadingTests {
             loaded.parameters().flattened().first { $0.0 == "norm.weight" }?.1)
         let sourceNorm = try #require(
             source.parameters().flattened().first { $0.0 == "norm.weight" }?.1)
-        #expect(maxDifference(loadedNorm, sourceNorm) == 0)
+        #expect(maxAbsoluteDifference(loadedNorm, sourceNorm) == 0)
     }
 
     @Test("The registry names the oQ4e checkpoint that ships the head")
@@ -314,7 +310,7 @@ struct Inkling2DraftTargetTests {
         _ = target(tokens[0..., ..<promptLength], cache: verified)
         let verify = target(tokens[0..., promptLength...], cache: verified)
 
-        #expect(maxDifference(verify, concatenated(steps, axis: 1)) == 0)
+        #expect(maxAbsoluteDifference(verify, concatenated(steps, axis: 1)) == 0)
     }
 
     @Test("A pass through the decode kernels leaves an ArraysCache states of their own")
@@ -362,7 +358,7 @@ struct Inkling2DraftTargetTests {
         // In bfloat16 the replay feeds the kept tokens as a pass of their own, so the next
         // token's logits round as another pass would.
         let tolerance = bfloat16 ? bfloat16RewindTolerance : float32RewindTolerance
-        #expect(maxDifference(rewoundLogits, replayedLogits) < tolerance)
+        #expect(maxAbsoluteDifference(rewoundLogits, replayedLogits) < tolerance)
         for (a, b) in zip(rewound, replayed) {
             #expect(a.offset == b.offset)
         }
@@ -390,9 +386,9 @@ struct SpeculativeConvolutionCacheTests {
         #expect(cache.maxTrimCount == 5)
         #expect(cache.trim(2) == 2)
         #expect(cache.offset == 3)
-        #expect(cache[0].map { maxDifference($0, window[0..., 3 ..< 6, 0...]) } == 0)
+        #expect(cache[0].map { maxAbsoluteDifference($0, window[0..., 3 ..< 6, 0...]) } == 0)
         #expect(cache.trim(3) == 3)
-        #expect(cache[0].map { maxDifference($0, window[0..., 0 ..< 3, 0...]) } == 0)
+        #expect(cache[0].map { maxAbsoluteDifference($0, window[0..., 0 ..< 3, 0...]) } == 0)
     }
 
     @Test("The next forward pass drops the windows of a verify pass")
