@@ -101,15 +101,23 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
 /// Registry of model id (e.g. `"mlx-community/gemma-4-31B-it-assistant-bf16"`)
 /// to ``ModelConfiguration``. Drafters don't have prompts, so the
 /// configurations omit `defaultPrompt`.
-public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
+///
+/// The class adds no stored state. It is `Sendable` through ``AbstractModelRegistry``, whose
+/// lock guards every read and write of the registered configurations.
+public final class MTPDrafterRegistry: AbstractModelRegistry {
+    /// The registry of ``MTPDrafterModelFactory/shared`` and
+    /// ``MTPDrafterModelFactory/visionLanguage``, holding every checkpoint constant below.
     public static let shared = MTPDrafterRegistry(modelConfigurations: all())
 
+    /// The bf16 assistant drafter of Gemma 4 26B-A4B-it.
     public static let gemma4_26B_assistant_bf16 = ModelConfiguration(
         id: "mlx-community/gemma-4-26B-A4B-it-assistant-bf16"
     )
+    /// The bf16 assistant drafter of Gemma 4 31B-it.
     public static let gemma4_31B_assistant_bf16 = ModelConfiguration(
         id: "mlx-community/gemma-4-31B-it-assistant-bf16"
     )
+    /// The 4-bit MTP head of `mlx-community/Qwen3.8-27B-4bit`.
     public static let qwen3_8_27b_mtp_4bit = ModelConfiguration(
         id: "mlx-community/Qwen3.8-27B-MTP-4bit"
     )
@@ -117,12 +125,15 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
     public static let qwen3_8_27b_mtp_8bit = ModelConfiguration(
         id: "mlx-community/Qwen3.8-27B-MTP-8bit"
     )
+    /// The DSpark drafter of LFM2.5 1.2B Instruct.
     public static let lfm2_1_2B_instruct_dspark = ModelConfiguration(
         id: "LiquidAI/LFM2.5-1.2B-Instruct-DSpark"
     )
+    /// The DSpark drafter of LFM2.5 2.6B.
     public static let lfm2_2_6B_dspark = ModelConfiguration(
         id: "LiquidAI/LFM2.5-2.6B-DSpark"
     )
+    /// The DSpark drafter of LFM2.5 8B-A1B.
     public static let lfm2_8B_A1B_dspark = ModelConfiguration(
         id: "LiquidAI/LFM2.5-8B-A1B-DSpark"
     )

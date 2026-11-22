@@ -67,8 +67,17 @@ public enum TokenizerSource: Sendable, Equatable {
 /// - ``ModelConfiguration/resolved(modelDirectory:tokenizerDirectory:)``
 /// - ``Downloader``
 public struct ResolvedModelConfiguration: Sendable {
+    /// The local directory holding the model's configuration and weights.
     public var modelDirectory: URL
+
+    /// The local directory holding the tokenizer files, which is ``modelDirectory`` unless
+    /// ``ModelConfiguration/tokenizerSource`` names another source.
     public var tokenizerDirectory: URL
+
+    /// The name of the model, which errors and logs report.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/name``
     public var name: String
 
     /// The Hub repository id of the model, which the chat-convention resolvers key on.
@@ -77,13 +86,53 @@ public struct ResolvedModelConfiguration: Sendable {
     /// - ``ModelConfiguration/repositoryID``
     public var repositoryID: String
 
+    /// The prompt that examples and tools use when the caller gives none.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/defaultPrompt``
     public var defaultPrompt: String
+
+    /// Token strings that end generation in addition to the tokenizer's EOS token.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/extraEOSTokens``
     public var extraEOSTokens: Set<String>
+
+    /// Strings that end generation when they appear in the decoded text.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/effectiveStopStrings``
     public var stopStrings: Set<String>
+
+    /// Token ids that end generation, loaded from `config.json` and `generation_config.json`.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/eosTokenIds``
     public var eosTokenIds: Set<Int>
+
+    /// The tool-call format the model emits, or `nil` to infer it from the model type.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/toolCallFormat``
     public var toolCallFormat: ToolCallFormat?
+
+    /// How the model marks its reasoning, or `nil` for a model without reasoning markers.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/reasoningConfig``
     public var reasoningConfig: ReasoningConfig?
+
+    /// The message generator that turns chat messages into the model's input, or `nil` for the
+    /// model's own.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/messageGenerator``
     public var messageGenerator: (any MessageGenerator)?
+
+    /// The sampling defaults of the checkpoint (`generation_config.json`), if it has them.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/generationConfig``
     public var generationConfig: GenerationConfigFile?
 
     /// How to choose the safetensors files holding the model's weights.
@@ -98,6 +147,24 @@ public struct ResolvedModelConfiguration: Sendable {
     /// - ``ModelConfiguration/excludedComponents``
     public var excludedComponents: Set<ModelComponent>
 
+    /// Creates a resolved configuration from local directories.
+    ///
+    /// - Parameters:
+    ///   - modelDirectory: the directory holding the model's configuration and weights.
+    ///   - tokenizerDirectory: the directory holding the tokenizer files.
+    ///   - name: the name of the model.
+    ///   - repositoryID: the Hub repository id, `nil` to read it from a Hub cache path of
+    ///     `modelDirectory`, or else to use `name`.
+    ///   - defaultPrompt: the prompt used when the caller gives none.
+    ///   - extraEOSTokens: token strings that end generation.
+    ///   - stopStrings: strings that end generation, `nil` for `extraEOSTokens`.
+    ///   - eosTokenIds: token ids that end generation.
+    ///   - toolCallFormat: the tool-call format, `nil` to infer it from the model type.
+    ///   - reasoningConfig: the reasoning markers, `nil` for none.
+    ///   - messageGenerator: the message generator, `nil` for the model's own.
+    ///   - generationConfig: the sampling defaults of the checkpoint.
+    ///   - weightFileSelection: how to choose the weight files.
+    ///   - excludedComponents: components to load the model without.
     public init(
         modelDirectory: URL,
         tokenizerDirectory: URL,
