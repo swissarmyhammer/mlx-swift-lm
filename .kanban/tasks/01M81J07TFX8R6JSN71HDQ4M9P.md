@@ -1,8 +1,8 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: 8a80
+position_column: done
+position_ordinal: ffffd980
 title: 'Inkling 2 MTP never drafts through MLXLanguageModel (guided path: incompatibleDrafter; tool calls: drafted 0)'
 ---
 Reported by FoundationModelsACPAgent on stable 2dafc7c4 (Router af9b3cbc, Extras 5e43c365). Target mlx-community/Inkling-2-Mini-4bit rev 9856dc53 (VLM factory), drafter mlx-community/Inkling-2-Mini-oQ4e-mtp rev 3eea0427 loaded via `MLXSpeculativeDecoding(drafterConfiguration:from:using:registration: .matchingTarget(.qwen35Text, .qwen35VLM, .inkling2), drafterBytes:, memoryPolicy: .recommendedWorkingSet)`, default block size 4, fp16 KV, ~228k context. Every LanguageModelSession call decodes plain:
@@ -19,3 +19,10 @@ Configs match (hidden 2304, vocab 201024/200058, loop 6/18/3), so `Inkling2Draft
 Also noted (Extras-side): Extras sums every *.safetensors in the drafter snapshot for drafterBytes, which includes the full oQ4e model-0000N files; the memory policy may then refuse the drafter (memoryBudgetExceeded). Consider whether MLXSpeculativeDecoding should size the drafter from its own weight files (additionalWeightFiles) instead.
 
 #inkling
+## Resolution (2026-11-22)
+
+Fixed on branch inkling2-mtp-fm (b89a6987, 1f17724a, a2191867, 41419336), merged into inkling2-mini at d21147d8.
+- Root causes: `Inkling2DraftModel.requiresGreedySampling = true` made Router's default-temperature (0.6) calls stand MTP down silently; the drafter did not conform to `StatefulMTPDistributionDrafterModel`, so guided passes reported incompatibleDrafter; two more no-draft paths recorded no reason.
+- Fix: sampled verification (sample-and-match / rejection) for the Inkling drafter, guided drafting through the logit processor, every fallback records a reason; `fallbackReason` is set only when a call proposed no drafts.
+- New suite Inkling2FoundationModelsMTPTests builds MLXSpeculativeDecoding exactly as Extras does and asserts drafted > 0 on plain, guided, tool-loop and sampled calls. MTP greedy == plain; cache reuse holds.
+- drafterBytes: Extras' to fix (done in Extras 159f080). Download over-fetch → ^r35fngx (done).
