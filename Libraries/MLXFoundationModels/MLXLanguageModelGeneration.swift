@@ -271,6 +271,24 @@ extension MLXLanguageModel.Executor {
             channel: channel)
     }
 
+    /// The end of a pass that a framed protocol decoder ends before its generation ends.
+    ///
+    /// The pass stops the generation, then reads the stream to its end and drops the tokens
+    /// after the stop: the last event of the stream is the completion of the pass, which carries
+    /// its usage and its MTP counts.
+    struct ProtocolPassStop {
+        /// Whether the decoder ended the pass.
+        private(set) var hasStopped = false
+
+        /// Ends the pass and stops its generation.
+        ///
+        /// - Parameter task: The generation task of the pass.
+        mutating func stop<Success>(_ task: Task<Success, Never>) {
+            hasStopped = true
+            task.cancel()
+        }
+    }
+
     /// Runs allowed tool mode: native generation over the tool-aware
     /// prompt, so the model can answer in text or call a tool.
     ///
@@ -878,14 +896,11 @@ extension MLXLanguageModel.Executor {
                 preparedState: preparedState,
                 handOff: handOff)
         } consume: { stream, task in
-            // A framed protocol can end the pass before the generation ends. The pass then
-            // stops the generation, and reads the stream to its end, which reports the
-            // completion of the pass with its MTP counts.
-            var decoderStopped = false
+            var stop = ProtocolPassStop()
             for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
-                case .token where decoderStopped:
+                case .token where stop.hasStopped:
                     continue
                 case .token(let token):
                     if var decoder = protocolDecoder {
@@ -906,8 +921,7 @@ extension MLXLanguageModel.Executor {
                             try Task.checkCancellation()
                         }
                         if !decoderContinues || !shouldContinue {
-                            decoderStopped = true
-                            task.cancel()
+                            stop.stop(task)
                         }
                     } else {
                         if router.isInsideReasoning {
@@ -1394,13 +1408,11 @@ extension MLXLanguageModel.Executor {
                 preparedState: preparedState,
                 handOff: handOff)
         } consume: { stream, task in
-            // As on the allowed-tool path: a framed protocol that ends the pass stops the
-            // generation, and the stream is read to its end for the completion of the pass.
-            var decoderStopped = false
+            var stop = ProtocolPassStop()
             for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
-                case .token where decoderStopped:
+                case .token where stop.hasStopped:
                     continue
                 case .token(let token):
                     if var decoder = protocolDecoder {
@@ -1420,8 +1432,7 @@ extension MLXLanguageModel.Executor {
                             throw RejectedToolCallError(rejection)
                         }
                         if !decoderContinues || !decodedEvents.shouldContinue {
-                            decoderStopped = true
-                            task.cancel()
+                            stop.stop(task)
                         }
                     } else {
                         // One `.token` == one real token, so this is a true

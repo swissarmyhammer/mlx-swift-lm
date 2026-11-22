@@ -78,7 +78,7 @@ private func tinyDraftConfiguration() throws -> Inkling2DraftConfiguration {
 
 /// The tiny target, with the MTP configuration that names its default taps.
 private func tinyTarget() throws -> Inkling2 {
-    try Inkling2ModelTests.makeModel(json: tinyDraftJSON)
+    try Inkling2TinyModels.target(json: tinyDraftJSON)
 }
 
 /// A tiny drafter with random weights.
@@ -281,7 +281,7 @@ struct Inkling2DraftTargetTests {
         "A verify pass through the decode kernels computes each token as a decode step does",
         arguments: [1, 3])
     func sequentialDecodeMatchesDecodeSteps(promptLength: Int) throws {
-        let target = try Inkling2ModelTests.makeModel(bfloat16: true, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: true)
         let tokens = prompt(promptLength + tinyBlock)
 
         let stepped = try target.newCache(parameters: nil)
@@ -301,7 +301,7 @@ struct Inkling2DraftTargetTests {
 
     @Test("A pass through the decode kernels leaves an ArraysCache states of their own")
     func sequentialDecodeCopiesPlainConvolutionStates() throws {
-        let target = try Inkling2ModelTests.makeModel(bfloat16: true, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: true)
         let cache: [KVCache] = try target.newCache(parameters: nil).map { entry in
             let list = try #require(entry as? CacheList)
             return CacheList(list.children[0], ArraysCache(size: convolutionSlots))
@@ -324,7 +324,7 @@ struct Inkling2DraftTargetTests {
         arguments: [6, 12], [(1, false), (3, false), (1, true), (3, true)])
     func rewindAfterPartialAccept(promptLength: Int, rejection: (Int, Bool)) throws {
         let (rejected, bfloat16) = rejection
-        let target = try Inkling2ModelTests.makeModel(bfloat16: bfloat16, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: bfloat16)
         let tokens = prompt(promptLength + tinyBlock + 1)
         let verified = tokens[0..., promptLength ..< (promptLength + tinyBlock)]
         let kept = tinyBlock - rejected
@@ -546,7 +546,7 @@ struct Inkling2DraftingTests {
         "Greedy MTP decodes the tokens of plain greedy decoding",
         arguments: [5, 12], [false, true])
     func greedyMatchesPlainGreedy(promptLength: Int, bfloat16: Bool) throws {
-        let target = try Inkling2ModelTests.makeModel(bfloat16: bfloat16, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: bfloat16)
         let drafter = try tinyDrafter()
         let input = LMInput(tokens: prompt(promptLength).reshaped(-1))
         let parameters = GenerateParameters(maxTokens: 20, temperature: 0)

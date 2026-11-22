@@ -148,34 +148,27 @@ func loadTestModelContainer(id: String) async throws -> ModelContainer {
 /// into — the two must agree so `MLXLanguageModel.modelExistsOnDisk()` can
 /// probe for `config.json`.
 func testWeightsLocation(modelID: String) -> URL {
+    testWeightsLocation(modelID: modelID, revision: nil)
+}
+
+/// The weights directory of `modelID` at `revision`, through the lookup of
+/// ``testWeightsLocation(modelID:)``: the `weightsLocation:` of a suite that pins its checkpoint.
+///
+/// - Parameters:
+///   - modelID: The Hugging Face id of the checkpoint.
+///   - revision: The commit hash a suite pins, or `nil` for the snapshot `main` resolves to.
+/// - Returns: The snapshot directory, or the repo directory when the cache holds no snapshot.
+func testWeightsLocation(modelID: String, revision: String?) -> URL {
     let cache = HuggingFace.HubCache.default
     guard let repo = HuggingFace.Repo.ID(rawValue: modelID) else {
         return cache.cacheDirectory
     }
-    if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+    if let commit = revision ?? cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
         let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit)
     {
         return snapshot
     }
     return cache.repoDirectory(repo: repo, kind: .model)
-}
-
-/// The snapshot directory of `modelID` at the pinned `revision` in the Hugging Face cache, or the
-/// cache directory when the cache holds no such snapshot: the `weightsLocation:` of a suite that
-/// pins its checkpoint.
-///
-/// - Parameters:
-///   - modelID: The Hugging Face id of the checkpoint.
-///   - revision: The commit hash the suite pins.
-/// - Returns: The snapshot directory.
-func testWeightsLocation(modelID: String, revision: String) -> URL {
-    let cache = HuggingFace.HubCache.default
-    guard let repo = HuggingFace.Repo.ID(rawValue: modelID),
-        let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: revision)
-    else {
-        return cache.cacheDirectory
-    }
-    return snapshot
 }
 
 // MARK: - Executor Helpers
