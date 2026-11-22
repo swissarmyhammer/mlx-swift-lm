@@ -1,8 +1,23 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: 8a80
+comments:
+- actor: claude-code
+  id: 01m81k7tk0hjam3s1x88nqgtgw
+  text: |-
+    Resolved in 8cba0cfa. Each cause removed across the whole file:
+    - [x] Inkling2Attention.swift:27 duplication — `l2Clip` and `l2ClipScaled` share `clippedStates(_:scale:threshold:)` (float32 clipped states); `l2ClipScaled` keeps only the tau scaling and rounding.
+    - [x] Inkling2Attention.swift:45 no_unchecked_sendable — `QuantizedLinearBox` drops the Sendable conformance (nothing sends it; `FusedQuantizedLinearProjectionCache` beside it is not Sendable either).
+    - [x] Inkling2Attention.swift:237 duplication — key and value convolution fusion share `prepareConvolutionProjection(_:linear:cache:key:)`.
+    - [x] Inkling2Configuration.swift missing-docs — a documentation comment on all 54 flagged public declarations (plus the struct inits).
+    - [x] Inkling2DecoderLayer.swift:548 no_unchecked_sendable — `MessageControllersBox` drops the Sendable conformance.
+    - Same cause elsewhere: `Inkling2DecodeKernels` (Inkling2Kernels.swift) holds only immutable `MLXFastKernel`s (Sendable), so it is now a plain `Sendable`. `Inkling2ConstantBox` already carries the swiftlint disable comment with its invariant.
+
+    Review `review sha HEAD~1..HEAD` of 8cba0cfa: 0 findings.
+    Tests: swift build --build-tests clean; MLXLMTests 2561 passed (3 known issues), MLXGuidedGenerationTests passed, MLXFoundationModelsTests 570 passed, CXGrammarTests 7 passed, MLXHuggingFaceMacrosTests 11 passed.
+  timestamp: 2026-11-22T12:21:03.712387+00:00
+position_column: done
+position_ordinal: ffffd180
 title: 'Inkling2 split files: findings on moved code (from ^04yn8q4 review of f0ce3a2c)'
 ---
 The review of f0ce3a2c (split of `Libraries/MLXVLM/Models/Inkling2.swift` into six files) ran the duplication validator over the split files for the first time. These findings land on code that the commit only moved; the same code was in `Inkling2.swift` at f0ce3a2c~1. They were filed here, out of the ^04yn8q4 scope, at the user's direction. Each item is the engine text word for word.
