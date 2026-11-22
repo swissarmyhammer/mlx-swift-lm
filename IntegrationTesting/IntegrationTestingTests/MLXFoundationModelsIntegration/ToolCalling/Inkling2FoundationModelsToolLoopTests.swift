@@ -318,48 +318,101 @@ struct Inkling2FoundationModelsToolLoopTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func expectTheExecutorReusesThePromptCache(thinking: Bool) async throws -> String {
         let label = thinking ? "thinking" : "no-thinking"
-        let model = Self.makeModel(thinking: thinking)
+        let session = try await Self.runExecutorSession(
+            thinking: thinking, label: label, category: "INKLING2 FM TOOLS",
+            toolCallingMode: .allowed)
+
+        for (number, round) in session.rounds.enumerated().dropFirst() {
+            #expect(
+                round.cachedTokenCount > 0,
+                "[\(label)] round \(number) after a tool result reused no prompt token")
+        }
+        let streamed = session.rounds + [session.followUp]
+        Self.expectTheLoopAnswered(
+            log: session.log, answer: session.answer, followUp: session.followUp,
+            streamed: streamed, label: label)
+        return streamed.map(\.reasoning).joined()
+    }
+
+    /// The rounds of one executor session: the rounds of the tool loop, the last of which
+    /// answers, and the follow-up turn after the answer.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private struct ExecutorSession {
+        /// The rounds of the loop, in order; the last one answers the question.
+        let rounds: [Inkling2Round]
+        /// The round that answered the question, the last of ``rounds``.
+        let answer: Inkling2Round
+        /// The round of the follow-up turn.
+        let followUp: Inkling2Round
+        /// The calls the loop dispatched.
+        let log: Inkling2ToolCallLog
+    }
+
+    /// Runs the tool loop of one session one executor round at a time, then the follow-up turn.
+    ///
+    /// The loop appends the reasoning, the calls and the results of each round that called a
+    /// tool, and stops at the first round that calls none, which answers, or after
+    /// ``maxRounds`` rounds. In `.required` mode the first ``requiredRounds`` rounds run in
+    /// that mode and each must pass `checkRequiredRound`; every other round, and the follow-up
+    /// turn, runs in `.allowed` mode.
+    ///
+    /// - Parameters:
+    ///   - thinking: whether the model declares reasoning.
+    ///   - label: the label of the log lines and the issues.
+    ///   - category: the category of the log lines.
+    ///   - toolCallingMode: the mode of the tool rounds, `.allowed` or `.required`.
+    ///   - checkRequiredRound: the checks of a round that ran in `.required` mode, given the
+    ///     round and its number.
+    /// - Returns: the rounds, the answer, the follow-up turn and the calls of the session.
+    /// - Throws: the error of a round, of `checkRequiredRound`, or of a loop without a round.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func runExecutorSession(
+        thinking: Bool, label: String, category: String,
+        toolCallingMode: GenerationOptions.ToolCallingMode,
+        checkRequiredRound: (_ round: Inkling2Round, _ number: Int) throws -> Void = { _, _ in }
+    ) async throws -> ExecutorSession {
+        let model = makeModel(thinking: thinking)
         let executor = try makeMLXExecutor(for: model)
         let log = Inkling2ToolCallLog()
         var entries: [Transcript.Entry] = [
             .instructions(
                 Transcript.Instructions(
-                    segments: [Self.segment(Inkling2BankFixture.instructions)],
-                    toolDefinitions: Self.toolDefinitions)),
-            Self.prompt(Inkling2BankFixture.question),
+                    segments: [segment(Inkling2BankFixture.instructions)],
+                    toolDefinitions: toolDefinitions)),
+            prompt(Inkling2BankFixture.question),
         ]
+        let forcedRounds = toolCallingMode.kind == .required ? requiredRounds : 0
 
         var rounds: [Inkling2Round] = []
-        for number in 0 ..< Self.maxRounds {
-            let round = try await Self.runRound(
-                entries, thinking: thinking, model: model, executor: executor)
+        for number in 0 ..< maxRounds {
+            let forced = number < forcedRounds
+            let clock = ContinuousClock()
+            let start = clock.now
+            let round = try await runRound(
+                entries, thinking: thinking, model: model, executor: executor,
+                toolCallingMode: forced ? toolCallingMode : .allowed)
+            let seconds = (clock.now - start) / .seconds(1)
             Inkling2ResultLog.report(
-                "INKLING2 FM TOOLS", "executor[\(label)] round \(number): \(round.summary)")
+                category,
+                "executor[\(label)] round \(number) (\(String(format: "%.2f", seconds)) s): "
+                    + round.summary)
             Inkling2ResultLog.report(
-                "INKLING2 FM TOOLS",
-                "executor[\(label)] round \(number) reasoning: \(round.reasoning)")
+                category, "executor[\(label)] round \(number) reasoning: \(round.reasoning)")
+            if forced {
+                try checkRequiredRound(round, number)
+            }
             rounds.append(round)
             guard !round.toolCalls.isEmpty else { break }
             entries += try Self.entries(after: round, number: number, log: log)
         }
         let answer = try #require(rounds.last, "[\(label)] no round")
         entries.append(
-            .response(Transcript.Response(assetIDs: [], segments: [Self.segment(answer.text)])))
-        entries.append(Self.prompt(Inkling2BankFixture.followUp))
-        let followUp = try await Self.runRound(
+            .response(Transcript.Response(assetIDs: [], segments: [segment(answer.text)])))
+        entries.append(prompt(Inkling2BankFixture.followUp))
+        let followUp = try await runRound(
             entries, thinking: thinking, model: model, executor: executor)
-        Inkling2ResultLog.report(
-            "INKLING2 FM TOOLS", "executor[\(label)] follow-up: \(followUp.summary)")
-
-        for (number, round) in rounds.enumerated().dropFirst() {
-            #expect(
-                round.cachedTokenCount > 0,
-                "[\(label)] round \(number) after a tool result reused no prompt token")
-        }
-        let streamed = rounds + [followUp]
-        Self.expectTheLoopAnswered(
-            log: log, answer: answer, followUp: followUp, streamed: streamed, label: label)
-        return streamed.map(\.reasoning).joined()
+        Inkling2ResultLog.report(category, "executor[\(label)] follow-up: \(followUp.summary)")
+        return ExecutorSession(rounds: rounds, answer: answer, followUp: followUp, log: log)
     }
 
     /// Records an issue unless the executor loop called the two tools in order, its answer
@@ -410,51 +463,18 @@ struct Inkling2FoundationModelsToolLoopTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func expectRequiredModeCompletesTheLoop(thinking: Bool) async throws {
         let label = thinking ? "required-thinking" : "required-no-thinking"
-        let model = Self.makeModel(thinking: thinking)
-        let executor = try makeMLXExecutor(for: model)
-        let log = Inkling2ToolCallLog()
-        var entries: [Transcript.Entry] = [
-            .instructions(
-                Transcript.Instructions(
-                    segments: [Self.segment(Inkling2BankFixture.instructions)],
-                    toolDefinitions: Self.toolDefinitions)),
-            Self.prompt(Inkling2BankFixture.question),
-        ]
-
-        for number in 0 ..< Self.requiredRounds {
-            let clock = ContinuousClock()
-            let start = clock.now
-            let round = try await Self.runRound(
-                entries, thinking: thinking, model: model, executor: executor,
-                toolCallingMode: .required)
-            let seconds = (clock.now - start) / .seconds(1)
-            Inkling2ResultLog.report(
-                "INKLING2 FM REQUIRED",
-                "executor[\(label)] round \(number) (\(String(format: "%.2f", seconds)) s): "
-                    + round.summary)
-            Inkling2ResultLog.report(
-                "INKLING2 FM REQUIRED",
-                "executor[\(label)] round \(number) reasoning: \(round.reasoning)")
+        let session = try await Self.runExecutorSession(
+            thinking: thinking, label: label, category: "INKLING2 FM REQUIRED",
+            toolCallingMode: .required
+        ) { round, number in
             #expect(round.text.isEmpty, "[\(label)] round \(number) answered in text")
             try #require(round.toolCalls.count == 1, "[\(label)] round \(number) \(round.summary)")
-            entries += try Self.entries(after: round, number: number, log: log)
         }
-        let answer = try await Self.runRound(
-            entries, thinking: thinking, model: model, executor: executor)
-        Inkling2ResultLog.report(
-            "INKLING2 FM REQUIRED", "executor[\(label)] answer: \(answer.summary)")
-        entries.append(
-            .response(Transcript.Response(assetIDs: [], segments: [Self.segment(answer.text)])))
-        entries.append(Self.prompt(Inkling2BankFixture.followUp))
-        let followUp = try await Self.runRound(
-            entries, thinking: thinking, model: model, executor: executor)
-        Inkling2ResultLog.report(
-            "INKLING2 FM REQUIRED", "executor[\(label)] follow-up: \(followUp.summary)")
 
-        #expect(answer.toolCalls.isEmpty, "[\(label)] answer \(answer.summary)")
+        #expect(session.answer.toolCalls.isEmpty, "[\(label)] answer \(session.answer.summary)")
         Self.expectTheLoopAnswered(
-            log: log, answer: answer, followUp: followUp, streamed: [answer, followUp],
-            label: label)
+            log: session.log, answer: session.answer, followUp: session.followUp,
+            streamed: [session.answer, session.followUp], label: label)
     }
 }
 

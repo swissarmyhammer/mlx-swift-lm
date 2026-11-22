@@ -222,6 +222,8 @@ let package = Package(
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",
+                // The pseudo-word tokenizer of PseudoWordTokenizerLoader.
+                "MLXScriptedLM",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
             ],

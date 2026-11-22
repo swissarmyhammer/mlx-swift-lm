@@ -54,20 +54,40 @@ struct RequiredToolCallFrameTests {
         #expect(RequiredToolCallFrame.toolCallEnvelope.reasoningOpenerMarkers.isEmpty)
     }
 
-    @Test("The Inkling 2 grammar opens each tool's frame and closes it at the end of the message")
+    /// The tools of the grammar tests.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func inklingGrammarWritesTheToolFrame() throws {
-        let tools = ["get_weather", "get_time"].map {
+    private static func grammarTools() -> [Transcript.ToolDefinition] {
+        ["get_weather", "get_time"].map {
             Transcript.ToolDefinition(
                 name: $0, description: "A tool.", parameters: String.generationSchema)
         }
+    }
+
+    /// The structural tag grammar of the Inkling 2 frame for `tools`, as JSON.
+    ///
+    /// - Parameter tools: the tools of the turn.
+    /// - Returns: the grammar text, its `type`, and its tags, one per tool.
+    /// - Throws: the error of the grammar, or of a grammar that does not decode as a structural
+    ///   tag.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func inklingGrammar(tools: [Transcript.ToolDefinition]) throws -> (
+        text: String, type: String?, tags: [[String: Any]]
+    ) {
         let grammar = try RequiredToolCallFrame.inklingFrame.grammar(tools: tools)
         let object = try #require(
             try JSONSerialization.jsonObject(with: Data(grammar.utf8)) as? [String: Any])
         let format = try #require(object["format"] as? [String: Any])
         let tags = try #require(format["elements"] as? [[String: Any]])
+        return (grammar, object["type"] as? String, tags)
+    }
 
-        #expect(object["type"] as? String == "structural_tag")
+    @Test("The Inkling 2 grammar opens each tool's frame and closes it at the end of the message")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func inklingGrammarWritesTheToolFrame() throws {
+        let tools = Self.grammarTools()
+        let (grammar, type, tags) = try Self.inklingGrammar(tools: tools)
+
+        #expect(type == "structural_tag")
         #expect(
             tags.map { $0["begin"] as? String }
                 == tools.map {
@@ -76,6 +96,23 @@ struct RequiredToolCallFrameTests {
                 })
         #expect(tags.allSatisfy { $0["end"] as? [String] == ["}<|end_message|>"] })
         #expect(!grammar.contains("<tool_call>"))
+    }
+
+    @Test("The Inkling 2 frame reads back each call that its grammar's tags enclose")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func inklingFrameReadsBackTheCallsOfItsGrammar() throws {
+        let tools = Self.grammarTools()
+        let tags = try Self.inklingGrammar(tools: tools).tags
+        try #require(tags.count == tools.count)
+
+        for (tool, tag) in zip(tools, tags) {
+            let begin = try #require(tag["begin"] as? String)
+            let end = try #require((tag["end"] as? [String])?.first)
+            let call = try #require(
+                RequiredToolCallFrame.inklingFrame.call(in: begin + #"{"city": "Rome"}"# + end))
+            #expect(call.name == tool.name)
+            #expect((call.arguments as? [String: String]) == ["city": "Rome"])
+        }
     }
 
     @Test("The Inkling 2 grammar needs a tool")

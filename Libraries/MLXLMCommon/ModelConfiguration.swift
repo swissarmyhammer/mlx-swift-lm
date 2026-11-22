@@ -15,11 +15,16 @@ import Foundation
 /// See e.g. `MLXLM.ModelRegistry` for an example of use.
 public struct ModelConfiguration: Sendable {
 
+    /// An error of a directory that a configuration cannot give.
     public enum DirectoryError: LocalizedError, Equatable {
+        /// The model is still a Hub id, named here, and not a local directory.
         case unresolvedModelDirectory(String)
+        /// The tokenizer source is still a Hub id, named here, and not a local directory.
         case unresolvedTokenizerDirectory(String)
+        /// The model subdirectory, named here, is not a canonical repository-relative path.
         case invalidModelSubdirectory(String)
 
+        /// A description of the error that names the id or the path.
         public var errorDescription: String? {
             switch self {
             case .unresolvedModelDirectory(let id):
@@ -85,17 +90,34 @@ public struct ModelConfiguration: Sendable {
     /// - Returns: The repo ID the cache layout of `directory` encodes, or `nil`.
     static func hubCacheRepositoryID(of directory: URL) -> String? {
         let components = directory.standardizedFileURL.pathComponents
-        let prefix = "models--"
         guard
-            let index = components.lastIndex(where: { $0.hasPrefix(prefix) }),
-            index + 2 < components.count, components[index + 1] == "snapshots"
+            let repositoryIndex = components.lastIndex(where: {
+                $0.hasPrefix(HubCacheLayout.modelPrefix)
+            })
         else { return nil }
-        let encoded = components[index].dropFirst(prefix.count)
-        guard let separator = encoded.range(of: "--") else { return nil }
+        // The repository directory holds `snapshots`, which holds a directory per revision.
+        let snapshotsIndex = components.index(after: repositoryIndex)
+        let revisionIndex = components.index(after: snapshotsIndex)
+        guard revisionIndex < components.endIndex,
+            components[snapshotsIndex] == HubCacheLayout.snapshots
+        else { return nil }
+        let encoded = components[repositoryIndex].dropFirst(HubCacheLayout.modelPrefix.count)
+        guard let separator = encoded.range(of: HubCacheLayout.ownerSeparator) else { return nil }
         let organization = encoded[..<separator.lowerBound]
         let repository = encoded[separator.upperBound...]
         guard !organization.isEmpty, !repository.isEmpty else { return nil }
         return "\(organization)/\(repository)"
+    }
+
+    /// The names of the Hugging Face hub cache layout,
+    /// `models--<org>--<name>/snapshots/<revision>`.
+    private enum HubCacheLayout {
+        /// The prefix of the directory of a model repository.
+        static let modelPrefix = "models--"
+        /// The separator of the organization and the name in the directory of a repository.
+        static let ownerSeparator = "--"
+        /// The directory of a repository that holds a directory per revision.
+        static let snapshots = "snapshots"
     }
 
     /// The resolved local directory containing model files.
@@ -207,6 +229,22 @@ public struct ModelConfiguration: Sendable {
     /// Sampling defaults supplied by the checkpoint's `generation_config.json`.
     public var generationConfig: GenerationConfigFile? = nil
 
+    /// Creates the configuration of a model in a Hub repository.
+    ///
+    /// - Parameters:
+    ///   - id: the repository, `<org>/<name>`.
+    ///   - revision: the revision of the repository.
+    ///   - modelSubdirectory: the directory of the model in the repository, see
+    ///     ``modelSubdirectory``.
+    ///   - tokenizerSource: where the tokenizer comes from; `nil` for the model directory.
+    ///   - defaultPrompt: the default prompt.
+    ///   - extraEOSTokens: tokens that also end generation.
+    ///   - stopStrings: strings that end generation, see ``stopStrings``.
+    ///   - eosTokenIds: token ids that end generation.
+    ///   - toolCallFormat: the tool-call format, `nil` to infer it.
+    ///   - reasoningConfig: the reasoning protocol, `nil` for a non-reasoning model.
+    ///   - messageGenerator: the message generator, `nil` for the model's own.
+    ///   - generationConfig: the sampling defaults of the checkpoint.
     public init(
         id: String, revision: String = "main", modelSubdirectory: String? = nil,
         tokenizerSource: TokenizerSource? = nil,
@@ -232,6 +270,21 @@ public struct ModelConfiguration: Sendable {
         self.generationConfig = generationConfig
     }
 
+    /// Creates the configuration of a model in a local directory.
+    ///
+    /// - Parameters:
+    ///   - directory: the directory that holds the model, or its variants.
+    ///   - modelSubdirectory: the directory of the model below `directory`, see
+    ///     ``modelSubdirectory``.
+    ///   - tokenizerSource: where the tokenizer comes from; `nil` for the model directory.
+    ///   - defaultPrompt: the default prompt.
+    ///   - extraEOSTokens: tokens that also end generation.
+    ///   - stopStrings: strings that end generation, see ``stopStrings``.
+    ///   - eosTokenIds: token ids that end generation.
+    ///   - toolCallFormat: the tool-call format, `nil` to infer it.
+    ///   - reasoningConfig: the reasoning protocol, `nil` for a non-reasoning model.
+    ///   - messageGenerator: the message generator, `nil` for the model's own.
+    ///   - generationConfig: the sampling defaults of the checkpoint.
     public init(
         directory: URL, modelSubdirectory: String? = nil,
         tokenizerSource: TokenizerSource? = nil,
@@ -311,6 +364,12 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
+    /// `root` with the model subdirectory appended, or `root` when there is none.
+    ///
+    /// - Parameter root: the repository directory, downloaded or local.
+    /// - Returns: the directory of the model.
+    /// - Throws: ``DirectoryError/invalidModelSubdirectory(_:)`` for a subdirectory that
+    ///   ``normalizedModelSubdirectory`` rejects.
     package func appendingModelSubdirectory(to root: URL) throws -> URL {
         guard let subdirectory = try normalizedModelSubdirectory else { return root }
         return root.appending(path: subdirectory, directoryHint: .isDirectory)
@@ -322,6 +381,13 @@ extension ModelConfiguration: Equatable {
 
     // Keep in sync with the stored properties above: synthesis is impossible because
     // `messageGenerator` is not `Equatable`, so a new property will not appear here on its own.
+    /// Whether two configurations are equal: each stored property is equal, and the two
+    /// ``messageGenerator`` values are both `nil` or of the same type.
+    ///
+    /// - Parameters:
+    ///   - lhs: one configuration.
+    ///   - rhs: the other configuration.
+    /// - Returns: `true` when the two configurations are equal.
     public static func == (lhs: ModelConfiguration, rhs: ModelConfiguration) -> Bool {
         lhs.id == rhs.id
             && lhs.modelSubdirectory == rhs.modelSubdirectory
@@ -357,6 +423,13 @@ extension ModelConfiguration: Equatable {
 
 extension ModelConfiguration.Identifier: Equatable {
 
+    /// Whether two identifiers are equal: two Hub ids with the same id and revision, or two
+    /// directories with the same URL.
+    ///
+    /// - Parameters:
+    ///   - lhs: one identifier.
+    ///   - rhs: the other identifier.
+    /// - Returns: `true` when the two identifiers name the same model source.
     public static func == (lhs: ModelConfiguration.Identifier, rhs: ModelConfiguration.Identifier)
         -> Bool
     {

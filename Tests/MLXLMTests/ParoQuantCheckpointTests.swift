@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import MLXScriptedLM
 import Testing
@@ -18,7 +19,7 @@ struct ParoQuantCheckpointTests {
             typeRegistry: ModelTypeRegistry(creators: [
                 "qwen3_5": { _ in CheckpointModel() }
             ]),
-            tokenizerLoader: TestTokenizerLoader())
+            tokenizerLoader: PseudoWordTokenizerLoader())
         try await container.perform { context in
             let model = try #require(context.model as? CheckpointModel)
             let layer = try #require(model.layer as? QuantizedLinear)
@@ -37,7 +38,7 @@ struct ParoQuantCheckpointTests {
                 typeRegistry: ModelTypeRegistry(creators: [
                     "qwen3_5": { _ in CheckpointModel() }
                 ]),
-                tokenizerLoader: TestTokenizerLoader())
+                tokenizerLoader: PseudoWordTokenizerLoader())
         }
     }
 
@@ -51,7 +52,7 @@ struct ParoQuantCheckpointTests {
                 typeRegistry: ModelTypeRegistry(creators: [
                     "qwen3_5": { _ in CheckpointModel(rejectTokenizer: true) }
                 ]),
-                tokenizerLoader: TestTokenizerLoader())
+                tokenizerLoader: PseudoWordTokenizerLoader())
         }
     }
 
@@ -96,12 +97,6 @@ struct ParoQuantCheckpointTests {
     private enum TestError: Error {
         case legacySanitizerCalled
         case incompatibleTokenizer
-    }
-
-    private struct TestTokenizerLoader: TokenizerLoader {
-        func load(from directory: URL) async throws -> any Tokenizer {
-            PseudoWordTokenizer()
-        }
     }
 
     private final class CheckpointModel: Module, LanguageModel, KVCacheDimensionProvider {

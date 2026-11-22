@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import MLXScriptedLM
 import Testing
@@ -74,12 +75,6 @@ struct HubSnapshotRepositoryIDTests {
         #expect(configuration.repositoryID == configuration.name)
     }
 
-    private struct TokenizerLoader: MLXLMCommon.TokenizerLoader {
-        func load(from directory: URL) async throws -> any Tokenizer {
-            PseudoWordTokenizer()
-        }
-    }
-
     /// A factory load of a hub-cache snapshot of an LFM2.5 reasoning checkpoint resolves the
     /// reasoning protocol of LFM2.5 from the repository id, as a load by that id does.
     @Test("A factory load of an LFM2.5 hub snapshot directory gets the LFM2.5 reasoning")
@@ -101,7 +96,7 @@ struct HubSnapshotRepositoryIDTests {
 
         let context = try await LLMModelFactory.shared._load(
             configuration: ResolvedModelConfiguration(directory: directory),
-            tokenizerLoader: TokenizerLoader())
+            tokenizerLoader: PseudoWordTokenizerLoader())
 
         #expect(context.configuration.reasoningConfig?.promptStrategy == .alwaysOn)
         #expect(context.configuration.reasoningConfig?.isSpecialToken == false)
