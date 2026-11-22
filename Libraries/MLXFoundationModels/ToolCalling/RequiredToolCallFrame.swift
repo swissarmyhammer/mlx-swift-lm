@@ -15,8 +15,9 @@ import MLXLMCommon
 /// A framed token protocol writes its tool calls only inside its own frames, thus the envelope
 /// would put the call outside the protocol of the model:
 ///
-/// - Inkling 2 (``ToolCallFormat/inkling``) gets a grammar of its own tool frame, and its
-///   think-then-call phase reasons inside a thinking frame that the turn opens for it.
+/// - Inkling 2 (``ToolCallFormat/inkling``) gets a grammar of its own tool frame, and a
+///   think-then-call phase, at every effort, inside a thinking frame that the turn opens for
+///   it.
 /// - Harmony (``ToolCallFormat/gptOSS``) and Onyx ATEM (``ToolCallFormat/atem``) have no
 ///   required-mode frame: a required turn of such a model throws
 ///   ``UnsupportedFormat`` before it generates.
@@ -92,6 +93,12 @@ enum RequiredToolCallFrame: Equatable {
     /// call. A required turn that reasons first opens the thinking frame for the model, thus
     /// the phase reasons inside the frame and closes it at `<|end_message|>`. Each marker is one
     /// special token, thus each encodes on its own.
+    ///
+    /// A frame with opener markers thinks before every call, at every effort: Inkling 2 still
+    /// writes a thinking frame at the effort `none` before it picks a tool, and a grammar that
+    /// opens the tool frame at once takes that step from it (measured on Inkling-2-Mini-4bit:
+    /// with the tool frame forced first, the effort `none` called `get_balance` with the example
+    /// id of its parameter description before `find_customer`).
     var reasoningOpenerMarkers: [String] {
         switch self {
         case .toolCallEnvelope: []

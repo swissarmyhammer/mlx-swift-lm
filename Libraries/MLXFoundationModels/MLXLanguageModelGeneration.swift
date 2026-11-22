@@ -262,13 +262,20 @@ extension MLXLanguageModel.Executor {
         } catch let unsupported as RequiredToolCallFrame.UnsupportedFormat {
             throw Self.unsupportedCapability(.toolCalling, unsupported.description)
         }
+        // A frame that opens the thinking for the model thinks before every
+        // call, at the rendered effort, even when the caller declared no
+        // reasoning; its thinking frames stream as reasoning, as the frame
+        // decoder streams them on the allowed path.
+        let requiredThinkThenCallConfig =
+            thinkThenCallConfig
+            ?? (frame.reasoningOpenerMarkers.isEmpty ? nil : resolved.reasoningConfig)
         try await runRequiredToolTurn(
             request: request,
             messages: messages,
             enabledToolDefinitions: enabledToolDefinitions,
             frame: frame,
             toolAwareRender: toolAwareRender,
-            thinkThenCallConfig: thinkThenCallConfig,
+            thinkThenCallConfig: requiredThinkThenCallConfig,
             modelID: modelID,
             requestedMaxTokens: requestedMaxTokens,
             samplingConfiguration: samplingConfiguration,

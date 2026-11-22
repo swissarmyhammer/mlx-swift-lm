@@ -297,14 +297,20 @@ struct InklingExecutorToolLoopTests {
         #expect(pass.responseText.isEmpty)
     }
 
-    @Test("a required pass without reasoning calls in the tool frame")
+    @Test("a required pass without declared reasoning still thinks in its frame, then calls")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func aRequiredPassWithoutReasoningCallsInTheToolFrame() async throws {
-        let pass = try await Self.respondRequired(
-            rounds: [Self.loop.callFrame("Rome") + Self.loop.tokens(.endSampling)],
-            capabilities: [.toolCalling], reasoningLevel: nil)
+    func aRequiredPassWithoutReasoningThinksThenCalls() async throws {
+        // The effort `none` still lets Inkling 2 think before it picks a tool, thus the turn
+        // opens the thinking frame for it as it does with reasoning declared.
+        let thinking =
+            [Self.tokenizer.token(Self.loop.reasoning)]
+            + Self.loop.tokens(.endMessage)
+        let call = Self.loop.callFrame("Rome") + Self.loop.tokens(.endSampling)
 
-        #expect(pass.reasoningText.isEmpty)
+        let pass = try await Self.respondRequired(
+            rounds: [thinking, call], capabilities: [.toolCalling], reasoningLevel: nil)
+
+        #expect(pass.reasoningText == Self.loop.reasoning)
         #expect(pass.toolCallNames == [InklingWeatherToolLoop.toolName])
         #expect(pass.toolCallArguments == [Self.romeArguments])
         #expect(pass.responseText.isEmpty)
