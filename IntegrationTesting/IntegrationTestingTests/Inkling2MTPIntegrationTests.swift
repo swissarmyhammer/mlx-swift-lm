@@ -21,6 +21,7 @@ import IntegrationTestHelpers
 import MLX
 import MLXHuggingFace
 import MLXLMCommon
+import MLXNN
 import MLXVLM
 import Testing
 import Tokenizers
