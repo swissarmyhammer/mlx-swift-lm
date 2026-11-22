@@ -89,6 +89,10 @@ func unweightedRMSNorm(_ x: MLXArray, eps: Float = normEpsilon) -> MLXArray {
 }
 
 /// Hides a constant `MLXArray` from `Module` parameter reflection.
+///
+/// The box is immutable: `value` is a `let` set once in `init` and never written, so sharing a
+/// box between tasks cannot race, and the `@unchecked Sendable` conformance rests on that.
+// swiftlint:disable:next no_unchecked_sendable `value` is a `let` set once in `init`, thus no task writes the box after it is shared.
 final class Inkling2ConstantBox: @unchecked Sendable {
     let value: MLXArray
     init(_ value: MLXArray) { self.value = value }

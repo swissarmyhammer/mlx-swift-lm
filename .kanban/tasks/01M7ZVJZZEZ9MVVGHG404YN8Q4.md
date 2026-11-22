@@ -94,6 +94,13 @@ comments:
     - files: Libraries/IntegrationTestHelpers/CollectedGeneration.swift (new), Libraries/IntegrationTestHelpers/MTPDivergence.swift, Tests/MLXFoundationModelsTests/CollectedGenerationTests.swift (new), IntegrationTesting/IntegrationTestingTests/{Inkling2Turn.swift (deleted), Inkling2CheckpointIntegrationTests.swift, Inkling2MTPIntegrationTests.swift, Inkling2ToolLoopIntegrationTests.swift, LFM2CheckpointIntegrationTests.swift}, Libraries/MLXVLM/Models/{Inkling2.swift, Inkling2Configuration.swift, Inkling2Layers.swift, Inkling2Attention.swift, Inkling2MoE.swift, Inkling2DecoderLayer.swift (new split files), Inkling2Draft.swift}
     - next: /review
   timestamp: 2026-11-22T00:59:52.190970+00:00
+- actor: claude-code
+  id: 01m80d16hfk2xbpm3t287vv5wv
+  text: |-
+    ### review — findings
+    - evidence: `review sha HEAD~1..HEAD` (f0ce3a2c): 62 findings confirmed, 10 refuted, 21 files attempted, 0 failed. The duplication validator ran on all six split Inkling2 files with no prompt-cap skip. Two findings are in scope here: Libraries/IntegrationTestHelpers/CollectedGeneration.swift:72 (completeness/public-output-contract, `.rejectedToolCall` dropped) and Libraries/MLXVLM/Models/Inkling2Layers.swift:92 (no_unchecked_sendable on the renamed `Inkling2ConstantBox`). The other 60 are on moved code (Inkling2Attention.swift:27/45/237, Inkling2Configuration.swift missing docs, Inkling2DecoderLayer.swift:548). They predate the split, none is serious, and they are filed on ^v51b4m7.
+    - next: fix the two in-scope items, then re-review with HEAD~1..HEAD.
+  timestamp: 2026-11-22T01:13:20.687879+00:00
 position_column: review
 position_ordinal: '80'
 title: 'Inkling 2 Mini: MTP block drafter (mtp.safetensors) in the fork''s speculative framework'
@@ -223,3 +230,107 @@ Acceptance:
 - [x] `Libraries/IntegrationTestHelpers/MTPDivergence.swift:48` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'description'.
 - [x] `Libraries/IntegrationTestHelpers/TokenIteratorDrain.swift:10` `reuse/reuse` — The new shared `drain` reimplements a `drain` that already exists in the LFM2 suite. The change added the shared copy and left the original in place, so there are now two implementations of the same loop. Delete the private `drain` in `LFM2CheckpointIntegrationTests.swift` and call the shared `drain` from `IntegrationTestHelpers`.
 - [x] `Libraries/MLXVLM/Models/Inkling2.swift:1` `review-engine/prompt-cap` — This file exceeds the review prompt cap — 318936 rendered bytes against the 262144-byte per-file cap — so these validators could not review it: duplication. Split the file into smaller modules that fit the review prompt cap.
+
+## Review Findings (2026-11-21 19:00)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 15 file(s) reviewed, 6 not reviewed.
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7ZVJZZEZ9MVVGHG404YN8Q4.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7ZVJZZEZ9MVVGHG404YN8Q4.md` — no validator matches this file
+> - `.kanban/tasks/01M8094SSN7KYTQGDFV1T0JAGR.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8094SSN7KYTQGDFV1T0JAGR.md` — no validator matches this file
+> - `.kanban/tasks/01M80C847TB6W1435N94Z5DF0D.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M80C847TB6W1435N94Z5DF0D.md` — no validator matches this file
+
+> ⚠️ tool rule 'code-hygiene/disallowed-constructs-swift' declined an item — it judged the rest of the code, and this it could not judge:
+> disallowed-constructs-swift found no file at IntegrationTesting/IntegrationTestingTests/Inkling2Turn.swift, so its constructs are unread
+
+> ⚠️ tool rule 'code-hygiene/function-length-swift' declined an item — it judged the rest of the code, and this it could not judge:
+> function-length-swift found no file at IntegrationTesting/IntegrationTestingTests/Inkling2Turn.swift, so its bodies are unread
+
+> ⚠️ tool rule 'code-hygiene/idioms-swift' declined an item — it judged the rest of the code, and this it could not judge:
+> idioms-swift found no file at IntegrationTesting/IntegrationTestingTests/Inkling2Turn.swift, so its declarations are unread
+
+> ⚠️ tool rule 'code-hygiene/magic-numbers-swift' declined an item — it judged the rest of the code, and this it could not judge:
+> magic-numbers-swift found no file at IntegrationTesting/IntegrationTestingTests/Inkling2Turn.swift, so its literals are unread
+
+> ⚠️ tool rule 'code-hygiene/missing-docs-swift' declined an item — it judged the rest of the code, and this it could not judge:
+> missing-docs-swift found no file at IntegrationTesting/IntegrationTestingTests/Inkling2Turn.swift, so its declarations are unread
+
+- [x] `Libraries/IntegrationTestHelpers/CollectedGeneration.swift:72` `completeness/public-output-contract` — `record(_:)` silently discards `.rejectedToolCall` events. The shared collector is new in this change, so the drop is not inherited from older behaviour. A tool call the model made and the session rejected leaves no trace in `CollectedGeneration`, so `toolCalls`, `text` and `summary` look as if the model never tried the call. The integration tests that read these values (the tool-loop and tool-call tests) cannot tell a rejected call from a call that never happened, and their failure messages lose the reason. Keep rejected calls in a separate `rejectedToolCalls` array on `CollectedGeneration` and include them in `passSummary` or the failure messages. At minimum, record them with `Issue.record` or a log line, so a rejected tool call is visible in the test output. Keep `.steering` as a deliberate no-op only if it has no bearing on what the tests assert.
+- [x] `Libraries/MLXVLM/Models/Inkling2Attention.swift:27` `duplication/duplication` — `l2ClipScaled` repeats the body of `l2Clip` line for line: the float32 scale, the L2 norm, and the clip against `threshold / (norm + normEpsilon)`. It differs only by the trailing `tau` scaling. The two copies will drift when the clip math changes, and a fix to one will be missed in the other. Extract a shared plain helper, for example `clippedStates(_ x: MLXArray, scale: MLXArray, threshold: MLXArray) -> MLXArray` that returns the float32 clipped states before the dtype cast. Call it from `l2Clip` and from `l2ClipScaled`, and keep only the `tau` scaling and the rounding in `l2ClipScaled`.
+- [x] `Libraries/MLXVLM/Models/Inkling2Attention.swift:45` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
+- [x] `Libraries/MLXVLM/Models/Inkling2Attention.swift:237` `duplication/duplication` — The value-convolution fusion block in `prepareFusedProjections` is a copy of the key-convolution block directly above it. Only the names differ (`dynamicKeyConvolution`/`fusedKey`/`keyProj`/`k_proj` against `dynamicValueConvolution`/`fusedValue`/`valueProj`/`v_proj`). The two copies must stay in lockstep for the prepare, view-install and cache-invalidation sequence to remain correct. Extract a private helper, for example `prepareConvolutionProjection(_ convolution: Inkling2DynamicShortConvolution?, linear: Linear, cache: FusedQuantizedLinearProjectionCache, key: String)`, that runs the prepare call and installs the `<key>` and `weight_proj` views. Call it once for the key and once for the value.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:9` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'Inkling2LoopConfiguration'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:10` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'coreStart'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:11` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'coreEnd'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:12` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'passes'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:13` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'gateRank'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:22` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'core'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:25` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'Inkling2TextConfiguration'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:26` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'hiddenSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:27` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'hiddenLayers'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:28` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'vocabularySize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:29` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'unpaddedVocabularySize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:30` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'attentionHeads'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:31` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'kvHeads'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:32` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'headDim'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:33` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'slidingAttentionHeads'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:34` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'slidingKVHeads'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:35` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'slidingHeadDim'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:36` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'slidingWindow'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:37` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'localLayerIds'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:38` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'relativeDim'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:39` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'relativeExtent'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:40` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'logScalingFloor'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:41` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'logScalingAlpha'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:42` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'rmsNormEps'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:43` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'qkClipThreshold'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:44` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'relativeClipThreshold'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:45` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'convolutionKernelSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:46` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'layersPerBlock'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:47` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'experts'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:48` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'expertsPerToken'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:49` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'intermediateSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:50` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'gateSoftcap'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:51` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'upSoftcap'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:52` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'routeScale'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:53` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'finalLogitSoftcap'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:54` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'loop'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:91` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'init'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:139` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'Inkling2VisionConfiguration'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:140` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'hiddenSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:141` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'hiddenLayers'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:142` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'attentionHeads'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:143` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'patchSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:144` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'mergeSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:145` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'positionGridSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:146` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'projectionHiddenSize'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:147` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'projectorBias'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:148` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'mlpRatio'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:149` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'layerNormEps'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:150` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'ropeTheta'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:166` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'init'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:212` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'Inkling2Configuration'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:213` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'modelType'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:214` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'textConfiguration'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:215` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'visionConfiguration'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:216` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'imageTokenId'.
+- [x] `Libraries/MLXVLM/Models/Inkling2Configuration.swift:231` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'init'.
+- [x] `Libraries/MLXVLM/Models/Inkling2DecoderLayer.swift:548` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
+- [x] `Libraries/MLXVLM/Models/Inkling2Layers.swift:92` `code-hygiene/disallowed-constructs-swift` — no_unchecked_sendable: Instead of @unchecked Sendable, write a plain Sendable conformance or a @preconcurrency import. If the type really must be @unchecked Sendable, write // swiftlint:disable:next no_unchecked_sendable above it with the synchronization invariant that makes the type thread-safe.
+
+### Scope triage (2026-11-21 19:00 section)
+
+Per the user's scope rule for f0ce3a2c (lines the commit changed are in scope; code it only moved is out of scope unless serious, and goes to a follow-up card):
+
+- In scope for this card (2): `Libraries/IntegrationTestHelpers/CollectedGeneration.swift:72` (new file), and `Libraries/MLXVLM/Models/Inkling2Layers.swift:92` (this commit renamed `ConstantBox` to `Inkling2ConstantBox` and widened it from `private`, so the line changed).
+- Moved code, tracked on ^v51b4m7 (60): `Inkling2Attention.swift:27`, `:45`, `:237`; every `Inkling2Configuration.swift` item (`:9` through `:231`); `Inkling2DecoderLayer.swift:548`. Each is byte-for-byte the same as in `Inkling2.swift` at f0ce3a2c~1. None is a correctness defect, so none was judged serious. Check these off here once ^v51b4m7 holds them.
+
+### Resolution (2026-11-21, 19:00 section)
+
+- `CollectedGeneration.swift:72`: fixed. `rejectedToolCalls` keeps each rejected call apart from `toolCalls`, and `summary` (which the tool-loop `passSummary` and the checkpoint failure messages print) names their count. Two tests in `CollectedGenerationTests` cover it.
+- `Inkling2Layers.swift:92`: fixed. `Inkling2ConstantBox` keeps `@unchecked Sendable` with a `swiftlint:disable:next no_unchecked_sendable` naming its invariant: `value` is a `let` set once in `init`.
+- The other 60 items predate the split and are tracked on ^v51b4m7; checked here as moved.
+- Tests: all 5 bundles pass (MLXLMTests 1258 XCTest + 2561 Swift Testing with the 3 known issues; MLXFoundationModelsTests 570; MLXGuidedGenerationTests 86; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11).

@@ -62,4 +62,28 @@ struct CollectedGenerationTests {
         let passes = try await CollectedGeneration.collectPasses(Self.toolLoopStream())
         #expect(passes.map(\.text) == ["", "the answer"])
     }
+
+    /// One pass whose tool call the session rejected.
+    private static func rejectedCallStream() -> AsyncThrowingStream<Generation, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(
+                .rejectedToolCall(
+                    RejectedToolCall(
+                        reason: .undeclaredTool, format: .inkling, toolName: "missing",
+                        rawText: "missing()")))
+            continuation.yield(.info(info(generated: firstPassTokens)))
+            continuation.finish()
+        }
+    }
+
+    @Test func collectKeepsTheRejectedToolCallsApartFromTheToolCalls() async throws {
+        let turn = try await CollectedGeneration.collect(Self.rejectedCallStream())
+        #expect(turn.rejectedToolCalls.map(\.toolName) == ["missing"])
+        #expect(turn.toolCalls.isEmpty)
+    }
+
+    @Test func summaryNamesTheRejectedToolCalls() async throws {
+        let turn = try await CollectedGeneration.collect(Self.rejectedCallStream())
+        #expect(turn.summary.hasSuffix("1 rejected tool call(s)"))
+    }
 }

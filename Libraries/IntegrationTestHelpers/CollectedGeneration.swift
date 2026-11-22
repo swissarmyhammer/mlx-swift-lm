@@ -15,6 +15,8 @@ public struct CollectedGeneration {
     public var reasoning = ""
     /// The tool calls the stream carried, in order.
     public var toolCalls: [ToolCall] = []
+    /// The tool calls the session rejected, in order. They are not in ``toolCalls``.
+    public var rejectedToolCalls: [RejectedToolCall] = []
     /// The last completion info the stream carried, or `nil` when it carried none.
     public var info: GenerateCompletionInfo?
 
@@ -52,24 +54,29 @@ public struct CollectedGeneration {
         return passes
     }
 
-    /// One line that names the token counts and the rates of the completion info.
+    /// One line that names the token counts and the rates of the completion info, and the
+    /// number of rejected tool calls when there are any.
     public var summary: String {
-        guard let info else { return "no completion info" }
+        let rejected =
+            rejectedToolCalls.isEmpty ? "" : ", \(rejectedToolCalls.count) rejected tool call(s)"
+        guard let info else { return "no completion info" + rejected }
         return
             "prompt \(info.promptTokenCount) tok (cached \(info.cachedPromptTokenCount)), "
             + "prefill \(String(format: "%.1f", info.promptTokensPerSecond)) tok/s, "
             + "generated \(info.generationTokenCount) tok, "
-            + "decode \(String(format: "%.1f", info.tokensPerSecond)) tok/s"
+            + "decode \(String(format: "%.1f", info.tokensPerSecond)) tok/s" + rejected
     }
 
-    /// Adds the text, the reasoning, the tool call or the completion info of `event`.
+    /// Adds the text, the reasoning, the tool call, the rejected tool call or the completion
+    /// info of `event`.
     private mutating func record(_ event: Generation) {
         switch event {
         case .chunk(let chunk): text += chunk
         case .reasoning(let chunk): reasoning += chunk
         case .toolCall(let call): toolCalls.append(call)
+        case .rejectedToolCall(let rejection): rejectedToolCalls.append(rejection)
         case .info(let completion): info = completion
-        case .rejectedToolCall, .steering: break
+        case .steering: break
         }
     }
 }
