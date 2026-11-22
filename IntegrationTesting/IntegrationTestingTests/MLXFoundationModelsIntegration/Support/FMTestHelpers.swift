@@ -42,6 +42,18 @@ var fixturesBundle: Bundle { Bundle(for: FixturesBundleToken.self) }
 // SmallTokenizer — all of which live outside the gate — for tests that
 // exercise xgrammar / MLXLMCommon directly.
 
+// MARK: - Duration convenience
+
+extension Duration {
+    /// The attoseconds in one second.
+    private static let attosecondsPerSecond = 1e18
+
+    /// Total seconds as a Double, combining the seconds and attoseconds components.
+    var seconds: Double {
+        Double(components.seconds) + Double(components.attoseconds) / Self.attosecondsPerSecond
+    }
+}
+
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 /// Constructs an `MLXLanguageModel` using the production test downloader /
@@ -148,11 +160,22 @@ func loadTestModelContainer(id: String) async throws -> ModelContainer {
 /// into — the two must agree so `MLXLanguageModel.modelExistsOnDisk()` can
 /// probe for `config.json`.
 func testWeightsLocation(modelID: String) -> URL {
+    testWeightsLocation(modelID: modelID, revision: nil)
+}
+
+/// The weights directory of `modelID` at `revision`, through the lookup of
+/// ``testWeightsLocation(modelID:)``: the `weightsLocation:` of a suite that pins its checkpoint.
+///
+/// - Parameters:
+///   - modelID: The Hugging Face id of the checkpoint.
+///   - revision: The commit hash a suite pins, or `nil` for the snapshot `main` resolves to.
+/// - Returns: The snapshot directory, or the repo directory when the cache holds no snapshot.
+func testWeightsLocation(modelID: String, revision: String?) -> URL {
     let cache = HuggingFace.HubCache.default
     guard let repo = HuggingFace.Repo.ID(rawValue: modelID) else {
         return cache.cacheDirectory
     }
-    if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+    if let commit = revision ?? cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
         let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit)
     {
         return snapshot

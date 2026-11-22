@@ -40,9 +40,38 @@ package struct MTPDrafterFallback: Sendable, Equatable {
         of drafter: any MTPDrafterModel, with target: any LanguageModel
     ) -> MTPDrafterFallback? {
         guard !drafter.isCompatible(with: target) else { return nil }
-        let fallback = MTPDrafterFallback(
-            reason: .incompatibleDrafter,
-            statedReason: statedIncompatibility(of: drafter, with: target))
+        return reported(
+            .incompatibleDrafter, statedReason: statedIncompatibility(of: drafter, with: target))
+    }
+
+    /// The ``SpeculativeDecodingFallbackReason/unsupportedCache`` fallback of `drafter` on
+    /// `target`, whose cache can neither verify a round in place nor stage one, logged once for
+    /// each drafter and target.
+    ///
+    /// - Parameters:
+    ///   - drafter: The configured MTP drafter.
+    ///   - target: The model the generation decodes with.
+    /// - Returns: The fallback.
+    package static func unsupportedCache(
+        of drafter: any MTPDrafterModel, on target: any LanguageModel
+    ) -> MTPDrafterFallback {
+        reported(
+            .unsupportedCache,
+            statedReason: "the cache of the target \(type(of: target)) can neither verify nor "
+                + "stage a round of the MTP drafter \(type(of: drafter)), so the generation "
+                + "decodes without speculation")
+    }
+
+    /// A fallback of `reason`, which ``MTPDrafterFallbackLog/shared`` logs once.
+    ///
+    /// - Parameters:
+    ///   - reason: The kind of the fallback.
+    ///   - statedReason: The fallback in words.
+    /// - Returns: The fallback.
+    private static func reported(
+        _ reason: SpeculativeDecodingFallbackReason, statedReason: String
+    ) -> MTPDrafterFallback {
+        let fallback = MTPDrafterFallback(reason: reason, statedReason: statedReason)
         MTPDrafterFallbackLog.shared.report(fallback)
         return fallback
     }

@@ -29,10 +29,10 @@ import Tokenizers
 // MARK: - Pinned drafter and shape
 
 /// The revision of 2026-11-21 of the oQ4e Inkling 2 Mini checkpoint that ships the DSpark head.
-private let inkling2MiniOQ4eMTPRevision = "3eea042751cd296b7266628a8342c1749242e1fe"
+let inkling2MiniOQ4eMTPRevision = "3eea042751cd296b7266628a8342c1749242e1fe"
 
 /// The DSpark head of Inkling 2 Mini, at ``inkling2MiniOQ4eMTPRevision``.
-private let inkling2MiniDrafter = ModelConfiguration(
+let inkling2MiniDrafter = ModelConfiguration(
     id: MTPDrafterRegistry.inkling2_mini_oq4e_mtp.name, revision: inkling2MiniOQ4eMTPRevision)
 
 /// The oQ4e checkpoint as a target: its weights in the oMLX layout, which

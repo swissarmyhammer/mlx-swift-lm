@@ -872,6 +872,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// (`ExecutorPromptCachePlan.commitOutcome`), thus the next turn
         /// reuses what the caches hold either way.
         ///
+        /// A pass that its protocol decoder ends before its generation ends
+        /// (``ProtocolPassStop``) counts the tokens the generation produced
+        /// after the stop too: the caches hold them, and so does the ledger.
+        ///
         /// - Parameter info: the completion report of the pass.
         /// - Returns: the generated token count, with the stop token.
         static func generatedTokenCount(of info: GenerateCompletionInfo) -> Int {
@@ -996,13 +1000,41 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// close before the budget runs out.
         static let completionReserveStructuralMultiplier = 3
 
-        /// Divisor on the token budget. The completion reserve keeps at
-        /// least this fraction (one quarter) of the budget.
-        static let completionReserveBudgetDivisor = 4
+        /// Divisor on the token budget that sets the floor of the completion
+        /// reserve: the soft zone keeps at least this fraction (one quarter)
+        /// of the budget.
+        static let completionReserveBudgetFloorDivisor = 4
 
         /// Multiplier on the structural reserve that sets the hard reserve,
         /// the point where the guided loop forces structural close.
         static let hardReserveStructuralMultiplier = 8
+
+        /// Divisor on the token budget that caps the hard reserve: the hard
+        /// zone takes at most this fraction (one quarter) of the budget,
+        /// unless ``hardReserveStructuralFloorMultiplier`` needs more.
+        static let hardReserveBudgetCeilingDivisor = 4
+
+        /// Multiplier on the structural reserve that sets the floor of the
+        /// hard reserve: the budget cap never cuts the hard zone below this
+        /// many times the shortest valid output, the room the pass needs to
+        /// close from wherever the hard zone finds it.
+        ///
+        /// The shortest valid output takes more tokens than
+        /// ``CompletionReserve`` estimates (the model writes ` :` and ` ,` as
+        /// tokens of their own), thus the floor carries a margin. Measured on
+        /// Gemma with `HardReserveStressTests`, four schema tiers at budgets
+        /// of 4, 8 and 16 times the shortest output: a floor of 1 ended in
+        /// incomplete output at 4 times, a floor of 2 completed every pass of
+        /// one run, and a floor of 3 completed every pass with one more
+        /// shortest output of margin. The trade: a budget of 3 times the
+        /// shortest output or less runs wholly in the hard zone, and writes
+        /// its strings short or empty, rather than ending in incomplete output.
+        static let hardReserveStructuralFloorMultiplier = 3
+
+        /// Divisor on the token budget that caps the completion reserve: the
+        /// soft zone takes at most this fraction (one half) of the budget,
+        /// unless the hard zone alone takes more.
+        static let completionReserveBudgetCeilingDivisor = 2
 
         /// Names the session a request belongs to, for the prompt cache that
         /// session carries between its turns.
@@ -1457,9 +1489,24 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         baselineInput: input,
                         context: context)
 
+                    // A schema pass of a model that writes the header of its answer itself
+                    // starts after that header. That prompt is a second render, thus it is
+                    // made only where a schema pass runs (required tool mode runs none); the
+                    // thinking-off gate of that render throws here, before any generation.
+                    if schemaJSON != nil {
+                        try Self.checkSchemaInput(resolved: resolved)
+                    }
+                    let schemaMessages = promptMessages.withSchema
+
                     try await dispatchGeneration(
-                        turn, messages: messages, input: input, reasoningPlan: reasoningPlan,
-                        resolved: resolved, speculation: speculation, context: context)
+                        turn, messages: messages, input: input,
+                        schemaInput: {
+                            try await Self.schemaInput(
+                                messages: schemaMessages, input: input, resolved: resolved,
+                                context: context)
+                        },
+                        reasoningPlan: reasoningPlan, resolved: resolved, speculation: speculation,
+                        context: context)
 
                     Stream.gpu.synchronize()
                 }
@@ -1546,6 +1593,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - turn: The values of the call.
         ///   - messages: The chat messages the prompt renders from.
         ///   - input: The prompt rendered with no thinking state.
+        ///   - schemaInput: Makes the prompt of a schema pass
+        ///     (``schemaInput(messages:input:resolved:context:)``). Only a path that runs a
+        ///     schema pass calls it.
         ///   - reasoningPlan: The reasoning inputs of the text path.
         ///   - resolved: The resolver-patched configuration of the call.
         ///   - speculation: The MTP drafter of the model, or nil.
@@ -1553,6 +1603,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Throws: The error of the generation path.
         private func dispatchGeneration(
             _ turn: RespondTurn, messages: [Chat.Message], input: LMInput,
+            schemaInput: () async throws -> LMInput,
             reasoningPlan: ReasoningPlan, resolved: ModelConfiguration,
             speculation: MTPSpeculation?, context: ModelContext
         ) async throws {
@@ -1572,7 +1623,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     enabledToolDefinitions: turn.enabledToolDefinitions,
                     toolCallingMode: turn.toolCallingMode,
                     schemaJSON: turn.schemaJSON,
-                    baselineInput: input,
+                    schemaInput: schemaInput,
                     resolved: resolved,
                     declaresReasoning: turn.declaresReasoning,
                     modelID: turn.modelID,
@@ -1588,7 +1639,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else if let schemaJSON = turn.schemaJSON {
                 try await runSchemaGeneration(
                     schemaJSON: schemaJSON,
-                    input: input,
+                    input: try await schemaInput(),
                     modelID: turn.modelID,
                     requestedMaxTokens: turn.requestedMaxTokens,
                     entryID: turn.entryID,

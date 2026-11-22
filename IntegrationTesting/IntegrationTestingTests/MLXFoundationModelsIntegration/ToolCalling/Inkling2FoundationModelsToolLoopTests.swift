@@ -19,7 +19,6 @@
 
 import Foundation
 import FoundationModels
-import HuggingFace
 import MLX
 import MLXLMCommon
 import Testing
@@ -32,7 +31,7 @@ import os
 /// The argument of the customer tool.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
-private struct FindCustomerArguments {
+struct FindCustomerArguments {
     @Guide(description: "The full name of the customer")
     var name: String
 }
@@ -40,14 +39,14 @@ private struct FindCustomerArguments {
 /// The argument of the balance tool.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
-private struct GetBalanceArguments {
+struct GetBalanceArguments {
     @Guide(description: "The customer id, for example C-1000")
     var customerId: String
 }
 
 /// The customer tool of a `LanguageModelSession`.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private struct FindCustomerTool: FoundationModels.Tool {
+struct FindCustomerTool: FoundationModels.Tool {
     let name = Inkling2BankFixture.findCustomerTool
     let description = Inkling2BankFixture.findCustomerDescription
     let log: Inkling2ToolCallLog
@@ -59,7 +58,7 @@ private struct FindCustomerTool: FoundationModels.Tool {
 
 /// The balance tool of a `LanguageModelSession`.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private struct GetBalanceTool: FoundationModels.Tool {
+struct GetBalanceTool: FoundationModels.Tool {
     let name = Inkling2BankFixture.getBalanceTool
     let description = Inkling2BankFixture.getBalanceDescription
     let log: Inkling2ToolCallLog
@@ -136,18 +135,6 @@ struct Inkling2FoundationModelsToolLoopTests {
             toolCallingMode: mode)
     }
 
-    /// The snapshot directory of the pinned checkpoint in the Hugging Face cache.
-    private static func snapshotDirectory(modelID: String) -> URL {
-        let cache = HuggingFace.HubCache.default
-        guard let repo = HuggingFace.Repo.ID(rawValue: modelID),
-            let snapshot = try? cache.snapshotPath(
-                repo: repo, kind: .model, commitHash: inkling2Mini4BitRevision)
-        else {
-            return cache.cacheDirectory
-        }
-        return snapshot
-    }
-
     /// The model of the pinned checkpoint. Thinking off is a model that does not declare
     /// `.reasoning`, which the executor renders with the thinking effort `none`.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -155,7 +142,9 @@ struct Inkling2FoundationModelsToolLoopTests {
         MLXLanguageModel(
             configuration: inkling2Mini4Bit,
             capabilities: thinking ? [.reasoning, .toolCalling] : [.toolCalling],
-            weightsLocation: { snapshotDirectory(modelID: $0) },
+            weightsLocation: {
+                testWeightsLocation(modelID: $0, revision: inkling2Mini4BitRevision)
+            },
             load: { _, _ in try await Inkling2MiniCheckpoint.shared.container() })
     }
 

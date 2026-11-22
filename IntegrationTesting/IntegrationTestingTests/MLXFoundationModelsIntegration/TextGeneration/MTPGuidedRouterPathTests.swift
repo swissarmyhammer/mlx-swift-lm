@@ -154,9 +154,7 @@ struct MTPGuidedRouterPathTests {
                 options: GenerationOptions(
                     samplingMode: .greedy, maximumResponseTokens: responseTokenBudget))
         }
-        let elapsed = (ContinuousClock.now - start).components
-        return Turn(
-            sink: sink, seconds: Double(elapsed.seconds) + Double(elapsed.attoseconds) * 1e-18)
+        return Turn(sink: sink, seconds: (ContinuousClock.now - start).seconds)
     }
 
     /// Where the decisions of `run` first part from the decisions of `plain`, with plain's margin

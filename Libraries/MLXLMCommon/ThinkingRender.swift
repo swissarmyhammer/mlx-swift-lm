@@ -116,16 +116,49 @@ public struct ThinkingRender: Sendable {
     private static func closingReasoning(
         of input: LMInput, config: ReasoningConfig, block: String, tokenizer: any Tokenizer
     ) -> LMInput {
-        let promptTokens = input.text.tokens
-        let closed = config.closingReasoning(
-            in: promptTokens.asArray(Int.self), with: block, tokenizer: tokenizer)
-        var closedTokens = MLXArray(closed.map { Int32($0) }).asType(promptTokens.dtype)
-        if promptTokens.ndim == LMInput.Text.batchedTokenRank {
-            closedTokens = closedTokens[.newAxis, 0...]
+        replacingTokens(of: input) {
+            config.closingReasoning(in: $0, with: block, tokenizer: tokenizer)
         }
-        let closedMask = input.text.mask.map { ones(like: closedTokens).asType($0.dtype) }
+    }
+
+    /// `input` with the ``ReasoningConfig/answerOpening`` of `config` after its tokens, in the
+    /// rank and the mask presence of `input`, thus a pass that constrains the answer starts its
+    /// grammar where the answer starts.
+    ///
+    /// - Parameters:
+    ///   - input: the prepared prompt with thinking off.
+    ///   - config: the reasoning protocol whose answer opening ends the prompt.
+    ///   - tokenizer: the tokenizer of the model.
+    /// - Returns: the prompt that ends with the answer opening, or `input` unchanged when
+    ///   `config` declares none.
+    public static func openingAnswer(
+        of input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
+    ) -> LMInput {
+        guard config.answerOpening != nil else { return input }
+        return replacingTokens(of: input) {
+            config.openingAnswer(after: $0, tokenizer: tokenizer)
+        }
+    }
+
+    /// `input` with the tokens `transform` makes from its tokens, in the rank and the mask
+    /// presence of `input`, thus the model sees the shape its processor makes.
+    ///
+    /// - Parameters:
+    ///   - input: the prepared prompt.
+    ///   - transform: makes the new tokens of the prompt from its tokens.
+    /// - Returns: the prompt with the new tokens and the media of `input`.
+    private static func replacingTokens(
+        of input: LMInput, with transform: ([Int]) -> [Int]
+    ) -> LMInput {
+        let promptTokens = input.text.tokens
+        let replaced = transform(promptTokens.asArray(Int.self))
+        var replacedTokens = MLXArray(replaced.map { Int32($0) }).asType(promptTokens.dtype)
+        if promptTokens.ndim == LMInput.Text.batchedTokenRank {
+            replacedTokens = replacedTokens[.newAxis, 0...]
+        }
+        let replacedMask = input.text.mask.map { ones(like: replacedTokens).asType($0.dtype) }
         return LMInput(
-            text: .init(tokens: closedTokens, mask: closedMask),
+            text: .init(tokens: replacedTokens, mask: replacedMask),
             image: input.image, video: input.video, audio: input.audio)
     }
 }

@@ -266,6 +266,19 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// model. The default `false` leaves every other protocol unchanged.
     public var masksEndDelimiterAfterClose = false
 
+    /// The text the model writes right after the prompt to open its answer when thinking is
+    /// off, or `nil` when the prompt of the template already ends where the answer starts.
+    ///
+    /// A pass that constrains the answer with a grammar appends this text to its prompt
+    /// (``openingAnswer(after:tokenizer:)``), thus the grammar starts where the answer starts
+    /// and not where the model writes the header of its message. Set it only for a template
+    /// that writes no generation prompt: Inkling 2 opens its own `<|message_model|>` frame,
+    /// and then `<|content_text|>`, after the prompt. A grammar that started at the end of
+    /// that prompt would forbid the header the model was trained to write, and the model then
+    /// fills every string of the schema with the JSON punctuation it can still choose. The
+    /// default `nil` leaves the prompt of every other protocol unchanged.
+    public var answerOpening: String?
+
     /// Creates a reasoning protocol.
     ///
     /// - Parameters:
@@ -361,6 +374,23 @@ public struct ReasoningConfig: Sendable, Equatable {
         isSpecialToken: true,
         implicitEndDelimiters: ["<|tool_call>"],
         channel: .gemma4)
+}
+
+// MARK: - Opening the answer after a prompt
+
+extension ReasoningConfig {
+
+    /// The tokens of a rendered prompt, with the tokens of ``answerOpening`` after them.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of a render with thinking off.
+    ///   - tokenizer: the tokenizer of the model.
+    /// - Returns: the tokens of the prompt that ends where the answer starts: `promptTokens`
+    ///   unchanged when the protocol declares no ``answerOpening``.
+    public func openingAnswer(after promptTokens: [Int], tokenizer: any Tokenizer) -> [Int] {
+        guard let answerOpening else { return promptTokens }
+        return promptTokens + tokenizer.encode(text: answerOpening, addSpecialTokens: false)
+    }
 }
 
 // MARK: - Closing the reasoning of a prompt

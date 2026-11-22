@@ -1,9 +1,10 @@
 // Copyright © 2025 Apple Inc.
 
 import MLX
-import MLXGuidedGeneration
 import MLXLMCommon
 import Testing
+
+@testable import MLXGuidedGeneration
 
 // MARK: - Stub Tokenizer
 
@@ -53,12 +54,12 @@ struct ClosingTokenBiasTests {
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
         let values = bias.asArray(Float.self)
 
-        #expect(values[0] == 100.0)  // "
-        #expect(values[1] == 100.0)  // }
-        #expect(values[2] == 100.0)  // ]
-        #expect(values[3] == 100.0)  // 0
-        #expect(values[4] == 100.0)  // 5
-        #expect(values[5] == 100.0)  // 9
+        #expect(values[0] == ClosingTokenBias.tier2Bias)  // "
+        #expect(values[1] == ClosingTokenBias.tier2Bias)  // }
+        #expect(values[2] == ClosingTokenBias.tier2Bias)  // ]
+        #expect(values[3] == ClosingTokenBias.tier2Bias)  // 0
+        #expect(values[4] == ClosingTokenBias.tier2Bias)  // 5
+        #expect(values[5] == ClosingTokenBias.tier2Bias)  // 9
         #expect(values[6] == 0.0)  // abc
     }
 
@@ -72,8 +73,8 @@ struct ClosingTokenBiasTests {
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 1)
         let values = bias.asArray(Float.self)
 
-        #expect(values[0] == 100.0)  // tier 2 only
-        #expect(values[1] == 200.0)  // EOS
+        #expect(values[0] == ClosingTokenBias.tier2Bias)  // tier 2 only
+        #expect(values[1] == ClosingTokenBias.tier1Bias)  // EOS
         #expect(values[2] == 0.0)
     }
 
@@ -87,7 +88,7 @@ struct ClosingTokenBiasTests {
         let values = bias.asArray(Float.self)
 
         // EOS bias overrides tier-2
-        #expect(values[0] == 200.0)
+        #expect(values[0] == ClosingTokenBias.tier1Bias)
         #expect(values[1] == 0.0)
     }
 
@@ -122,6 +123,6 @@ struct ClosingTokenBiasTests {
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 0.0)
-        #expect(values[1] == 100.0)  // tier 2 still applies
+        #expect(values[1] == ClosingTokenBias.tier2Bias)  // tier 2 still applies
     }
 }

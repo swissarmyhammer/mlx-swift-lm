@@ -12,7 +12,20 @@ struct MTPSpeculationModeTests {
     }
 
     @Test func passthroughKeepsItsReason() {
-        #expect(MTPSpeculationMode.passthrough(reason: "stood down").reason == "stood down")
+        #expect(
+            MTPSpeculationMode.passthrough(reason: "stood down", fallback: .unsupportedSampling)
+                .reason == "stood down")
+    }
+
+    @Test func passthroughKeepsTheKindOfItsFallback() {
+        #expect(
+            MTPSpeculationMode.passthrough(reason: "stood down", fallback: .unsupportedSampling)
+                .fallback == .unsupportedSampling)
+    }
+
+    @Test func onlyPassthroughHasAFallback() {
+        #expect(MTPSpeculationMode.speculating.fallback == nil)
+        #expect(MTPSpeculationMode.continuationDiscarded(reason: "lost").fallback == nil)
     }
 
     @Test func aDiscardedContinuationKeepsItsReason() {
@@ -20,7 +33,9 @@ struct MTPSpeculationModeTests {
     }
 
     @Test func onlyPassthroughDecodesPlainly() {
-        #expect(MTPSpeculationMode.passthrough(reason: "stood down").decodesPlainly)
+        #expect(
+            MTPSpeculationMode.passthrough(reason: "stood down", fallback: .unavailableContinuation)
+                .decodesPlainly)
     }
 
     @Test func aDiscardedContinuationDoesNotDecodePlainly() {

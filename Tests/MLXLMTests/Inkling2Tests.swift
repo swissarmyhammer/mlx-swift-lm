@@ -573,44 +573,7 @@ struct Inkling2ModelTests {
     ///   - bfloat16: whether the model runs in bfloat16 as a loaded checkpoint does.
     ///   - json: the `config.json` of the model, by default ``tinyJSON``.
     static func makeModel(bfloat16: Bool = false, json: String = tinyJSON) throws -> Inkling2 {
-        let config = try JSONDecoder().decode(
-            Inkling2Configuration.self, from: Data(json.utf8))
-        let model = Inkling2(config)
-        MLXRandom.seed(5)
-        var parameters = [String: MLXArray]()
-        for (key, value) in model.parameters().flattened() where value.dtype == .float32 {
-            parameters[key] = MLXRandom.normal(value.shape) * 0.3
-        }
-        for (key, value) in model.parameters().flattened() where key.hasSuffix(".global_scale") {
-            parameters[key] = MLXArray.ones(value.shape)
-        }
-        for (key, value) in model.parameters().flattened()
-        where key.hasSuffix("_proj.weight") && value.dtype == .uint32 {
-            let prefix = String(key.dropLast(".weight".count))
-            let (rows, packed) = (value.dim(1), value.dim(2))
-            let dense = MLXRandom.normal([value.dim(0), rows, packed * 8]) * 0.3
-            let (weight, scales, _) = MLX.quantized(
-                dense, groupSize: 16, bits: 4, mode: .nvfp4)
-            parameters[key] = weight
-            parameters["\(prefix).scales"] = scales
-        }
-        if bfloat16 {
-            let float32Suffixes = [
-                ".query", "mlp.gate.weight", "e_score_correction_bias",
-                "forget_gate_proj.weight", "message_gate_proj.weight", ".global_scale",
-            ]
-            for (key, value) in parameters
-            where value.dtype == .float32 && !float32Suffixes.contains(where: key.hasSuffix) {
-                parameters[key] = value.asType(.bfloat16)
-            }
-        }
-        try model.update(
-            parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
-        if bfloat16 {
-            try model.prepare()
-        }
-        eval(model)
-        return model
+        try Inkling2TinyModels.target(json: json, bfloat16: bfloat16)
     }
 
     @Test("Pinned keys keep their positions in the reference distances")

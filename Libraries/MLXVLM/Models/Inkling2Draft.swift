@@ -407,10 +407,14 @@ private final class Inkling2DraftFold: Sendable {
 /// the looped stack. Its state holds, for each draft layer, the context keys and values of the
 /// newest `sliding_window_size - 1` positions in a rotating ring, and one ring more for the
 /// Markov head's mix of the newest position. Each entry of the state is one target position, so
-/// the state rewinds and resumes as ``ResumableMTPDrafterModel`` describes.
+/// the state rewinds and resumes as ``ResumableMTPDrafterModel`` describes. Each proposal can
+/// take a logit processor, as ``StatefulMTPDistributionDrafterModel`` describes, so guided
+/// generation drafts under its grammar mask.
 ///
 /// The token embeddings and the vocabulary projection are the target's.
-public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
+public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel,
+    StatefulMTPDistributionDrafterModel
+{
     /// The configuration the drafter was built from.
     public let configuration: Inkling2DraftConfiguration
 
@@ -455,8 +459,9 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
     public var requiresSharedTargetKV: Bool { false }
     /// The drafter's context rings take every prompt position.
     public var requiresPromptPrefill: Bool { true }
-    /// Proposals are argmax picks; a sampled stream decodes without speculation.
-    public var requiresGreedySampling: Bool { true }
+    /// A sampled stream speculates too: it verifies argmax drafts by sample-and-match, or
+    /// verifies sampled drafts by rejection sampling against their reported distribution.
+    public var requiresGreedySampling: Bool { false }
     /// The layer visits the target taps for the drafter, and the final hidden state.
     public var targetLayerIds: [Int]? { configuration.draft.targetLayerIds }
     /// The width of one row of target taps.
@@ -550,11 +555,28 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
     /// Drafts `blockSize - 1` tokens after `lastToken`, which stands at the position after the
     /// newest context row. The state does not change: the block is transient.
     public func draftBlock(
+        target: any LanguageModel, lastToken: MLXArray, lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)], positionDeltas: MLXArray?,
+        queryOffset: Int, blockSize: Int, state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        draftBlockWithLogits(
+            target: target, lastToken: lastToken, lastHidden: lastHidden, sharedKV: sharedKV,
+            positionDeltas: positionDeltas, queryOffset: queryOffset, blockSize: blockSize,
+            state: &state, processor: nil, sampler: sampler
+        ).tokens
+    }
+
+    /// Drafts `blockSize - 1` tokens after `lastToken` as the token-only form does, with each
+    /// step's logits shaped by `processor` before `sampler` draws from them. The processor
+    /// learns each draft before it shapes the next step, so a grammar mask follows the drafts.
+    /// The state does not change: the block is transient.
+    public func draftBlockWithLogits(
         target: any LanguageModel, lastToken: MLXArray, lastHidden _: MLXArray,
         sharedKV _: [String: (MLXArray, MLXArray)], positionDeltas _: MLXArray?,
         queryOffset _: Int, blockSize: Int, state: inout MTPDrafterState,
-        sampler: any LogitSampler
-    ) -> MLXArray {
+        processor: (any LogitProcessor)?, sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
         let proposals = blockSize - 1
         precondition(
             (1 ..< configuration.draft.blockSize).contains(proposals),
@@ -564,7 +586,7 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
         let draftHidden = blockHidden(target: target, anchor: anchor, state: state)
         return proposeTokens(
             target: target, anchor: anchor, draftHidden: draftHidden[0..., ..<proposals, 0...],
-            context: markovContext(state), sampler: sampler)
+            context: markovContext(state), processor: processor, sampler: sampler)
     }
 
     /// The normalized draft hidden states of the positions after the anchor, `[B, block - 1, D]`.
@@ -586,11 +608,12 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
     }
 
     /// Proposes one token per draft hidden state, left to right: each step adds the Markov
-    /// head's bias, from the token before it, to the target's logits of the position.
+    /// head's bias, from the token before it, to the target's logits of the position, and
+    /// `processor` shapes the result before `sampler` draws the proposal.
     private func proposeTokens(
         target: Inkling2, anchor: MLXArray, draftHidden: MLXArray, context: MLXArray,
-        sampler: any LogitSampler
-    ) -> MLXArray {
+        processor: (any LogitProcessor)?, sampler: any LogitSampler
+    ) -> MTPDraftBlockOutput {
         let text = configuration.text
         let vocabulary = text.unpaddedVocabularySize
         let base = target.vocabularyProjection(draftHidden)[.ellipsis, ..<vocabulary]
@@ -598,7 +621,9 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
         var state = MLXArray.zeros(
             [anchor.dim(0), markovHead.rank], dtype: draftHidden.dtype)
         var previous = anchor[0..., 0]
+        var processor = processor
         var tokens: [MLXArray] = []
+        var processedLogits: [MLXArray] = []
         for step in 0 ..< draftHidden.dim(1) {
             let latent: MLXArray
             (state, latent) = markovHead.step(
@@ -609,11 +634,16 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
             if text.finalLogitSoftcap > 0 {
                 logits = tanh(logits / text.finalLogitSoftcap) * text.finalLogitSoftcap
             }
+            logits = processor?.process(logits: logits) ?? logits
             let next = normalizedMTPColumn(sampler.sample(logits: logits))
+            processor?.didSample(token: next)
             tokens.append(next)
+            processedLogits.append(logits.expandedDimensions(axis: 1))
             previous = next[0..., 0]
         }
-        return concatenated(tokens, axis: 1)
+        return MTPDraftBlockOutput(
+            tokens: concatenated(tokens, axis: 1),
+            processedLogits: concatenated(processedLogits, axis: 1))
     }
 
     /// The Markov head's mix of the newest context row, `[B, D]`.

@@ -15,46 +15,14 @@ import Testing
 // model of `Inkling2ModelTests`, whose eight layer visits are the prelude, two passes of the
 // loop core and the coda.
 
-/// The tiny target of `Inkling2ModelTests` with an MTP configuration in its `config.json`, as
-/// `mlx-community/Inkling-2-Mini-oQ4e-mtp` carries it: two draft layers, a window of six, so the
-/// drafter attends the newest five context rows, and blocks of four.
-private let tinyDraftJSON = """
-    {
-      "model_type": "inkling2_loop",
-      "text_config": {
-        "hidden_size": 64, "num_hidden_layers": 6, "vocab_size": 50,
-        "unpadded_vocab_size": 48, "num_attention_heads": 4, "num_key_value_heads": 2,
-        "head_dim": 32, "sliding_window_size": 8, "local_layer_ids": [0, 1, 2, 4],
-        "d_rel": 8, "rel_extent": 16, "log_scaling_n_floor": 4, "log_scaling_alpha": 0.1,
-        "rms_norm_eps": 1e-06, "qk_l2_clip_threshold": 22.6, "rel_l2_clip_threshold": 8.0,
-        "sconv_kernel_size": 4, "n_layers_per_attn_res_block": 2, "n_routed_experts": 4,
-        "num_experts_per_tok": 2, "intermediate_size": 32, "mlp_gate_softcap": 4.0,
-        "mlp_up_softcap": 25.0, "route_scale": 2.0, "final_logit_softcapping": 30.0,
-        "loop_config": {
-          "core_start": 2, "core_end": 4, "num_passes": 2, "gate_rank": 8,
-          "is_varloop": false
-        }
-      },
-      "mtp_config": {
-        "hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4,
-        "num_key_value_heads": 2, "head_dim": 16, "intermediate_size": 96,
-        "rms_norm_eps": 1e-06, "rope_theta": 1000000.0, "local_layer_ids": [0],
-        "sliding_window_size": 6, "block_size": 4, "markov_rank": 8,
-        "markov_head_type": "rnn_hidden", "q_bias": false, "o_bias": false,
-        "target_layer_ids": [1, 3, 5, 8]
-      }
-    }
-    """
+/// The `config.json` of the tiny target and drafter of ``Inkling2TinyModels``, over a
+/// vocabulary of 50 rows whose last two are padding.
+private let tinyDraftJSON = Inkling2TinyModels.draftJSON(
+    vocabularySize: tinyVocabularyRows, unpaddedVocabularySize: tinyVocabulary)
 
 /// The feature taps of the tiny drafter.
 // swiftlint:disable:next no_magic_numbers the taps tinyDraftJSON names, which the tests compare with what the target and the drafter read
 private let tinyTaps = [1, 3, 5, 8]
-
-/// The random seed of the tiny drafter's weights.
-private let tinyDrafterSeed: UInt64 = 11
-
-/// The scale of the tiny drafter's random normal weights.
-private let tinyDrafterWeightScale: Float = 0.3
 
 /// The step between the tokens of a test prompt, and the first token: a prompt walks the tiny
 /// vocabulary rather than repeating one token.
@@ -66,6 +34,9 @@ private let tinyHidden = 64
 
 /// The tokens of the tiny vocabulary that are not padding.
 private let tinyVocabulary = 48
+
+/// The rows of the tiny embedding and vocabulary projection, padding included.
+private let tinyVocabularyRows = 50
 
 /// The total verify block of the tiny drafter: the anchor and three drafts.
 private let tinyBlock = 4
@@ -85,21 +56,12 @@ private func tinyDraftConfiguration() throws -> Inkling2DraftConfiguration {
 
 /// The tiny target, with the MTP configuration that names its default taps.
 private func tinyTarget() throws -> Inkling2 {
-    try Inkling2ModelTests.makeModel(json: tinyDraftJSON)
+    try Inkling2TinyModels.target(json: tinyDraftJSON)
 }
 
 /// A tiny drafter with random weights.
 private func tinyDrafter() throws -> Inkling2DraftModel {
-    let drafter = Inkling2DraftModel(try tinyDraftConfiguration())
-    MLXRandom.seed(tinyDrafterSeed)
-    let parameters = Dictionary(
-        uniqueKeysWithValues: drafter.parameters().flattened().map { key, value in
-            (key, MLXRandom.normal(value.shape) * tinyDrafterWeightScale)
-        })
-    try drafter.update(
-        parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
-    eval(drafter)
-    return drafter
+    try Inkling2TinyModels.drafter(json: tinyDraftJSON)
 }
 
 /// A prompt of `count` tokens of the tiny vocabulary.
@@ -159,7 +121,7 @@ struct Inkling2DraftLoadingTests {
         #expect(drafter.hiddenSize == tinyTaps.count * tinyHidden)
         #expect(drafter.requiresPromptPrefill)
         #expect(!drafter.requiresSharedTargetKV)
-        #expect(drafter.requiresGreedySampling)
+        #expect(!drafter.requiresGreedySampling)
         // A caller that sets no block size, as a router does, decodes in blocks of three.
         #expect(drafter.preferredBlockSize == 3)
         #expect(SpeculativeDecodingConfig.mtpBlockSize(nil, for: drafter) == 3)
@@ -339,7 +301,7 @@ struct Inkling2DraftTargetTests {
         "A verify pass through the decode kernels computes each token as a decode step does",
         arguments: [1, 3])
     func sequentialDecodeMatchesDecodeSteps(promptLength: Int) throws {
-        let target = try Inkling2ModelTests.makeModel(bfloat16: true, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: true)
         let tokens = prompt(promptLength + tinyBlock)
 
         let difference = try verifyDifferenceFromDecodeSteps(
@@ -350,7 +312,7 @@ struct Inkling2DraftTargetTests {
 
     @Test("A pass through the decode kernels leaves an ArraysCache states of their own")
     func sequentialDecodeCopiesPlainConvolutionStates() throws {
-        let target = try Inkling2ModelTests.makeModel(bfloat16: true, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: true)
         let cache: [KVCache] = try target.newCache(parameters: nil).map { entry in
             let list = try #require(entry as? CacheList)
             return CacheList(list.children[0], ArraysCache(size: convolutionSlots))
@@ -373,7 +335,7 @@ struct Inkling2DraftTargetTests {
         arguments: [6, 12], [(1, false), (3, false), (1, true), (3, true)])
     func rewindAfterPartialAccept(promptLength: Int, rejection: (Int, Bool)) throws {
         let (rejected, bfloat16) = rejection
-        let target = try Inkling2ModelTests.makeModel(bfloat16: bfloat16, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: bfloat16)
         let tokens = prompt(promptLength + tinyBlock + 1)
         let verified = tokens[0..., promptLength ..< (promptLength + tinyBlock)]
         let kept = tinyBlock - rejected
@@ -470,20 +432,102 @@ struct Inkling2DraftingTests {
         return state
     }
 
+    /// The anchor token of each drafted block.
+    private static let anchorToken: Int32 = 5
+
+    /// The position of the anchor of each drafted block, after a primed prompt of nine tokens.
+    private static let anchorPosition = 9
+
+    /// The argmax drafts of one block after ``anchorToken``.
+    private func draftTokens(
+        _ drafter: Inkling2DraftModel, target: Inkling2, blockSize: Int,
+        state: inout MTPDrafterState
+    ) -> MLXArray {
+        drafter.draftBlock(
+            target: target, lastToken: MLXArray([Self.anchorToken]),
+            lastHidden: MLXArray.zeros([1, 1, 1]),
+            sharedKV: [:], positionDeltas: nil, queryOffset: Self.anchorPosition,
+            blockSize: blockSize, state: &state, sampler: ArgMaxSampler())
+    }
+
+    /// The argmax drafts of one block after ``anchorToken`` with their processed logits.
+    private func draftWithLogits(
+        _ drafter: Inkling2DraftModel, target: Inkling2, blockSize: Int,
+        state: inout MTPDrafterState, processor: (any LogitProcessor)? = nil
+    ) -> MTPDraftBlockOutput {
+        drafter.draftBlockWithLogits(
+            target: target, lastToken: MLXArray([Self.anchorToken]),
+            lastHidden: MLXArray.zeros([1, 1, 1]),
+            sharedKV: [:], positionDeltas: nil, queryOffset: Self.anchorPosition,
+            blockSize: blockSize, state: &state, processor: processor, sampler: ArgMaxSampler())
+    }
+
     @Test("A block proposes the requested drafts and leaves the drafter state", arguments: [2, 4])
     func blockShapes(blockSize: Int) throws {
         let target = try tinyTarget()
         let drafter = try tinyDrafter()
         var state = try primed(drafter, target: target, count: 9)
         #expect(state.nextPosition == 9)
-        let drafts = drafter.draftBlock(
-            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
-            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: blockSize,
-            state: &state, sampler: ArgMaxSampler())
+        let drafts = draftTokens(drafter, target: target, blockSize: blockSize, state: &state)
         #expect(drafts.shape == [1, blockSize - 1])
         #expect(drafts.max().item(Int.self) < tinyVocabulary)
         #expect(state.nextPosition == 9)
         #expect(state.isAligned)
+    }
+
+    @Test(
+        "A sampled stream speculates with either verification",
+        arguments: MTPSampledVerification.allCases)
+    func sampledStreamSpeculates(verification: MTPSampledVerification) throws {
+        let target = try tinyTarget()
+        let drafter = try tinyDrafter()
+        var parameters = GenerateParameters(maxTokens: 20, temperature: 0.6)
+        parameters.seed = 3
+        parameters.mtpSampledVerification = verification
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: prompt(9).reshaped(-1)), mainModel: target, drafter: drafter,
+            parameters: parameters, blockSize: tinyBlock)
+        var output: [Int] = []
+        while let token = iterator.next() { output.append(token) }
+
+        #expect(output.count == 20)
+        #expect(output.allSatisfy { $0 < tinyVocabulary })
+        #expect(iterator.passthroughReason == nil)
+        #expect(iterator.passthroughFallbackReason == nil)
+        #expect(iterator.proposedCount > 0)
+    }
+
+    @Test("A block with its logits drafts the tokens of the token-only block", arguments: [2, 4])
+    func blockWithLogitsMatchesTokenOnlyBlock(blockSize: Int) throws {
+        let target = try tinyTarget()
+        let drafter = try tinyDrafter()
+        var state = try primed(drafter, target: target, count: 9)
+        let tokens = draftTokens(drafter, target: target, blockSize: blockSize, state: &state)
+        let output = draftWithLogits(drafter, target: target, blockSize: blockSize, state: &state)
+
+        #expect(output.tokens.asArray(Int32.self) == tokens.asArray(Int32.self))
+        #expect(output.processedLogits.shape == [1, blockSize - 1, tinyVocabulary])
+        #expect(
+            argMax(output.processedLogits, axis: -1).asArray(Int32.self)
+                == tokens.asArray(Int32.self))
+        #expect(state.nextPosition == 9)
+        #expect(state.isAligned)
+    }
+
+    @Test("A processor shapes each draft step and learns each draft before the next")
+    func processorShapesEachStep() throws {
+        let target = try tinyTarget()
+        let drafter = try tinyDrafter()
+        var state = try primed(drafter, target: target, count: 9)
+        let forced: [Int32] = [7, 11, 13]
+        let log = ForcingProcessor.Log()
+        let output = draftWithLogits(
+            drafter, target: target, blockSize: tinyBlock, state: &state,
+            processor: ForcingProcessor(forced: forced, log: log))
+
+        #expect(output.tokens.asArray(Int32.self) == forced)
+        #expect(log.sampled == forced)
+        #expect(argMax(output.processedLogits, axis: -1).asArray(Int32.self) == forced)
     }
 
     @Test("Finalizing after a partial accept rewinds the drafter rings past their window")
@@ -513,7 +557,7 @@ struct Inkling2DraftingTests {
         "Greedy MTP decodes the tokens of plain greedy decoding",
         arguments: [5, 12], [false, true])
     func greedyMatchesPlainGreedy(promptLength: Int, bfloat16: Bool) throws {
-        let target = try Inkling2ModelTests.makeModel(bfloat16: bfloat16, json: tinyDraftJSON)
+        let target = try Inkling2TinyModels.target(json: tinyDraftJSON, bfloat16: bfloat16)
         let drafter = try tinyDrafter()
         let input = LMInput(tokens: prompt(promptLength).reshaped(-1))
         let parameters = GenerateParameters(maxTokens: 20, temperature: 0)
@@ -530,5 +574,34 @@ struct Inkling2DraftingTests {
         #expect(output == expected)
         #expect(iterator.passthroughReason == nil)
         #expect(iterator.proposedCount > 0)
+    }
+}
+
+/// A processor that lets one token through at each step, the next of ``forced`` after the drafts
+/// it learned, as a grammar mask lets the tokens of its position through.
+private struct ForcingProcessor: LogitProcessor {
+
+    /// The drafts the processor learned. A class, because the drafter copies the processor.
+    final class Log {
+        var sampled: [Int32] = []
+    }
+
+    /// The token each step lets through.
+    let forced: [Int32]
+
+    /// The drafts the processor learned.
+    let log: Log
+
+    mutating func prompt(_ prompt: MLXArray) {}
+
+    /// Every token but the next forced one at negative infinity.
+    func process(logits: MLXArray) -> MLXArray {
+        let allowed = Int(forced[log.sampled.count])
+        let mask = MLXArray((0 ..< logits.dim(-1)).map { $0 == allowed })
+        return MLX.where(mask, logits, MLXArray(-Float.infinity))
+    }
+
+    mutating func didSample(token: MLXArray) {
+        log.sampled.append(token.reshaped(-1).item(Int32.self))
     }
 }

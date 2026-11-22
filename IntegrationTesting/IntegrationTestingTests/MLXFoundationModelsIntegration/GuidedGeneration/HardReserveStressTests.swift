@@ -10,11 +10,13 @@ import FoundationModels
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-/// Stress tests for the hardReserve multiplier across increasing schema complexity.
+/// Stress tests of the closing reserves of a guided pass across increasing schema complexity.
 ///
 /// Each tier uses unbounded string fields (no `maxLength`) to maximize adversarial
-/// pressure. The token budget is set to `hardReserve + 128`, forcing the model into
-/// the hard reserve zone after generating just one or two verbose string values.
+/// pressure. The reserves come from `MLXLanguageModel.Executor.closingReserves`, the sizing
+/// production uses, and the token budget is a small multiple of the shortest valid output
+/// (``budgetMultiples``), thus the model reaches the hard zone after one or two verbose string
+/// values. A budget below 32 times the shortest output is where the budget caps the hard zone.
 extension ModelLoadingSuite {
     @Suite(.serialized, .timeLimit(.minutes(8))) struct HardReserveStressTests {}
 }
@@ -22,7 +24,9 @@ extension ModelLoadingSuite {
 extension ModelLoadingSuite.HardReserveStressTests {
 
     static let modelID = TestFixtures.gemmaModelID
-    static let multiplier = 8
+
+    /// The budgets of a pass, as multiples of the shortest valid output of its schema.
+    static let budgetMultiples = [4, 8, 16]
 
     // MARK: - Tier Schemas
 
@@ -149,14 +153,10 @@ extension ModelLoadingSuite.HardReserveStressTests {
 
     // MARK: - Helpers
 
-    /// Runs guided generation with a specified hardReserve, computing
-    /// structuralReserve internally and logging diagnostic info.
+    /// Runs guided generation with a budget of `budgetMultiple` times the shortest valid output
+    /// of `schema`, under the closing reserves production sizes for that budget, and logs them.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func generateWithReserve(
-        schema: String,
-        maxTokens: Int,
-        hardReserve: Int
-    ) async throws -> String {
+    private func generate(schema: String, budgetMultiple: Int) async throws -> String {
         let modelID = Self.modelID
         let container = try await loadTestModelContainer(id: modelID)
 
@@ -176,11 +176,15 @@ extension ModelLoadingSuite.HardReserveStressTests {
                 schemaJSON: schema,
                 tokenizer: context.tokenizer
             )
-            let softReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
+            let maxTokens = structuralReserve * budgetMultiple
+            let reserves = MLXLanguageModel.Executor.closingReserves(
+                structuralReserve: structuralReserve, maxTokens: maxTokens)
+            let header =
+                "structuralReserve=\(structuralReserve), maxTokens=\(maxTokens) "
+                + "(\(budgetMultiple)x), completionReserve=\(reserves.completion), "
+                + "hardReserve=\(reserves.hard)"
 
-            print(
-                "[HardReserveStressTests] structuralReserve=\(structuralReserve), hardReserve=\(hardReserve), maxTokens=\(maxTokens)"
-            )
+            print("[HardReserveStressTests] \(header)")
 
             // Format the prompt via the tokenizer's chat template directly —
             // the same path the production code exercises (the model's
@@ -206,25 +210,33 @@ extension ModelLoadingSuite.HardReserveStressTests {
 
             var collected = ""
             var tokenCount = 0
-            try GuidedGenerationLoop.run(
-                input: input,
-                context: context,
-                constraint: constraint,
-                maxTokens: maxTokens,
-                vocabSize: Int(grammarTokenizer.vocabSize),
-                completionReserve: softReserve,
-                hardReserve: hardReserve,
-                closingBias: closingBias,
-                whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs,
-                diagnosticLog: false
-            ) { text in
-                collected += text
-                tokenCount += 1
-                return true
+            do {
+                try GuidedGenerationLoop.run(
+                    input: input,
+                    context: context,
+                    constraint: constraint,
+                    maxTokens: maxTokens,
+                    vocabSize: Int(grammarTokenizer.vocabSize),
+                    completionReserve: reserves.completion,
+                    hardReserve: reserves.hard,
+                    closingBias: closingBias,
+                    whitespaceBias: whitespaceBias,
+                    whitespaceTokenIDs: whitespaceTokenIDs,
+                    diagnosticLog: false
+                ) { text in
+                    collected += text
+                    tokenCount += 1
+                    return true
+                }
+            } catch {
+                print(
+                    "[HardReserveStressTests] RESULT \(header): \(error) after \(tokenCount) "
+                        + "token callbacks, tail <<<\(collected.suffix(400).debugDescription)>>>")
+                throw error
             }
             print(
-                "[HardReserveStressTests] Generated \(tokenCount) token callbacks, \(collected.count) chars"
+                "[HardReserveStressTests] RESULT \(header): complete, \(tokenCount) token "
+                    + "callbacks, \(collected.count) chars"
             )
             return collected
         }
@@ -260,8 +272,10 @@ extension ModelLoadingSuite.HardReserveStressTests {
                     tokenizer: context.tokenizer
                 )
                 estimates.append((name, estimate))
+                let multiplier = MLXLanguageModel.Executor.hardReserveStructuralMultiplier
                 print(
-                    "[HardReserveStressTests] \(name): structuralReserve=\(estimate), hardReserve(\(Self.multiplier)x)=\(estimate * Self.multiplier)"
+                    "[HardReserveStressTests] \(name): structuralReserve=\(estimate), "
+                        + "hardReserve(\(multiplier)x)=\(estimate * multiplier)"
                 )
             }
 
@@ -284,25 +298,12 @@ extension ModelLoadingSuite.HardReserveStressTests {
 
     // MARK: - Behavior 2: Tier 1
 
-    // TODO: FIXME
     @Test(
-        "Tier 1 (3 fields) with 8x hardReserve produces valid JSON with all keys",
-        .disabled("FIXME"))
-    func testTier1HardReserve() async throws {
+        "Tier 1 (3 fields) under the production reserves produces valid JSON with all keys",
+        arguments: budgetMultiples)
+    func testTier1HardReserve(budgetMultiple: Int) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = await container.perform { context in
-            CompletionReserve.estimate(
-                schemaJSON: Self.tier1Schema, tokenizer: context.tokenizer)
-        }
-        let hardReserve = structuralReserve * Self.multiplier
-        let maxTokens = hardReserve * 2
-
-        let raw = try await generateWithReserve(
-            schema: Self.tier1Schema,
-            maxTokens: maxTokens,
-            hardReserve: hardReserve
-        )
+        let raw = try await generate(schema: Self.tier1Schema, budgetMultiple: budgetMultiple)
 
         let sanitized = sanitize(raw)
         print("[testTier1HardReserve] Output: \(sanitized.prefix(300))")
@@ -320,24 +321,12 @@ extension ModelLoadingSuite.HardReserveStressTests {
     // MARK: - Behavior 3: Tier 2
 
     @Test(
-        "Tier 2 (array of 3 items) with 8x hardReserve produces valid JSON with all keys and 3 items",
-        .disabled("FIXME")
+        "Tier 2 (array of 3 items) under the production reserves produces valid JSON with 3 items",
+        arguments: budgetMultiples
     )
-    func testTier2HardReserve() async throws {
+    func testTier2HardReserve(budgetMultiple: Int) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = await container.perform { context in
-            CompletionReserve.estimate(
-                schemaJSON: Self.tier2Schema, tokenizer: context.tokenizer)
-        }
-        let hardReserve = structuralReserve * Self.multiplier
-        let maxTokens = hardReserve * 2
-
-        let raw = try await generateWithReserve(
-            schema: Self.tier2Schema,
-            maxTokens: maxTokens,
-            hardReserve: hardReserve
-        )
+        let raw = try await generate(schema: Self.tier2Schema, budgetMultiple: budgetMultiple)
 
         let sanitized = sanitize(raw)
         print("[testTier2HardReserve] Output: \(sanitized.prefix(500))")
@@ -365,23 +354,12 @@ extension ModelLoadingSuite.HardReserveStressTests {
     // MARK: - Behavior 4: Tier 3
 
     @Test(
-        "Tier 3 (2 groups x 3 entries) with 8x hardReserve produces valid JSON with correct nesting"
+        "Tier 3 (2 groups x 3 entries) under the production reserves produces valid JSON",
+        arguments: budgetMultiples
     )
-    func testTier3HardReserve() async throws {
+    func testTier3HardReserve(budgetMultiple: Int) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = await container.perform { context in
-            CompletionReserve.estimate(
-                schemaJSON: Self.tier3Schema, tokenizer: context.tokenizer)
-        }
-        let hardReserve = structuralReserve * Self.multiplier
-        let maxTokens = hardReserve * 2
-
-        let raw = try await generateWithReserve(
-            schema: Self.tier3Schema,
-            maxTokens: maxTokens,
-            hardReserve: hardReserve
-        )
+        let raw = try await generate(schema: Self.tier3Schema, budgetMultiple: budgetMultiple)
 
         let sanitized = sanitize(raw)
         print("[testTier3HardReserve] Output: \(sanitized.prefix(500))")
@@ -422,22 +400,12 @@ extension ModelLoadingSuite.HardReserveStressTests {
 
     // MARK: - Behavior 5: Tier 4
 
-    @Test("Tier 4 (3 days x 3 activities, ~40 fields) with 8x hardReserve produces valid JSON")
-    func testTier4HardReserve() async throws {
+    @Test(
+        "Tier 4 (3 days x 3 activities, ~40 fields) under the production reserves produces valid JSON",
+        arguments: budgetMultiples)
+    func testTier4HardReserve(budgetMultiple: Int) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
-        let container = try await loadTestModelContainer(id: Self.modelID)
-        let structuralReserve = await container.perform { context in
-            CompletionReserve.estimate(
-                schemaJSON: Self.tier4Schema, tokenizer: context.tokenizer)
-        }
-        let hardReserve = structuralReserve * Self.multiplier
-        let maxTokens = hardReserve * 2
-
-        let raw = try await generateWithReserve(
-            schema: Self.tier4Schema,
-            maxTokens: maxTokens,
-            hardReserve: hardReserve
-        )
+        let raw = try await generate(schema: Self.tier4Schema, budgetMultiple: budgetMultiple)
 
         let sanitized = sanitize(raw)
         print("[testTier4HardReserve] Output: \(sanitized.prefix(800))")

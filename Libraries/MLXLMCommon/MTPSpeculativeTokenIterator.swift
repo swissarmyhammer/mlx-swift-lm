@@ -33,7 +33,7 @@ enum MTPSpeculationMode: Equatable {
     case speculating
 
     /// The rest of the stream decodes one token at a time. Sticky.
-    case passthrough(reason: String)
+    case passthrough(reason: String, fallback: SpeculativeDecodingFallbackReason)
 
     /// The stream speculated to its end, and its drafter state could not become a continuation.
     case continuationDiscarded(reason: String)
@@ -42,8 +42,13 @@ enum MTPSpeculationMode: Equatable {
     var reason: String? {
         switch self {
         case .speculating: nil
-        case .passthrough(let reason), .continuationDiscarded(let reason): reason
+        case .passthrough(let reason, _), .continuationDiscarded(let reason): reason
         }
+    }
+
+    /// The kind of the fallback of a stream that decodes one token at a time, or `nil`.
+    var fallback: SpeculativeDecodingFallbackReason? {
+        if case .passthrough(_, let fallback) = self { fallback } else { nil }
     }
 
     /// Whether the rest of the stream decodes one token at a time.
@@ -547,7 +552,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
             self.mainCacheStorage.rollback(probe)
         }
         if let standDownReason {
-            switchToPassthrough(reason: standDownReason)
+            switchToPassthrough(reason: standDownReason, fallback: .unsupportedSampling)
         }
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
@@ -799,8 +804,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         {
             switchToPassthrough(
                 reason:
-                    "stateful MTP drafter has no warm continuation; continuing without speculation"
-            )
+                    "stateful MTP drafter has no warm continuation; continuing without speculation",
+                fallback: .unavailableContinuation)
         }
 
         try kvCachePlan.applyAndValidate(to: mainCacheStorage)
@@ -818,7 +823,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
 
     /// Stops speculating on a shared K/V snapshot that cannot be placed against cache entries.
     private mutating func abandonSharedKVSnapshot() {
-        switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
+        switchToPassthrough(
+            reason: Self.missingSharedKVSourcesReason, fallback: .unavailableContinuation)
         mainState = nil
     }
 
@@ -891,7 +897,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
             let targetHidden = mainState?[mtpLastHiddenStatesKey],
             targetHidden.dim(1) >= promptLength
         else {
-            switchToPassthrough(reason: Self.missingPromptHiddenReason)
+            switchToPassthrough(
+                reason: Self.missingPromptHiddenReason, fallback: .unavailableContinuation)
             return
         }
         let suffixHidden = targetHidden[0..., ..<promptLength, 0...]
@@ -907,8 +914,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         guard let resumableDrafter = drafter as? any ResumableMTPDrafterModel else {
             switchToPassthrough(
                 reason:
-                    "stateful MTP drafter cannot initialize from a warm target suffix; continuing without speculation"
-            )
+                    "stateful MTP drafter cannot initialize from a warm target suffix; continuing without speculation",
+                fallback: .unavailableContinuation)
             return
         }
 
@@ -953,7 +960,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
                 firstBonus: pendingInput.tokens, position: position, positionDeltas: positionDeltas,
                 state: &state, sampler: mtpDrafterSeedSampler)
         else {
-            switchToPassthrough(reason: Self.coldStartFailedReason)
+            switchToPassthrough(
+                reason: Self.coldStartFailedReason, fallback: .unavailableContinuation)
             return
         }
         drafterState = state
@@ -991,7 +999,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         guard let targetHidden = mainState?[mtpLastHiddenStatesKey],
             segmentLength > 0, targetHidden.dim(1) >= segmentLength
         else {
-            switchToPassthrough(reason: Self.missingPromptHiddenReason)
+            switchToPassthrough(
+                reason: Self.missingPromptHiddenReason, fallback: .unavailableContinuation)
             return
         }
         guard
@@ -1000,7 +1009,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
                 firstBonus: pendingInput.tokens,
                 positionDeltas: mainState?[mtpPositionDeltasKey])
         else {
-            switchToPassthrough(reason: Self.coldStartFailedReason)
+            switchToPassthrough(
+                reason: Self.coldStartFailedReason, fallback: .unavailableContinuation)
             return
         }
         drafterState = state
@@ -1035,12 +1045,15 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         guard var state = mainState,
             let lastHidden = state[mtpLastHiddenStatesKey]
         else {
-            switchToPassthrough(reason: "main model did not emit drafter state")
+            switchToPassthrough(
+                reason: "main model did not emit drafter state", fallback: .unavailableContinuation)
             return
         }
         var sharedKV = state[mtpSharedKVStatesKey] ?? [:]
         if drafter.requiresSharedTargetKV, sharedKV["full_attention"] == nil {
-            switchToPassthrough(reason: "main model did not emit shared target K/V")
+            switchToPassthrough(
+                reason: "main model did not emit shared target K/V",
+                fallback: .unavailableContinuation)
             return
         }
 
@@ -1056,7 +1069,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         } else {
             switchToPassthrough(
                 reason: "main KV cache cannot stage a speculative round; continuing without "
-                    + "speculation")
+                    + "speculation", fallback: .unsupportedCache)
             mainState = nil
             return
         }
@@ -1489,13 +1502,25 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
 
     /// Switch to single-token generation for the remainder of the stream.
     /// Sticky — once flipped, `next()` never returns to speculation.
-    private mutating func switchToPassthrough(reason: String) {
+    ///
+    /// - Parameters:
+    ///   - reason: Why, in words.
+    ///   - fallback: The kind of the fallback the completion information reports:
+    ///     ``SpeculativeDecodingFallbackReason/unsupportedSampling`` for a stream whose
+    ///     parameters the drafter cannot speculate with,
+    ///     ``SpeculativeDecodingFallbackReason/unsupportedCache`` for a main cache that can
+    ///     neither verify nor stage a round, and
+    ///     ``SpeculativeDecodingFallbackReason/unavailableContinuation`` for drafter state the
+    ///     stream lacks or lost.
+    private mutating func switchToPassthrough(
+        reason: String, fallback: SpeculativeDecodingFallbackReason
+    ) {
         if !passthroughLoggedOnce {
             // Log one-time only so a quantization-onset round doesn't spam.
             mtpIteratorLogger.info("passthrough mode: \(reason)")
             passthroughLoggedOnce = true
         }
-        speculationMode = .passthrough(reason: reason)
+        speculationMode = .passthrough(reason: reason, fallback: fallback)
         discardSpeculativePromptCacheCheckpoints(mainCache)
         mainState?[mtpEmitFlagKey] = false
         mainState?[mtpVerifyKeepsSnapshotsKey] = nil
@@ -1537,8 +1562,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
             } else {
                 switchToPassthrough(
                     reason:
-                        "MTP drafter could not follow the final target-only token; continuation discarded"
-                )
+                        "MTP drafter could not follow the final target-only token; continuation discarded",
+                    fallback: .unavailableContinuation)
             }
         }
 
@@ -1794,6 +1819,12 @@ func speculativeResidualLogProbabilities(
 extension MTPSpeculativeTokenIterator: MTPStatsCollecting {
     public var proposedDraftTokens: Int { proposedCount }
     public var acceptedDraftTokens: Int { acceptedCount }
+    /// The kind of the passthrough of a stream that proposed no draft token, or nil. A stream
+    /// that drafted before its tail decoded plainly did speculate: ``passthroughReason`` alone
+    /// states why its tail decoded plainly.
+    public var passthroughFallbackReason: SpeculativeDecodingFallbackReason? {
+        proposedCount == 0 ? speculationMode.fallback : nil
+    }
 }
 
 extension MTPSpeculativeTokenIterator {

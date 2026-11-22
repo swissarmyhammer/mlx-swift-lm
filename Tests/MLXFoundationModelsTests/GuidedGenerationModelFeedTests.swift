@@ -30,9 +30,9 @@ struct GuidedGenerationModelFeedTests {
     /// The tokens of the prompt of each generation.
     private static let prompt = [7, 21, 30, 12, 4]
 
-    /// The emitted tokens the cache does not keep: the token of the decision that terminates
-    /// the grammar, at most.
-    private static let unfedFinalTokens = 1
+    /// The emitted tokens the cache does not keep of the last decision: its own token, which
+    /// the generation emits and then stops before it feeds.
+    private static let unfedDecisionTokens = 1
 
     /// The block sizes of the generations: `nil` decodes plainly, 2 speculates the shipped
     /// single draft, and 4 speculates chains of three drafts.
@@ -56,9 +56,18 @@ struct GuidedGenerationModelFeedTests {
         #expect(!run.sink.fastForwardTokenIDs.isEmpty)
         #expect(Array(cached.prefix(Self.prompt.count)) == Self.prompt)
         #expect(emitted.starts(with: generated))
-        // A decision whose commit terminates the grammar emits its token and stops, so the
-        // cache never takes that last token. A generation that stops any other way fed them all.
-        #expect(emitted.count - generated.count <= Self.unfedFinalTokens)
+        // The fixture's target has random weights, and fills its strings to the budget: every
+        // generation of every schema and block size ends at the budget, before the grammar
+        // closes.
+        #expect(run.incomplete)
+        // The last decision emits its token and the tokens its commit forced, up to the budget,
+        // then the generation stops before it feeds them. Every token before it reached the
+        // cache.
+        let lastDecision = try #require(run.sink.decisions.last)
+        let lastCommitForcedTokens = emitted.count - lastDecision.tokenCount - 1
+        #expect(
+            emitted.count - generated.count
+                <= Self.unfedDecisionTokens + lastCommitForcedTokens)
     }
 }
 
