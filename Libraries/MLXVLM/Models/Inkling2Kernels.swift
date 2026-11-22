@@ -35,7 +35,9 @@ private let dynamicConvolutionDivisor = Float(dynamicConvolutionTaps + 1).square
 private let prologueSimdgroupsPerHead = 2
 
 /// The keys up to which one threadgroup per head runs the decode attention; longer caches split.
-private let singleThreadgroupDecodeKeys = 1024
+/// It also bounds the sliding window (``Inkling2TextConfiguration``): a sliding layer always runs
+/// one threadgroup, whose memory holds the bias of each distance of the window.
+let singleThreadgroupDecodeKeys = 1024
 
 /// The statistics a split of the decode attention writes per row: its running max and sum.
 private let decodeSplitStatistics = 2
@@ -1106,11 +1108,10 @@ func inkling2DecodeAttention(
         ("DR", table.dim(0)), ("WINDOW", window), ("PS", causalRows > 0 ? rowParameters : 0),
     ]
     // Up to a sliding window, one threadgroup per head is fastest; longer caches are split. A
-    // sliding layer always takes one threadgroup: the window bounds the keys each row reads, and
-    // the rows of a verify past the window then sum as the decode steps of a wrapped ring do.
-    if s <= singleThreadgroupDecodeKeys
-        || (window > 0 && window <= singleThreadgroupDecodeKeys)
-    {
+    // sliding layer always takes one threadgroup: its window, which the configuration bounds by
+    // `singleThreadgroupDecodeKeys`, bounds the keys each row reads, and the rows of a verify
+    // past the window then sum as the decode steps of a wrapped ring do.
+    if s <= singleThreadgroupDecodeKeys || window > 0 {
         let simdgroups = 32
         return kernels.single(
             inputs, template: template + [("NSG", simdgroups)],
