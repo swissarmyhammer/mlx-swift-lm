@@ -1972,7 +1972,7 @@ func inkling2ExpertDown(
     return (out[0], out[1])
 }
 
-private final class Inkling2DecodeKernels: @unchecked Sendable {
+private final class Inkling2DecodeKernels: Sendable {
     static let shared = Inkling2DecodeKernels()
 
     let single: MLXFast.MLXFastKernel

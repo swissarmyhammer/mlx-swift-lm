@@ -545,7 +545,7 @@ final class Inkling2DecoderLayer: Module {
 }
 
 /// Hides the stacked controllers from `Module` reflection.
-private final class MessageControllersBox: @unchecked Sendable {
+private final class MessageControllersBox {
     var value: Inkling2DecoderLayer.MessageControllers?
     var installing = false
 

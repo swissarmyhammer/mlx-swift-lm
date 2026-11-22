@@ -6,10 +6,15 @@ import Foundation
 
 // MARK: - Configuration
 
+/// The loop of the Inkling 2 text stack: a core of layers that the model runs several times (`loop_config`).
 public struct Inkling2LoopConfiguration: Codable, Sendable {
+    /// The first layer of the loop core.
     public let coreStart: Int
+    /// The layer after the last layer of the loop core.
     public let coreEnd: Int
+    /// The passes through the loop core.
     public let passes: Int
+    /// The rank of the low-rank gates of the loop.
     public let gateRank: Int
 
     enum CodingKeys: String, CodingKey {
@@ -19,38 +24,69 @@ public struct Inkling2LoopConfiguration: Codable, Sendable {
         case gateRank = "gate_rank"
     }
 
+    /// The layers of the loop core.
     public var core: Range<Int> { coreStart ..< coreEnd }
 }
 
+/// The configuration of the Inkling 2 text stack (`text_config`).
 public struct Inkling2TextConfiguration: Codable, Sendable {
+    /// The width of the residual stream.
     public let hiddenSize: Int
+    /// The number of distinct decoder layers.
     public let hiddenLayers: Int
+    /// The rows of the embedding and of the output head, padding included.
     public let vocabularySize: Int
+    /// The tokens of the tokenizer; the rows past it are padding.
     public let unpaddedVocabularySize: Int
+    /// The query heads of a full-attention layer.
     public let attentionHeads: Int
+    /// The key and value heads of a full-attention layer.
     public let kvHeads: Int
+    /// The width of one head of a full-attention layer.
     public let headDim: Int
+    /// The query heads of a sliding-window layer.
     public let slidingAttentionHeads: Int
+    /// The key and value heads of a sliding-window layer.
     public let slidingKVHeads: Int
+    /// The width of one head of a sliding-window layer.
     public let slidingHeadDim: Int
+    /// The tokens a sliding-window layer attends to.
     public let slidingWindow: Int
+    /// The layers that use sliding-window attention.
     public let localLayerIds: [Int]
+    /// The width of the relative-position projection of each head.
     public let relativeDim: Int
+    /// The key distances the relative-position logits of a full-attention layer cover.
     public let relativeExtent: Int
+    /// The query position below which the full-attention layers do not scale their queries.
     public let logScalingFloor: Int
+    /// The strength of the log-length query scaling of the full-attention layers.
     public let logScalingAlpha: Float
+    /// The epsilon of the RMS norms.
     public let rmsNormEps: Float
+    /// The L2 norm to which the query and key head vectors are clipped.
     public let qkClipThreshold: Float
+    /// The L2 norm to which the relative-position head vectors are clipped.
     public let relativeClipThreshold: Float
+    /// The taps of the short convolutions.
     public let convolutionKernelSize: Int
+    /// The layers of one attention-residual block.
     public let layersPerBlock: Int
+    /// The routed experts of each mixture-of-experts layer.
     public let experts: Int
+    /// The experts that each token is routed to.
     public let expertsPerToken: Int
+    /// The inner width of one expert.
     public let intermediateSize: Int
+    /// The soft cap of the expert gate activations, or 0 for none.
     public let gateSoftcap: Float
+    /// The soft cap of the expert up activations, or 0 for none.
     public let upSoftcap: Float
+    /// The factor applied to the routing weights.
     public let routeScale: Float
+    /// The soft cap of the output logits, or 0 for none.
     public let finalLogitSoftcap: Float
+    /// The loop of the layer stack, or `nil` for a stack that runs each layer once.
     public let loop: Inkling2LoopConfiguration?
 
     enum CodingKeys: String, CodingKey {
@@ -88,6 +124,7 @@ public struct Inkling2TextConfiguration: Codable, Sendable {
     /// The taps of the short convolutions, for a `text_config` that leaves them out.
     private static let defaultConvolutionKernelSize = 4
 
+    /// Decodes a `text_config`, with the defaults of Inkling 2 for the keys it leaves out.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
@@ -136,17 +173,29 @@ public struct Inkling2TextConfiguration: Codable, Sendable {
     func isSliding(_ layer: Int) -> Bool { localLayerIds.contains(layer) }
 }
 
+/// The configuration of the Inkling 2 vision tower (`vision_config`).
 public struct Inkling2VisionConfiguration: Codable, Sendable {
+    /// The width of the vision tower.
     public let hiddenSize: Int
+    /// The layers of the vision tower.
     public let hiddenLayers: Int
+    /// The attention heads of each vision layer.
     public let attentionHeads: Int
+    /// The pixels on each side of one patch.
     public let patchSize: Int
+    /// The patches on each side of the square that the adapter merges into one token.
     public let mergeSize: Int
+    /// The cells on each side of the learned position-embedding grid.
     public let positionGridSize: Int
+    /// The hidden width of the projector into the text stack.
     public let projectionHiddenSize: Int
+    /// Whether the projector layers have biases.
     public let projectorBias: Bool
+    /// The ratio of the MLP width to the hidden width.
     public let mlpRatio: Float
+    /// The epsilon of the layer norms.
     public let layerNormEps: Float
+    /// The base of the rotary position embedding.
     public let ropeTheta: Float
 
     enum CodingKeys: String, CodingKey {
@@ -163,6 +212,7 @@ public struct Inkling2VisionConfiguration: Codable, Sendable {
         case ropeTheta = "rope_theta"
     }
 
+    /// Decodes a `vision_config`, with the settings of the Inkling 2 vision tower for the keys it leaves out.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = Self.defaults
@@ -209,10 +259,15 @@ public struct Inkling2VisionConfiguration: Codable, Sendable {
     var blockSize: Int { patchSize * mergeSize }
 }
 
+/// The configuration of an Inkling 2 checkpoint (`config.json`).
 public struct Inkling2Configuration: Codable, Sendable {
+    /// The `model_type` of the checkpoint.
     public let modelType: String
+    /// The configuration of the text stack.
     public let textConfiguration: Inkling2TextConfiguration
+    /// The configuration of the vision tower, or `nil` for a text-only checkpoint.
     public let visionConfiguration: Inkling2VisionConfiguration?
+    /// The token that stands for one image token in the prompt.
     public let imageTokenId: Int
     /// The MTP drafter the checkpoint ships in `mtp.safetensors`, or `nil` without one.
     public let mtpConfiguration: Inkling2MTPConfiguration?
@@ -228,6 +283,7 @@ public struct Inkling2Configuration: Codable, Sendable {
     /// The image token of the Inkling 2 tokenizer, for a `config.json` that leaves it out.
     private static let defaultImageTokenId = 200_054
 
+    /// Decodes a `config.json`, with the image token of the Inkling 2 tokenizer when it leaves one out.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         modelType = try c.decode(String.self, forKey: .modelType)

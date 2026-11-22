@@ -10,13 +10,18 @@ import MLXNN
 
 // MARK: - Attention
 
+/// The head vectors of `x * scale` with each L2 norm clipped to `threshold`, in float32 and
+/// before any rounding to the input dtype.
+private func clippedStates(_ x: MLXArray, scale: MLXArray, threshold: MLXArray) -> MLXArray {
+    let states = x.asType(.float32) * scale
+    let norm = sqrt((states * states).sum(axis: -1, keepDims: true))
+    return states * minimum(threshold / (norm + normEpsilon), 1)
+}
+
 /// Clips the L2 norm of each head vector of `x * scale` to `threshold`, in float32.
 private let l2Clip: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: true) { args in
     let (x, scale, threshold) = unpacked(args)
-    let states = x.asType(.float32) * scale
-    let norm = sqrt((states * states).sum(axis: -1, keepDims: true))
-    let clipped = states * minimum(threshold / (norm + normEpsilon), 1)
-    return [clipped.asType(x.dtype)]
+    return [clippedStates(x, scale: scale, threshold: threshold).asType(x.dtype)]
 }
 
 /// `l2Clip` followed by the log-length scaling of the full-attention layers. Each step
@@ -24,9 +29,7 @@ private let l2Clip: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: tr
 private let l2ClipScaled: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: true) {
     args in
     let (x, scale, threshold, tau) = unpacked(args)
-    let states = x.asType(.float32) * scale
-    let norm = sqrt((states * states).sum(axis: -1, keepDims: true))
-    let clipped = (states * minimum(threshold / (norm + normEpsilon), 1)).asType(x.dtype)
+    let clipped = clippedStates(x, scale: scale, threshold: threshold).asType(x.dtype)
     return [(clipped.asType(.float32) * tau).asType(x.dtype)]
 }
 
@@ -42,7 +45,7 @@ private let valueNorm: @Sendable (MLXArray) -> MLXArray = compile(shapeless: tru
 }
 
 /// Hides an inference-only projection from `Module` reflection.
-private final class QuantizedLinearBox: @unchecked Sendable {
+private final class QuantizedLinearBox {
     var value: QuantizedLinear?
 }
 
@@ -225,23 +228,23 @@ final class Inkling2Attention: Module {
         ) { views in
             try update(modules: Self.fusedViews(views), verify: [])
         }
-        if let convolution = dynamicKeyConvolution {
-            try fusedKey.prepare(enabled: true, linears: [keyProj, convolution.weightProj]) {
-                views in
-                try update(
-                    modules: ModuleChildren(values: ["k_proj": .value(views[0])]), verify: [])
-                try convolution.update(
-                    modules: ModuleChildren(values: ["weight_proj": .value(views[1])]), verify: [])
-            }
-        }
-        if let convolution = dynamicValueConvolution {
-            try fusedValue.prepare(enabled: true, linears: [valueProj, convolution.weightProj]) {
-                views in
-                try update(
-                    modules: ModuleChildren(values: ["v_proj": .value(views[0])]), verify: [])
-                try convolution.update(
-                    modules: ModuleChildren(values: ["weight_proj": .value(views[1])]), verify: [])
-            }
+        try prepareConvolutionProjection(
+            dynamicKeyConvolution, linear: keyProj, cache: fusedKey, key: "k_proj")
+        try prepareConvolutionProjection(
+            dynamicValueConvolution, linear: valueProj, cache: fusedValue, key: "v_proj")
+    }
+
+    /// Fuses `linear` with the weight projection of `convolution` into `cache`, and installs the
+    /// views of the fused weight as `key` and as the convolution's `weight_proj`.
+    private func prepareConvolutionProjection(
+        _ convolution: Inkling2DynamicShortConvolution?, linear: Linear,
+        cache: FusedQuantizedLinearProjectionCache, key: String
+    ) throws {
+        guard let convolution else { return }
+        try cache.prepare(enabled: true, linears: [linear, convolution.weightProj]) { views in
+            try update(modules: ModuleChildren(values: [key: .value(views[0])]), verify: [])
+            try convolution.update(
+                modules: ModuleChildren(values: ["weight_proj": .value(views[1])]), verify: [])
         }
     }
 
