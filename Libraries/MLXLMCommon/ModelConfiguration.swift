@@ -183,6 +183,18 @@ public struct ModelConfiguration: Sendable {
     /// ``ModelComponentsProviding``.
     public var excludedComponents: Set<ModelComponent> = []
 
+    /// The file patterns that a download of this model fetches from its repository, relative to
+    /// ``modelSubdirectory``, or `nil` for the default patterns: each `*.safetensors`, `*.json`
+    /// and `*.jinja` file.
+    ///
+    /// Set it for a checkpoint that ships files the model does not read. The DSpark drafter of
+    /// `mlx-community/Inkling-2-Mini-oQ4e-mtp` reads `mtp.safetensors` (0.64 GB) and
+    /// `config.json`, beside about 15 GB of target weights and tokenizer files. A load that reads
+    /// a file the patterns leave out fails. When a configuration leaves this `nil`, a factory
+    /// takes the patterns of its registry entry for the same repository and model subdirectory,
+    /// so a configuration that pins a revision of a registered checkpoint keeps them.
+    public var downloadPatterns: [String]? = nil
+
     /// Overrides the ``MessageGenerator`` the model would otherwise supply.
     ///
     /// A model class is shared by every checkpoint of its model type, so a fine-tune that
@@ -322,6 +334,7 @@ extension ModelConfiguration: Equatable {
             && lhs.reasoningConfig == rhs.reasoningConfig
             && lhs.weightFileSelection == rhs.weightFileSelection
             && lhs.excludedComponents == rhs.excludedComponents
+            && lhs.downloadPatterns == rhs.downloadPatterns
             && lhs.generationConfig == rhs.generationConfig
             && sameMessageGenerator(lhs.messageGenerator, rhs.messageGenerator)
     }

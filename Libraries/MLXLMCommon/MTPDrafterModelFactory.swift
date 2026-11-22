@@ -127,10 +127,14 @@ public class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
         id: "LiquidAI/LFM2.5-8B-A1B-DSpark"
     )
     /// The DSpark head (`mtp.safetensors`) of Inkling 2 Mini, which this checkpoint ships beside
-    /// its target weights. The drafter loads the head alone.
-    public static let inkling2_mini_oq4e_mtp = ModelConfiguration(
-        id: "mlx-community/Inkling-2-Mini-oQ4e-mtp"
-    )
+    /// its target weights. The drafter loads the head alone, thus a download fetches the head and
+    /// `config.json`, the one file of configuration the drafter reads, and leaves the target
+    /// weights and the tokenizer files out.
+    public static let inkling2_mini_oq4e_mtp: ModelConfiguration = {
+        var configuration = ModelConfiguration(id: "mlx-community/Inkling-2-Mini-oQ4e-mtp")
+        configuration.downloadPatterns = ["mtp.safetensors", "config.json"]
+        return configuration
+    }()
 
     private static func all() -> [ModelConfiguration] {
         [

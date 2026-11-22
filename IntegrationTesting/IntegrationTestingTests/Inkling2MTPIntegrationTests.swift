@@ -40,6 +40,29 @@ private let inkling2MiniDrafter = ModelConfiguration(
 private let inkling2MiniOQ4eTarget = ModelConfiguration(
     id: "mlx-community/Inkling-2-Mini-oQ4e-mtp", revision: inkling2MiniOQ4eMTPRevision)
 
+/// The most bytes a drafter-only download of the oQ4e checkpoint may leave in the cache: 1 GiB,
+/// above `mtp.safetensors` (0.64 GB) and `config.json`, far below the 15 GB of target weights.
+private let drafterDownloadByteCeiling = 1 << 30
+
+/// The bytes of the regular files under `root`, each counted once, as the Hub cache keeps a
+/// file in `blobs` and links it from its snapshot.
+///
+/// - Parameter root: the directory to measure.
+/// - Returns: the sum of the sizes of the regular files under `root`; symbolic links count 0.
+/// - Throws: the error of reading a file's attributes.
+private func cachedFileBytes(under root: URL) throws -> Int {
+    let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+    let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys))
+    var bytes = 0
+    while let url = files?.nextObject() as? URL {
+        let values = try url.resourceValues(forKeys: keys)
+        if values.isRegularFile == true {
+            bytes += values.fileSize ?? 0
+        }
+    }
+    return bytes
+}
+
 /// The block of the parity and chat tests: the shared MTP default.
 private let defaultBlockSize = SpeculativeDecodingConfig.defaultMTPBlockSize
 
@@ -341,6 +364,40 @@ struct Inkling2MTPIntegrationTests {
                     + "difference| \(difference)")
             #expect(difference == 0)
         }
+    }
+
+    /// A drafter-only load of the oQ4e checkpoint into an empty Hugging Face cache fetches
+    /// `mtp.safetensors` and `config.json` and leaves the target weights and the tokenizer files
+    /// on the Hub, and the drafter loads from those two files.
+    @Test
+    func drafterLoadIntoAnEmptyCacheFetchesOnlyTheHead() async throws {
+        let cacheRoot = FileManager.default.temporaryDirectory
+            .appending(
+                path: "inkling2-drafter-cache-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let client = HuggingFace.HubClient(cache: HuggingFace.HubCache(cacheDirectory: cacheRoot))
+
+        await Inkling2DraftRegistration.register()
+        let container = try await MTPDrafterModelFactory.shared.loadContainer(
+            from: #hubDownloader(client), using: #huggingFaceTokenizerLoader(),
+            configuration: inkling2MiniDrafter)
+
+        let snapshot: URL? = await container.perform { context in
+            guard case .directory(let directory) = context.configuration.id else { return nil }
+            return directory
+        }
+        let directory = try #require(snapshot)
+        let fetched = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { !$0.hasPrefix(".") }
+        let fetchedBytes = try cachedFileBytes(under: cacheRoot)
+        Inkling2ResultLog.report(
+            "INKLING2-MTP",
+            "drafter-only download: \(fetched.sorted()), "
+                + "\(formatted(Double(fetchedBytes) / Double(1 << 30), "%.2f")) GiB in the cache")
+        #expect(Set(fetched) == [Inkling2DraftRegistration.weightFile, "config.json"])
+        #expect(fetchedBytes < drafterDownloadByteCeiling)
+        #expect(await container.perform { $0.model is Inkling2DraftModel })
     }
 
     /// The cost of the parts of a round at a short context: one decode step, a verify pass of

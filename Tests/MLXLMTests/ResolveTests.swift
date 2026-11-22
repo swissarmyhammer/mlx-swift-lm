@@ -1,61 +1,12 @@
 import Foundation
 import MLXLMCommon
+import MLXLMTestSupport
 import Testing
-
-/// A mock downloader that records every call for later assertion.
-private struct MockDownloader: Downloader {
-
-    struct Call: Equatable, Sendable {
-        let id: String
-        let revision: String?
-        let patterns: [String]
-    }
-
-    let calls: LockIsolated<[Call]>
-    let directory: URL
-
-    init(directory: URL = URL(filePath: "/mock")) {
-        self.calls = LockIsolated([])
-        self.directory = directory
-    }
-
-    func download(
-        id: String,
-        revision: String?,
-        matching patterns: [String],
-        useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
-    ) async throws -> URL {
-        calls.withLock { $0.append(Call(id: id, revision: revision, patterns: patterns)) }
-        // Return a unique directory per id so tests can distinguish model vs tokenizer paths.
-        return directory.appending(component: id.replacingOccurrences(of: "/", with: "_"))
-    }
-}
-
-/// Minimal lock-based isolation for collecting values from async contexts.
-private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
-    private var _value: Value
-    private let lock = NSLock()
-
-    init(_ value: Value) { _value = value }
-
-    func withLock<R>(_ body: (inout Value) -> R) -> R {
-        lock.lock()
-        defer { lock.unlock() }
-        return body(&_value)
-    }
-
-    var value: Value {
-        lock.lock()
-        defer { lock.unlock() }
-        return _value
-    }
-}
 
 @Suite struct ResolveTests {
 
     @Test func nilTokenizerSourceUsesModelDirectory() async throws {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let config = ModelConfiguration(
             id: "org/model", revision: "abc123", tokenizerSource: nil)
 
@@ -64,17 +15,17 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             useLatest: false, progressHandler: { _ in })
 
         // Only one download call — the model itself.
-        #expect(downloader.calls.value.count == 1)
-        #expect(downloader.calls.value[0].id == "org/model")
-        #expect(downloader.calls.value[0].revision == "abc123")
-        #expect(downloader.calls.value[0].patterns.contains("*.jinja"))
+        #expect(downloader.calls.count == 1)
+        #expect(downloader.calls[0].id == "org/model")
+        #expect(downloader.calls[0].revision == "abc123")
+        #expect(downloader.calls[0].patterns.contains("*.jinja"))
 
         // No separate tokenizer download, so both point to the model directory.
         #expect(resolved.modelDirectory == resolved.tokenizerDirectory)
     }
 
     @Test func tokenizerSourceIDWithoutRevisionPassesNil() async throws {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let config = ModelConfiguration(
             id: "org/model", revision: "abc123",
             tokenizerSource: .id("org/tokenizer"))
@@ -83,23 +34,23 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             configuration: config, from: downloader,
             useLatest: false, progressHandler: { _ in })
 
-        #expect(downloader.calls.value.count == 2)
+        #expect(downloader.calls.count == 2)
 
         // Model download uses model revision.
-        #expect(downloader.calls.value[0].id == "org/model")
-        #expect(downloader.calls.value[0].revision == "abc123")
+        #expect(downloader.calls[0].id == "org/model")
+        #expect(downloader.calls[0].revision == "abc123")
 
         // Tokenizer download uses nil revision (provider default).
-        #expect(downloader.calls.value[1].id == "org/tokenizer")
-        #expect(downloader.calls.value[1].revision == nil)
-        #expect(downloader.calls.value[1].patterns.contains("*.jinja"))
+        #expect(downloader.calls[1].id == "org/tokenizer")
+        #expect(downloader.calls[1].revision == nil)
+        #expect(downloader.calls[1].patterns.contains("*.jinja"))
 
         // Model and tokenizer come from different repos, so directories differ.
         #expect(resolved.modelDirectory != resolved.tokenizerDirectory)
     }
 
     @Test func tokenizerSourceIDWithExplicitRevision() async throws {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let config = ModelConfiguration(
             id: "org/model", revision: "v1.0",
             tokenizerSource: .id("org/tokenizer", revision: "tok-v2"))
@@ -108,21 +59,21 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             configuration: config, from: downloader,
             useLatest: false, progressHandler: { _ in })
 
-        #expect(downloader.calls.value.count == 2)
+        #expect(downloader.calls.count == 2)
 
-        #expect(downloader.calls.value[0].id == "org/model")
-        #expect(downloader.calls.value[0].revision == "v1.0")
+        #expect(downloader.calls[0].id == "org/model")
+        #expect(downloader.calls[0].revision == "v1.0")
 
-        #expect(downloader.calls.value[1].id == "org/tokenizer")
-        #expect(downloader.calls.value[1].revision == "tok-v2")
-        #expect(downloader.calls.value[1].patterns.contains("*.jinja"))
+        #expect(downloader.calls[1].id == "org/tokenizer")
+        #expect(downloader.calls[1].revision == "tok-v2")
+        #expect(downloader.calls[1].patterns.contains("*.jinja"))
 
         // Model and tokenizer come from different repos, so directories differ.
         #expect(resolved.modelDirectory != resolved.tokenizerDirectory)
     }
 
     @Test func localDirectorySkipsDownloader() async throws {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let localDir = URL(filePath: "/local/org/model")
         let config = ModelConfiguration(directory: localDir)
 
@@ -131,7 +82,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             useLatest: false, progressHandler: { _ in })
 
         // No downloads should occur for a local directory.
-        #expect(downloader.calls.value.isEmpty)
+        #expect(downloader.calls.isEmpty)
 
         // Both directories point to the local path.
         #expect(resolved.modelDirectory == localDir)
@@ -139,7 +90,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
     }
 
     @Test func remoteModelSubdirectoryScopesDownloadAndResolvedDirectory() async throws {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let config = ModelConfiguration(
             id: "org/multi-variant-model", modelSubdirectory: "4bit")
 
@@ -147,14 +98,14 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             configuration: config, from: downloader,
             useLatest: false, progressHandler: { _ in })
 
-        let call = try #require(downloader.calls.value.first)
+        let call = try #require(downloader.calls.first)
         #expect(call.patterns == ["4bit/*.safetensors", "4bit/*.json", "4bit/*.jinja"])
         #expect(resolved.modelDirectory.lastPathComponent == "4bit")
         #expect(resolved.tokenizerDirectory == resolved.modelDirectory)
     }
 
     @Test func localModelSubdirectoryResolvesWithoutDownload() async throws {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let root = URL(filePath: "/local/aggregate")
         let config = ModelConfiguration(directory: root, modelSubdirectory: "mlx/4bit")
 
@@ -162,7 +113,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             configuration: config, from: downloader,
             useLatest: false, progressHandler: { _ in })
 
-        #expect(downloader.calls.value.isEmpty)
+        #expect(downloader.calls.isEmpty)
         #expect(resolved.modelDirectory.path == "/local/aggregate/mlx/4bit")
         #expect(try config.modelDirectory == resolved.modelDirectory)
     }
@@ -175,7 +126,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             "variants\n4bit", "variants\u{0000}4bit",
         ])
     func unsafeModelSubdirectoryIsRejectedBeforeDownload(_ subdirectory: String) async {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let config = ModelConfiguration(id: "org/model", modelSubdirectory: subdirectory)
 
         await #expect(
@@ -185,7 +136,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
                 configuration: config, from: downloader,
                 useLatest: false, progressHandler: { _ in })
         }
-        #expect(downloader.calls.value.isEmpty)
+        #expect(downloader.calls.isEmpty)
     }
 
     @Test(
@@ -207,7 +158,7 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
     }
 
     @Test func localDirectoryWithRemoteTokenizerSource() async throws {
-        let downloader = MockDownloader()
+        let downloader = RecordingDownloader()
         let localDir = URL(filePath: "/local/org/model")
         let config = ModelConfiguration(
             directory: localDir,
@@ -218,10 +169,10 @@ private final class LockIsolated<Value: Sendable>: @unchecked Sendable {
             useLatest: false, progressHandler: { _ in })
 
         // Only the tokenizer is downloaded; the model directory is local.
-        #expect(downloader.calls.value.count == 1)
-        #expect(downloader.calls.value[0].id == "org/tokenizer")
-        #expect(downloader.calls.value[0].revision == "v3")
-        #expect(downloader.calls.value[0].patterns.contains("*.jinja"))
+        #expect(downloader.calls.count == 1)
+        #expect(downloader.calls[0].id == "org/tokenizer")
+        #expect(downloader.calls[0].revision == "v3")
+        #expect(downloader.calls[0].patterns.contains("*.jinja"))
 
         #expect(resolved.modelDirectory == localDir)
         #expect(resolved.tokenizerDirectory != localDir)

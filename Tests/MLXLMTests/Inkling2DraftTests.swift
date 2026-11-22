@@ -197,6 +197,49 @@ struct Inkling2DraftLoadingTests {
         #expect(MTPDrafterRegistry.shared.contains(id: "mlx-community/Inkling-2-Mini-oQ4e-mtp"))
     }
 
+    @Test("The registry entry of the oQ4e checkpoint downloads the head and config.json alone")
+    func registryDownloadsTheHeadAlone() {
+        #expect(
+            MTPDrafterRegistry.inkling2_mini_oq4e_mtp.downloadPatterns == [
+                Inkling2DraftRegistration.weightFile, "config.json",
+            ])
+        let others = MTPDrafterRegistry.shared.models.filter {
+            $0.name != MTPDrafterRegistry.inkling2_mini_oq4e_mtp.name
+        }
+        #expect(!others.isEmpty)
+        #expect(others.allSatisfy { $0.downloadPatterns == nil })
+    }
+
+    @Test("A drafter-only load of the oQ4e checkpoint at a pinned revision fetches only the head")
+    func pinnedDrafterLoadFetchesTheHeadAlone() async throws {
+        await Inkling2DraftRegistration.register()
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "inkling2-dspark-download-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let downloader = RecordingDownloader(directory: root)
+        let id = MTPDrafterRegistry.inkling2_mini_oq4e_mtp.name
+        let directory = downloader.directory(for: id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(tinyDraftJSON.utf8).write(to: directory.appending(component: "config.json"))
+        let source = try tinyDrafter()
+        try save(
+            arrays: Dictionary(uniqueKeysWithValues: source.parameters().flattened()),
+            url: directory.appending(component: Inkling2DraftRegistration.weightFile))
+        let revision = "3eea042751cd296b7266628a8342c1749242e1fe"
+
+        let container = try await MTPDrafterModelFactory.shared.loadContainer(
+            from: downloader, using: UnusedTokenizerLoader(),
+            configuration: ModelConfiguration(id: id, revision: revision))
+
+        #expect(
+            downloader.calls == [
+                .init(
+                    id: id, revision: revision,
+                    patterns: [Inkling2DraftRegistration.weightFile, "config.json"])
+            ])
+        #expect(await container.perform { $0.model is Inkling2DraftModel })
+    }
+
     @Test("A target the drafter cannot draft for throws the drafter, the expectation and the type")
     func incompatibleTargetThrows() throws {
         let drafter = Inkling2DraftModel(try tinyDraftConfiguration())

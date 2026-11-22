@@ -154,6 +154,32 @@ extension GenericModelFactory {
 
 extension GenericModelFactory {
 
+    /// `configuration`, with the ``ModelConfiguration/downloadPatterns`` of the entry of
+    /// ``modelRegistry`` for the same repository and model subdirectory when `configuration`
+    /// states none.
+    ///
+    /// A caller that pins a revision builds its own configuration of a registered checkpoint,
+    /// and still downloads only the files the registry entry names.
+    ///
+    /// - Parameter configuration: the configuration of a load.
+    /// - Returns: `configuration` with the patterns of its registry entry, or `configuration`
+    ///   when it states patterns, names a local directory, or has no registry entry with
+    ///   patterns.
+    func withRegisteredDownloadPatterns(_ configuration: ModelConfiguration) -> ModelConfiguration {
+        guard configuration.downloadPatterns == nil, case .id(let id, _) = configuration.id,
+            modelRegistry.contains(id: id)
+        else {
+            return configuration
+        }
+        let registered = modelRegistry.configuration(id: id)
+        guard registered.modelSubdirectory == configuration.modelSubdirectory else {
+            return configuration
+        }
+        var configuration = configuration
+        configuration.downloadPatterns = registered.downloadPatterns
+        return configuration
+    }
+
     /// Load a model from a ``Downloader`` and ``ModelConfiguration``,
     /// producing a ``ModelContext``.
     ///
@@ -174,7 +200,7 @@ extension GenericModelFactory {
         progress: LoadProgressHandlers = .init()
     ) async throws -> sending ContextType {
         let resolved = try await resolve(
-            configuration: configuration, from: downloader,
+            configuration: withRegisteredDownloadPatterns(configuration), from: downloader,
             useLatest: useLatest,
             progressHandler: progress.download ?? { _ in })
         return try await _load(
@@ -208,7 +234,7 @@ extension GenericModelFactory {
         progress: LoadProgressHandlers = .init()
     ) async throws -> ContainerType {
         let resolved = try await resolve(
-            configuration: configuration, from: downloader,
+            configuration: withRegisteredDownloadPatterns(configuration), from: downloader,
             useLatest: useLatest,
             progressHandler: progress.download ?? { _ in })
         let context = try await _load(
@@ -290,7 +316,7 @@ public func resolve(
     switch configuration.id {
     case .id(let id, let revision):
         let subdirectory = try configuration.normalizedModelSubdirectory
-        let patterns = modelDownloadPatterns.map { pattern in
+        let patterns = (configuration.downloadPatterns ?? modelDownloadPatterns).map { pattern in
             subdirectory.map { "\($0)/\(pattern)" } ?? pattern
         }
         let repositoryDirectory = try await downloader.download(
