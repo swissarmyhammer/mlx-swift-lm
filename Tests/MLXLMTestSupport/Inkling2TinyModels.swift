@@ -34,6 +34,47 @@ public enum Inkling2TinyModels {
         "forget_gate_proj.weight", "message_gate_proj.weight", ".global_scale",
     ]
 
+    /// The `config.json` of a tiny Inkling 2 target with a DSpark head, as
+    /// `mlx-community/Inkling-2-Mini-oQ4e-mtp` carries its MTP configuration: the target of
+    /// `Inkling2ModelTests`, whose eight layer visits are the prelude, two passes of the loop
+    /// core and the coda, and a drafter of two draft layers, a window of six, so it attends the
+    /// newest five context rows, blocks of four, and the feature taps `[1, 3, 5, 8]`.
+    ///
+    /// - Parameters:
+    ///   - vocabularySize: the rows of the embedding and of the vocabulary projection.
+    ///   - unpaddedVocabularySize: the tokens of the vocabulary that are not padding.
+    /// - Returns: the `config.json`.
+    public static func draftJSON(vocabularySize: Int, unpaddedVocabularySize: Int) -> String {
+        """
+        {
+          "model_type": "inkling2_loop",
+          "text_config": {
+            "hidden_size": 64, "num_hidden_layers": 6, "vocab_size": \(vocabularySize),
+            "unpadded_vocab_size": \(unpaddedVocabularySize), "num_attention_heads": 4,
+            "num_key_value_heads": 2, "head_dim": 32, "sliding_window_size": 8,
+            "local_layer_ids": [0, 1, 2, 4], "d_rel": 8, "rel_extent": 16,
+            "log_scaling_n_floor": 4, "log_scaling_alpha": 0.1, "rms_norm_eps": 1e-06,
+            "qk_l2_clip_threshold": 22.6, "rel_l2_clip_threshold": 8.0, "sconv_kernel_size": 4,
+            "n_layers_per_attn_res_block": 2, "n_routed_experts": 4, "num_experts_per_tok": 2,
+            "intermediate_size": 32, "mlp_gate_softcap": 4.0, "mlp_up_softcap": 25.0,
+            "route_scale": 2.0, "final_logit_softcapping": 30.0,
+            "loop_config": {
+              "core_start": 2, "core_end": 4, "num_passes": 2, "gate_rank": 8,
+              "is_varloop": false
+            }
+          },
+          "mtp_config": {
+            "hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4,
+            "num_key_value_heads": 2, "head_dim": 16, "intermediate_size": 96,
+            "rms_norm_eps": 1e-06, "rope_theta": 1000000.0, "local_layer_ids": [0],
+            "sliding_window_size": 6, "block_size": 4, "markov_rank": 8,
+            "markov_head_type": "rnn_hidden", "q_bias": false, "o_bias": false,
+            "target_layer_ids": [1, 3, 5, 8]
+          }
+        }
+        """
+    }
+
     /// A target of `json` with random weights and NVFP4 experts. In bfloat16, the tensors that
     /// the checkpoint stores in float32 stay float32, and the model is prepared as after a load.
     ///

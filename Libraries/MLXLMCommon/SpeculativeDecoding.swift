@@ -6,13 +6,19 @@ import MLXNN
 
 /// Why a configured ``ChatSession`` selected ordinary generation instead of speculation.
 public enum SpeculativeDecodingFallbackReason: Sendable, Equatable {
-    /// The drafter requires greedy sampling, but the temperature is nonzero.
+    /// The drafter cannot speculate with the sampling of the stream: the drafter requires
+    /// greedy sampling but the temperature is nonzero, the parameters ask for log
+    /// probabilities, which an MTP stream does not report, so it stands down before its first
+    /// round, or the sampled verification needs a draft distribution the drafter does not
+    /// report.
     case unsupportedSampling
 
     /// The prepared input contains image, video, or audio tensors.
     case unsupportedMedia
 
-    /// The initial MTP cache-staging probe refused speculation.
+    /// The cache cannot hold a speculative round: the initial MTP cache-staging probe refused
+    /// speculation, or the cache can neither verify a round in place nor stage one when a
+    /// round of the stream begins.
     case unsupportedCache
 
     /// Required speculative state is missing, misaligned, or cannot follow the cache operation.

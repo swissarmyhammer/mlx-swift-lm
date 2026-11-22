@@ -872,6 +872,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// (`ExecutorPromptCachePlan.commitOutcome`), thus the next turn
         /// reuses what the caches hold either way.
         ///
+        /// A pass that its protocol decoder ends before its generation ends
+        /// (``ProtocolPassStop``) counts the tokens the generation produced
+        /// after the stop too: the caches hold them, and so does the ledger.
+        ///
         /// - Parameter info: the completion report of the pass.
         /// - Returns: the generated token count, with the stop token.
         static func generatedTokenCount(of info: GenerateCompletionInfo) -> Int {

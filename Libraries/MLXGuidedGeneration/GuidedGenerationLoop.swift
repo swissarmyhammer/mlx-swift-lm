@@ -161,8 +161,7 @@ public enum GuidedGenerationLoop {
             quantizedKVStart: quantizedKVStart)
         var target = try GuidedTarget(model: context.model, parameters: parameters)
         let speculation = logitProcessor == nil && logitSampler == nil ? speculation : nil
-        let drafter = GuidedSpeculation.drafter(of: speculation, for: target)
-        target.drafterTargetLayerIds = drafter?.targetLayerIds
+        let drafter = GuidedSpeculation.drafter(of: speculation, for: &target)
         let feed = drafter.flatMap { _ in
             speculation?.prefillFeed(
                 target: context.model, parameters: parameters, cachePosition: 0,

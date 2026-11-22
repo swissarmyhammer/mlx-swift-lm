@@ -57,10 +57,19 @@ private struct Inkling2CityFacts {
 /// of its response entry, the completion of each generation-loop pass, and its usage.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 private struct Inkling2MTPCall {
+    /// The metadata of the response entry of the call, which carries its MTP outcome.
     var metadata: [String: GeneratedContent] = [:]
+
+    /// The completion of each generation-loop pass of the call, in order.
     var completions: [GenerateCompletionInfo] = []
+
+    /// The prompt tokens of the call, from its usage: the reused tokens and the fed tokens.
     var renderedTokenCount = 0
+
+    /// The prompt tokens the call reused from the prompt cache, from its usage.
     var cachedTokenCount = 0
+
+    /// The tokens the call generated, from its usage.
     var generatedTokenCount = 0
 
     /// The drafts of the call, from its metadata.
@@ -93,11 +102,17 @@ private struct Inkling2MTPCall {
 /// speculative decoding ends with the metadata of its response entry.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 private final class Inkling2MTPCallLog: Sendable {
+    /// The calls the observer has seen so far.
     private struct Calls {
+        /// The calls that wrote their outcome, in order.
         var finished: [Inkling2MTPCall] = []
+
+        /// What the observer has seen since the last call that wrote its outcome.
         var current = Inkling2MTPCall()
     }
 
+    /// The calls so far. The executor reports on the generation path and the test reads from
+    /// its own task, thus a mutex guards them.
     private let calls = Mutex(Calls())
 
     /// Reads one observer event.
@@ -177,8 +192,10 @@ private enum Inkling2MTPLanguageModel {
 /// The two models of the suite, made once per test process; both share the loaded target.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 private actor Inkling2MTPModels {
+    /// The models of the test process.
     static let shared = Inkling2MTPModels()
 
+    /// The model without MTP and the model with it, once the first test made them.
     private var models: (plain: MLXLanguageModel, mtp: MLXLanguageModel)?
 
     /// The model without MTP and the model with it.
@@ -196,7 +213,14 @@ private actor Inkling2MTPModels {
 
 // MARK: - Tests
 
-@Suite(.serialized, .timeLimit(.minutes(60)))
+/// The minutes the suite may run: two loads of the checkpoints and the alternating pairs of
+/// every kind of call.
+private let suiteTimeLimitMinutes = 60
+
+/// Inkling 2 Mini with its DSpark head through `LanguageModelSession`: text, guided, tool-loop
+/// and sampled calls each draft in every call, report no fallback, and write the output of the
+/// same calls without MTP.
+@Suite(.serialized, .timeLimit(.minutes(suiteTimeLimitMinutes)))
 struct Inkling2FoundationModelsMTPTests {
 
     /// The tokens each call may generate.
@@ -231,11 +255,7 @@ struct Inkling2FoundationModelsMTPTests {
         let value = try await MLXLanguageModel.Executor.$generationObserver.withValue(observer) {
             try await body()
         }
-        let elapsed = (ContinuousClock.now - start).components
-        return (
-            value, log.finished,
-            Double(elapsed.seconds) + Double(elapsed.attoseconds) * 1e-18
-        )
+        return (value, log.finished, (ContinuousClock.now - start).seconds)
     }
 
     /// The decode rate of the generation-loop passes of `calls`: their generated tokens over
@@ -246,6 +266,14 @@ struct Inkling2FoundationModelsMTPTests {
         let tokens = passes.reduce(0) { $0 + $1.generationTokenCount }
         let seconds = passes.reduce(0) { $0 + $1.generateTime }
         return seconds > 0 ? Double(tokens) / seconds : 0
+    }
+
+    /// The rate of the guided calls `calls`, which took `seconds`: a guided pass reports no
+    /// completion, so the rate is the generated tokens over the seconds of the calls, the
+    /// prefill included.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func wallRate(_ calls: [Inkling2MTPCall], seconds: Double) -> Double {
+        seconds > 0 ? Double(calls.reduce(0) { $0 + $1.generatedTokenCount }) / seconds : 0
     }
 
     /// Records an issue for each call of `calls` that did not draft or that fell back.
@@ -275,11 +303,11 @@ struct Inkling2FoundationModelsMTPTests {
                         to: Self.textPrompt, options: Self.options
                     ).content
                 }
-                rates.append((Self.decodeRate(plain.calls), Self.decodeRate(mtp.calls)))
+                let rate = (plain: Self.decodeRate(plain.calls), mtp: Self.decodeRate(mtp.calls))
+                rates.append(rate)
                 Inkling2ResultLog.report(
                     "INKLING2 FM MTP",
-                    "text pair \(pair): plain \(Self.decodeRate(plain.calls)) tok/s, MTP "
-                        + "\(Self.decodeRate(mtp.calls)) tok/s; "
+                    "text pair \(pair): plain \(rate.plain) tok/s, MTP \(rate.mtp) tok/s; "
                         + "\(mtp.calls.map(\.summary))")
                 Self.expectEveryCallDrafts(mtp.calls, "text pair \(pair)")
                 #expect(mtp.value == plain.value, "text pair \(pair): <<<\(mtp.value)>>>")
@@ -314,15 +342,14 @@ struct Inkling2FoundationModelsMTPTests {
                 // as JSON objects.
                 let sameObject =
                     Self.jsonObject(mtp.value) == Self.jsonObject(plain.value)
-                // A guided pass reports no completion: its rate is its tokens over the seconds
-                // of the call, the prefill included.
-                let rate = { (run: (value: String, calls: [Inkling2MTPCall], seconds: Double)) in
-                    Double(run.calls.reduce(0) { $0 + $1.generatedTokenCount }) / run.seconds
-                }
-                rates.append((rate(plain), rate(mtp)))
+                let rate = (
+                    plain: Self.wallRate(plain.calls, seconds: plain.seconds),
+                    mtp: Self.wallRate(mtp.calls, seconds: mtp.seconds)
+                )
+                rates.append(rate)
                 Inkling2ResultLog.report(
                     "INKLING2 FM MTP",
-                    "guided pair \(pair): plain \(rate(plain)) tok/s, MTP \(rate(mtp)) tok/s "
+                    "guided pair \(pair): plain \(rate.plain) tok/s, MTP \(rate.mtp) tok/s "
                         + "(call wall time); \(mtp.calls.map(\.summary)) <<<\(mtp.value)>>>")
                 Self.expectEveryCallDrafts(mtp.calls, "guided pair \(pair)")
                 #expect(
@@ -345,12 +372,13 @@ struct Inkling2FoundationModelsMTPTests {
             for pair in 0 ..< Self.pairCount {
                 let plain = try await Self.toolLoop(models.plain)
                 let mtp = try await Self.toolLoop(models.mtp)
-                rates.append((Self.decodeRate(plain.calls), Self.decodeRate(mtp.calls)))
+                let rate = (plain: Self.decodeRate(plain.calls), mtp: Self.decodeRate(mtp.calls))
+                rates.append(rate)
                 Inkling2ResultLog.report(
                     "INKLING2 FM MTP",
-                    "tool pair \(pair): plain \(Self.decodeRate(plain.calls)) tok/s, MTP "
-                        + "\(Self.decodeRate(mtp.calls)) tok/s; calls \(mtp.value.calls); "
-                        + "\(mtp.calls.map(\.summary)) <<<\(mtp.value.answers)>>>")
+                    "tool pair \(pair): plain \(rate.plain) tok/s, MTP \(rate.mtp) tok/s; "
+                        + "calls \(mtp.value.calls); \(mtp.calls.map(\.summary)) "
+                        + "<<<\(mtp.value.answers)>>>")
                 Self.expectEveryCallDrafts(mtp.calls, "tool pair \(pair)")
                 #expect(mtp.value.loop, "tool pair \(pair): calls \(mtp.value.calls)")
                 #expect(mtp.value.answers == plain.value.answers, "tool pair \(pair)")
@@ -435,4 +463,4 @@ struct Inkling2FoundationModelsMTPTests {
     }
 }
 
-#endif  // FoundationModelsIntegration
+#endif  // FoundationModelsIntegration && canImport(FoundationModels, _version: 2)

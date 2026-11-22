@@ -705,17 +705,19 @@ enum ScriptedExecutorPass {
     private final class PassEventLog: Sendable {
         private let collected = Mutex(ScriptedPassResult())
 
-        /// Adds the reused prompt tokens of `event` when it is a usage event,
-        /// its text when it is response text or reasoning text, its tool name
-        /// when it is a tool call, and counts it when it is a completion.
+        /// Adds the reused prompt tokens and the generated tokens of `event`
+        /// when it is a usage event, its text when it is response text or
+        /// reasoning text, its tool name when it is a tool call, and the tokens
+        /// its generation produced when it is a completion.
         ///
         /// - Parameter event: one event the executor streamed.
         func record(_ event: MLXLanguageModel.Executor.GenerationEvent) {
             switch event {
-            case .updateUsage(let input, _, _):
+            case .updateUsage(let input, let output, _):
                 collected.withLock {
                     $0.reusedTokenCount += input.cachedTokenCount
                     $0.promptTokenCount += input.totalTokenCount
+                    $0.generatedTokenCount += output.totalTokenCount
                 }
             case .appendText(let text, _, .response):
                 collected.withLock { $0.responseText += text }
@@ -723,8 +725,12 @@ enum ScriptedExecutorPass {
                 collected.withLock { $0.reasoningText += text }
             case .toolCall(_, let name, _):
                 collected.withLock { $0.toolCallNames.append(name) }
-            case .completion:
-                collected.withLock { $0.completionCount += 1 }
+            case .completion(let info):
+                collected.withLock {
+                    $0.completionCount += 1
+                    $0.completedTokenCount += MLXLanguageModel.Executor.generatedTokenCount(
+                        of: info)
+                }
             case .updateMetadata:
                 break
             }
@@ -757,6 +763,13 @@ struct ScriptedPassResult: Sendable {
 
     /// The generations of the pass that reported their completion.
     var completionCount = 0
+
+    /// Every generated token that the usage events of the pass report.
+    var generatedTokenCount = 0
+
+    /// Every token that the generations of the pass produced, as their
+    /// completions report them, the stop token included.
+    var completedTokenCount = 0
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)

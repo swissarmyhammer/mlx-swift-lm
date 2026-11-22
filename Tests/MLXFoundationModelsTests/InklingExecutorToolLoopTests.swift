@@ -243,7 +243,16 @@ struct InklingExecutorToolLoopTests {
         #expect(!pass.responseText.contains(stopString))
         #expect(pass.completionCount == 1)
         #expect(pass.promptTokenCount > 0)
+        // The output usage counts every token the generation produced, the tail after the stop
+        // included, as the caches and the prompt-cache ledger hold them.
+        #expect(pass.generatedTokenCount == pass.completedTokenCount)
+        #expect(pass.generatedTokenCount >= Self.tokensThroughTheAnswer)
+        #expect(pass.generatedTokenCount <= Self.loop.answeringTurn.count)
     }
+
+    /// The tokens of the answering turn through its answer: the message and content markers,
+    /// then the answer, which holds the stop string.
+    private static let tokensThroughTheAnswer = 3
 
     @Test("a model that does not declare reasoning renders the effort none")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

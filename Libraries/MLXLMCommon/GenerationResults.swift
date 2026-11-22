@@ -224,13 +224,26 @@ public struct GenerateCompletionInfo: Sendable {
     /// Speculative decoding telemetry, when generation used speculative decoding.
     public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
 
-    /// Why the generation selected ordinary generation despite configured speculation.
+    /// Why the generation did not speculate despite configured speculation.
     ///
-    /// Nil means no fallback was recorded; it does not prove speculative rounds occurred.
-    /// ``ChatSession`` records each of its fallbacks. The MTP generation paths the
-    /// FoundationModels adapter runs record
-    /// ``SpeculativeDecodingFallbackReason/incompatibleDrafter``, with its stated reason in
-    /// ``passthroughReason``; other MTP iterator diagnostics use ``passthroughReason`` alone.
+    /// Non-nil means the generation proposed no draft token. Nil means no fallback was
+    /// recorded; it does not prove speculative rounds occurred. ``ChatSession`` records each of
+    /// its fallbacks. The MTP generation paths the FoundationModels adapter runs record one of:
+    ///
+    /// - ``SpeculativeDecodingFallbackReason/incompatibleDrafter``: the drafter cannot draft for
+    ///   the model.
+    /// - ``SpeculativeDecodingFallbackReason/unsupportedCache``: the cache can neither verify a
+    ///   round in place nor stage one, found before the prefill or at the first round.
+    /// - ``SpeculativeDecodingFallbackReason/unsupportedSampling``: the stream stood down before
+    ///   its first round, because its parameters ask for log probabilities or its drafter
+    ///   reports no draft distribution for the sampled verification.
+    /// - ``SpeculativeDecodingFallbackReason/unavailableContinuation``: the drafter state the
+    ///   stream needs before its first round is missing or lost.
+    ///
+    /// Each carries its stated reason in ``passthroughReason``. A stream that drafted
+    /// (``proposedDraftTokens`` greater than zero) and then decoded its tail one token at a
+    /// time reports no fallback here: it did speculate, and ``passthroughReason`` alone states
+    /// why its tail decoded plainly.
     public internal(set) var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
 
     /// Number of tool-call-shaped outputs rejected during this generation.

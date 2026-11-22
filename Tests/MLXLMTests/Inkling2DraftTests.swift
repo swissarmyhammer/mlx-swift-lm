@@ -14,36 +14,10 @@ import Testing
 // model of `Inkling2ModelTests`, whose eight layer visits are the prelude, two passes of the
 // loop core and the coda.
 
-/// The tiny target of `Inkling2ModelTests` with an MTP configuration in its `config.json`, as
-/// `mlx-community/Inkling-2-Mini-oQ4e-mtp` carries it: two draft layers, a window of six, so the
-/// drafter attends the newest five context rows, and blocks of four.
-private let tinyDraftJSON = """
-    {
-      "model_type": "inkling2_loop",
-      "text_config": {
-        "hidden_size": 64, "num_hidden_layers": 6, "vocab_size": 50,
-        "unpadded_vocab_size": 48, "num_attention_heads": 4, "num_key_value_heads": 2,
-        "head_dim": 32, "sliding_window_size": 8, "local_layer_ids": [0, 1, 2, 4],
-        "d_rel": 8, "rel_extent": 16, "log_scaling_n_floor": 4, "log_scaling_alpha": 0.1,
-        "rms_norm_eps": 1e-06, "qk_l2_clip_threshold": 22.6, "rel_l2_clip_threshold": 8.0,
-        "sconv_kernel_size": 4, "n_layers_per_attn_res_block": 2, "n_routed_experts": 4,
-        "num_experts_per_tok": 2, "intermediate_size": 32, "mlp_gate_softcap": 4.0,
-        "mlp_up_softcap": 25.0, "route_scale": 2.0, "final_logit_softcapping": 30.0,
-        "loop_config": {
-          "core_start": 2, "core_end": 4, "num_passes": 2, "gate_rank": 8,
-          "is_varloop": false
-        }
-      },
-      "mtp_config": {
-        "hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4,
-        "num_key_value_heads": 2, "head_dim": 16, "intermediate_size": 96,
-        "rms_norm_eps": 1e-06, "rope_theta": 1000000.0, "local_layer_ids": [0],
-        "sliding_window_size": 6, "block_size": 4, "markov_rank": 8,
-        "markov_head_type": "rnn_hidden", "q_bias": false, "o_bias": false,
-        "target_layer_ids": [1, 3, 5, 8]
-      }
-    }
-    """
+/// The `config.json` of the tiny target and drafter of ``Inkling2TinyModels``, over a
+/// vocabulary of 50 rows whose last two are padding.
+private let tinyDraftJSON = Inkling2TinyModels.draftJSON(
+    vocabularySize: tinyVocabularyRows, unpaddedVocabularySize: tinyVocabulary)
 
 /// The feature taps of the tiny drafter.
 // swiftlint:disable:next no_magic_numbers the taps tinyDraftJSON names, which the tests compare with what the target and the drafter read
@@ -59,6 +33,9 @@ private let tinyHidden = 64
 
 /// The tokens of the tiny vocabulary that are not padding.
 private let tinyVocabulary = 48
+
+/// The rows of the tiny embedding and vocabulary projection, padding included.
+private let tinyVocabularyRows = 50
 
 /// The total verify block of the tiny drafter: the anchor and three drafts.
 private let tinyBlock = 4
