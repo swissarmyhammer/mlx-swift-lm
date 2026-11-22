@@ -108,8 +108,8 @@ public enum MultiRowQuantizedMatvec {
         /// The packed words one lane reads from one weight row in each block.
         var packsPerLane: Int {
             switch self {
-            case .fast: 2
-            case .generic: 1
+            case .fast: fastPacksPerLane
+            case .generic: genericPacksPerLane
             }
         }
 
@@ -134,9 +134,17 @@ public enum MultiRowQuantizedMatvec {
         }
     }
 
+    /// The packed words one lane of `qmv_fast` reads from one weight row in
+    /// each block, for 4 and 8 bits.
+    private static let fastPacksPerLane = 2
+
+    /// The packed words one lane of the generic `qmv` reads from one weight
+    /// row in each block.
+    private static let genericPacksPerLane = 1
+
     /// The most packed words one lane reads from one weight row in each
-    /// block, those of `qmv_fast` for 4 and 8 bits.
-    private static let mostPacksPerLane = MatvecLayout.fast.packsPerLane
+    /// block, those of `qmv_fast`.
+    private static let mostPacksPerLane = fastPacksPerLane
 
     /// The bits of one packed word of the weights.
     private static let packBits = 32
@@ -227,408 +235,414 @@ public enum MultiRowQuantizedMatvec {
         metalSimdWidthDeclaration + """
             constexpr constant int RESULTS = \(resultsPerSimdGroup);
             constexpr constant int PACKS = \(layout.packsPerLane);
-            constexpr constant int PACK_BITS = \(packBits);
-            constexpr constant int BYTES_PER_PACK = PACK_BITS / 8;
-            constexpr constant int STAGES = \(inputStages);
-            constexpr constant int MOST_VECTORS = \(mostInputVectorsPerLane);
-            #define UNROLL_FULL _Pragma("clang loop unroll(full)")
 
-            /// A decoded weight. Every masked integer and fp4 value the
-            /// kernels decode is exact in half precision.
-            typedef half decoded_weight;
+            """ + sharedHeader
+    }
 
-            /// The bits of the half 1024 in both halves of a word. 1024 has a
-            /// mantissa of zeros, and the mantissa holds every integer below 1024.
-            constexpr constant uint32_t HALF_1024_PAIR_BITS = 0x64006400u;
-            constexpr constant half HALF_1024 = 1024.0h;
+    /// The part of ``header(_:)`` that every matvec layout shares: all of it
+    /// after `PACKS`.
+    private static let sharedHeader = """
+        constexpr constant int PACK_BITS = \(packBits);
+        constexpr constant int BYTES_PER_PACK = PACK_BITS / 8;
+        constexpr constant int STAGES = \(inputStages);
+        constexpr constant int MOST_VECTORS = \(mostInputVectorsPerLane);
+        #define UNROLL_FULL _Pragma("clang loop unroll(full)")
 
-            template <typename T, int VALUES>
-            inline void load_vector(const device T* x, thread float (&x_thread)[VALUES]) {
+        /// A decoded weight. Every masked integer and fp4 value the
+        /// kernels decode is exact in half precision.
+        typedef half decoded_weight;
+
+        /// The bits of the half 1024 in both halves of a word. 1024 has a
+        /// mantissa of zeros, and the mantissa holds every integer below 1024.
+        constexpr constant uint32_t HALF_1024_PAIR_BITS = 0x64006400u;
+        constexpr constant half HALF_1024 = 1024.0h;
+
+        template <typename T, int VALUES>
+        inline void load_vector(const device T* x, thread float (&x_thread)[VALUES]) {
+            UNROLL_FULL for (int i = 0; i < VALUES; i++) {
+                x_thread[i] = x[i];
+            }
+        }
+
+        /// The sum of the inputs of one lane for the bias term of `qdot`, in its order.
+        template <int BITS, int VALUES>
+        inline float affine_sum(thread const float (&x_thread)[VALUES]) {
+            float sum = 0;
+            if (BITS == 4) {
+                // MLX 0.32.4 widens each input before the sum of a pack, not after.
+                UNROLL_FULL for (int i = 0; i < VALUES; i += 4) {
+                    sum += x_thread[i] + x_thread[i + 1] + x_thread[i + 2] + x_thread[i + 3];
+                }
+            } else {
                 UNROLL_FULL for (int i = 0; i < VALUES; i++) {
-                    x_thread[i] = x[i];
+                    sum += x_thread[i];
                 }
             }
+            return sum;
+        }
 
-            /// The sum of the inputs of one lane for the bias term of `qdot`, in its order.
-            template <int BITS, int VALUES>
-            inline float affine_sum(thread const float (&x_thread)[VALUES]) {
-                float sum = 0;
-                if (BITS == 4) {
-                    // MLX 0.32.4 widens each input before the sum of a pack, not after.
-                    UNROLL_FULL for (int i = 0; i < VALUES; i += 4) {
-                        sum += x_thread[i] + x_thread[i + 1] + x_thread[i + 2] + x_thread[i + 3];
-                    }
-                } else {
-                    UNROLL_FULL for (int i = 0; i < VALUES; i++) {
-                        sum += x_thread[i];
-                    }
-                }
-                return sum;
-            }
+        /// The fp4 value `fp_qdot` multiplies by for a nibble.
+        inline decoded_weight fp4_value(uint32_t bits) {
+            half converted = as_type<half>(ushort((bits & 7) << 9));
+            converted *= 16384.0;
+            return bits & 8 ? -converted : converted;
+        }
 
-            /// The fp4 value `fp_qdot` multiplies by for a nibble.
-            inline decoded_weight fp4_value(uint32_t bits) {
-                half converted = as_type<half>(ushort((bits & 7) << 9));
-                converted *= 16384.0;
-                return bits & 8 ? -converted : converted;
-            }
-
-            /// The eight nibbles of each word as fp4 values.
-            template <int VALUES>
-            inline void decode_fp4(
-                thread const uint32_t (&words)[PACKS], thread decoded_weight (&w)[VALUES]) {
-                UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
-                    UNROLL_FULL for (int j = 0; j < 8; j++) {
-                        w[pack * 8 + j] = fp4_value((words[pack] >> (4 * j)) & 0xf);
-                    }
+        /// The eight nibbles of each word as fp4 values.
+        template <int VALUES>
+        inline void decode_fp4(
+            thread const uint32_t (&words)[PACKS], thread decoded_weight (&w)[VALUES]) {
+            UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
+                UNROLL_FULL for (int j = 0; j < 8; j++) {
+                    w[pack * 8 + j] = fp4_value((words[pack] >> (4 * j)) & 0xf);
                 }
             }
+        }
 
-            /// The integers of the weights: for 4 bits each nibble; for 8 bits each byte. A
-            /// shift of a word by `j` fields puts field `j` in its low half and field
-            /// `j + FIELDS / 2` in its high half, and both convert in one step.
-            template <int BITS, int VALUES>
-            inline void decode_affine(
-                thread const uint32_t (&words)[PACKS], thread decoded_weight (&w)[VALUES]) {
-                constexpr int FIELDS = PACK_BITS / BITS;
-                constexpr int HALF_FIELDS = FIELDS / 2;
-                constexpr uint32_t FIELD_PAIR_MASK = ((1u << BITS) - 1) * 0x00010001u;
-                UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
-                    UNROLL_FULL for (int j = 0; j < HALF_FIELDS; j++) {
-                        const uint32_t fields = (words[pack] >> (BITS * j)) & FIELD_PAIR_MASK;
-                        const half2 pair = as_type<half2>(fields | HALF_1024_PAIR_BITS) - HALF_1024;
-                        w[pack * FIELDS + j] = pair.x;
-                        w[pack * FIELDS + j + HALF_FIELDS] = pair.y;
-                    }
+        /// The integers of the weights: for 4 bits each nibble; for 8 bits each byte. A
+        /// shift of a word by `j` fields puts field `j` in its low half and field
+        /// `j + FIELDS / 2` in its high half, and both convert in one step.
+        template <int BITS, int VALUES>
+        inline void decode_affine(
+            thread const uint32_t (&words)[PACKS], thread decoded_weight (&w)[VALUES]) {
+            constexpr int FIELDS = PACK_BITS / BITS;
+            constexpr int HALF_FIELDS = FIELDS / 2;
+            constexpr uint32_t FIELD_PAIR_MASK = ((1u << BITS) - 1) * 0x00010001u;
+            UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
+                UNROLL_FULL for (int j = 0; j < HALF_FIELDS; j++) {
+                    const uint32_t fields = (words[pack] >> (BITS * j)) & FIELD_PAIR_MASK;
+                    const half2 pair = as_type<half2>(fields | HALF_1024_PAIR_BITS) - HALF_1024;
+                    w[pack * FIELDS + j] = pair.x;
+                    w[pack * FIELDS + j + HALF_FIELDS] = pair.y;
                 }
             }
+        }
 
-            /// The packed words of one lane in one weight row of a block.
-            inline void load_words(const device uint32_t* wl, thread uint32_t (&words)[PACKS]) {
-                UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
-                    words[pack] = wl[pack];
+        /// The packed words of one lane in one weight row of a block.
+        inline void load_words(const device uint32_t* wl, thread uint32_t (&words)[PACKS]) {
+            UNROLL_FULL for (int pack = 0; pack < PACKS; pack++) {
+                words[pack] = wl[pack];
+            }
+        }
+
+        /// The packed words and the scale of one lane in one weight row of a block,
+        /// the loads of every format.
+        template <typename S>
+        inline void load_words_and_scale(
+            const device uint32_t* wl, const device S* scales, int group,
+            thread uint32_t (&words)[PACKS], thread S& scale) {
+            load_words(wl, words);
+            scale = scales[group];
+        }
+
+        inline float fp8_e8m0_value(uint8_t bits) {
+            uint32_t out = (bits == 0 ? 0x400000 : (static_cast<uint16_t>(bits) << 23));
+            return as_type<float>(out);
+        }
+
+        /// The sum of the 4-bit packs of one lane, before any scale. Affine weights add
+        /// their bias term to the scaled sum and fp4 weights have none: a bias of 0 is not
+        /// the same as no bias, as it adds +0 to a result of -0.
+        template <int VALUES>
+        inline float pack_sums(
+            thread const decoded_weight (&w)[VALUES], thread const float (&x_thread)[VALUES]) {
+            float accum = 0;
+            UNROLL_FULL for (int i = 0; i < (VALUES / 4); i++) {
+                accum +=
+                    (x_thread[4 * i] * float(w[4 * i]) +
+                     x_thread[4 * i + 1] * float(w[4 * i + 1]) +
+                     x_thread[4 * i + 2] * float(w[4 * i + 2]) +
+                     x_thread[4 * i + 3] * float(w[4 * i + 3]));
+            }
+            return accum;
+        }
+
+        template <int BITS, int VALUES>
+        inline float affine_dot(
+            thread const decoded_weight (&w)[VALUES], thread const float (&x_thread)[VALUES],
+            float scale, float bias, float sum) {
+            float accum = 0;
+            if (BITS == 4) {
+                accum = pack_sums<VALUES>(w, x_thread);
+            } else {
+                UNROLL_FULL for (int i = 0; i < VALUES; i++) {
+                    accum += x_thread[i] * w[i];
                 }
             }
+            return scale * accum + sum * bias;
+        }
 
-            /// The packed words and the scale of one lane in one weight row of a block,
-            /// the loads of every format.
-            template <typename S>
-            inline void load_words_and_scale(
-                const device uint32_t* wl, const device S* scales, int group,
-                thread uint32_t (&words)[PACKS], thread S& scale) {
-                load_words(wl, words);
-                scale = scales[group];
+        /// The place of one lane in the weights, the inputs and the
+        /// outputs, as in `qmv_fast`.
+        template <int BITS, int GROUP_SIZE, int SIMD_GROUPS>
+        struct LaneLayout {
+            static constexpr constant int pack_factor = PACK_BITS / BITS;
+            static constexpr constant int values = pack_factor * PACKS;
+            static constexpr constant int vectors = values / 4;
+            static constexpr constant int block = values * SIMD_WIDTH;
+            static constexpr constant int block_bytes = block * BYTES_PER_PACK / pack_factor;
+            static constexpr constant int scale_step = GROUP_SIZE / values;
+            static constexpr constant int groups_per_block = block / GROUP_SIZE;
+
+            int row_bytes;
+            int row_groups;
+            int out_row;
+
+            LaneLayout(int in_vec_size, uint3 tid, uint simd_gid) thread
+                : row_bytes(in_vec_size * BYTES_PER_PACK / pack_factor),
+                  row_groups(in_vec_size / GROUP_SIZE),
+                  out_row(tid.y * (SIMD_GROUPS * RESULTS) + simd_gid * RESULTS) {}
+
+            int weight_offset(uint simd_lid) const thread {
+                return out_row * row_bytes + simd_lid * PACKS * BYTES_PER_PACK;
             }
 
-            inline float fp8_e8m0_value(uint8_t bits) {
-                uint32_t out = (bits == 0 ? 0x400000 : (static_cast<uint16_t>(bits) << 23));
-                return as_type<float>(out);
+            int scale_offset(uint simd_lid) const thread {
+                return out_row * row_groups + simd_lid / scale_step;
             }
+        };
 
-            /// The sum of the 4-bit packs of one lane, before any scale. Affine weights add
-            /// their bias term to the scaled sum and fp4 weights have none: a bias of 0 is not
-            /// the same as no bias, as it adds +0 to a result of -0.
-            template <int VALUES>
-            inline float pack_sums(
-                thread const decoded_weight (&w)[VALUES], thread const float (&x_thread)[VALUES]) {
-                float accum = 0;
-                UNROLL_FULL for (int i = 0; i < (VALUES / 4); i++) {
-                    accum +=
-                        (x_thread[4 * i] * float(w[4 * i]) +
-                         x_thread[4 * i + 1] * float(w[4 * i + 1]) +
-                         x_thread[4 * i + 2] * float(w[4 * i + 2]) +
-                         x_thread[4 * i + 3] * float(w[4 * i + 3]));
-                }
-                return accum;
-            }
-
-            template <int BITS, int VALUES>
-            inline float affine_dot(
-                thread const decoded_weight (&w)[VALUES], thread const float (&x_thread)[VALUES],
-                float scale, float bias, float sum) {
-                float accum = 0;
-                if (BITS == 4) {
-                    accum = pack_sums<VALUES>(w, x_thread);
-                } else {
-                    UNROLL_FULL for (int i = 0; i < VALUES; i++) {
-                        accum += x_thread[i] * w[i];
-                    }
-                }
-                return scale * accum + sum * bias;
-            }
-
-            /// The place of one lane in the weights, the inputs and the
-            /// outputs, as in `qmv_fast`.
-            template <int BITS, int GROUP_SIZE, int SIMD_GROUPS>
-            struct LaneLayout {
-                static constexpr constant int pack_factor = PACK_BITS / BITS;
-                static constexpr constant int values = pack_factor * PACKS;
-                static constexpr constant int vectors = values / 4;
-                static constexpr constant int block = values * SIMD_WIDTH;
-                static constexpr constant int block_bytes = block * BYTES_PER_PACK / pack_factor;
-                static constexpr constant int scale_step = GROUP_SIZE / values;
-                static constexpr constant int groups_per_block = block / GROUP_SIZE;
-
-                int row_bytes;
-                int row_groups;
-                int out_row;
-
-                LaneLayout(int in_vec_size, uint3 tid, uint simd_gid) thread
-                    : row_bytes(in_vec_size * BYTES_PER_PACK / pack_factor),
-                      row_groups(in_vec_size / GROUP_SIZE),
-                      out_row(tid.y * (SIMD_GROUPS * RESULTS) + simd_gid * RESULTS) {}
-
-                int weight_offset(uint simd_lid) const thread {
-                    return out_row * row_bytes + simd_lid * PACKS * BYTES_PER_PACK;
-                }
-
-                int scale_offset(uint simd_lid) const thread {
-                    return out_row * row_groups + simd_lid / scale_step;
-                }
-            };
-
-            /// Closes each row with the SIMD sum of `qmv_fast` and writes it.
-            template <typename T, int ROWS>
-            inline void store_rows(
-                thread float (&result)[ROWS][RESULTS], device T* y, int out_vec_size,
-                int row_count, uint simd_lid) {
-                UNROLL_FULL for (int r = 0; r < ROWS; r++) {
-                    UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                        float total = simd_sum(result[r][row]);
-                        if (simd_lid == 0 && r < row_count) {
-                            y[r * out_vec_size + row] = static_cast<T>(total);
-                        }
-                    }
-                }
-            }
-
-            /// The scale and the bias of one output row in one affine block.
-            struct AffineScale {
-                float scale;
-                float bias;
-            };
-
-            /// The affine weights of `project_rows`.
-            template <typename T, int GROUP_SIZE, int BITS, int SIMD_GROUPS>
-            struct AffineFormat {
-                typedef LaneLayout<BITS, GROUP_SIZE, SIMD_GROUPS> Layout;
-                typedef AffineScale Scale;
-
-                /// The packed words, the scale and the bias of one output row in one
-                /// block, as the lane reads them.
-                struct Raw {
-                    uint32_t words[PACKS];
-                    T scale;
-                    T bias;
-                };
-
-                const device T* scales;
-                const device T* biases;
-
-                void advance(int groups) thread {
-                    scales += groups;
-                    biases += groups;
-                }
-
-                void fetch_row(const device uint32_t* wl, int group, thread Raw& raw) const thread {
-                    load_words_and_scale(wl, scales, group, raw.words, raw.scale);
-                    raw.bias = biases[group];
-                }
-
-                static void decode(
-                    thread const Raw& raw, thread decoded_weight (&w)[Layout::values],
-                    thread Scale& s) {
-                    decode_affine<BITS, Layout::values>(raw.words, w);
-                    s.scale = raw.scale;
-                    s.bias = raw.bias;
-                }
-
-                static float sum(thread const float (&x_thread)[Layout::values]) {
-                    return affine_sum<BITS, Layout::values>(x_thread);
-                }
-
-                static float dot(
-                    thread const decoded_weight (&w)[Layout::values],
-                    thread const float (&x_thread)[Layout::values], thread const Scale& s,
-                    float sum) {
-                    return affine_dot<BITS, Layout::values>(w, x_thread, s.scale, s.bias, sum);
-                }
-            };
-
-            /// The mxfp4 weights of `project_rows`: no bias, thus no sum of the inputs.
-            template <typename T, int GROUP_SIZE, int SIMD_GROUPS>
-            struct Mxfp4Format {
-                typedef LaneLayout<4, GROUP_SIZE, SIMD_GROUPS> Layout;
-                typedef float Scale;
-
-                /// The packed words and the e8m0 scale of one output row in one block,
-                /// as the lane reads them.
-                struct Raw {
-                    uint32_t words[PACKS];
-                    uint8_t scale;
-                };
-
-                const device uint8_t* scales;
-
-                void advance(int groups) thread {
-                    scales += groups;
-                }
-
-                void fetch_row(const device uint32_t* wl, int group, thread Raw& raw) const thread {
-                    load_words_and_scale(wl, scales, group, raw.words, raw.scale);
-                }
-
-                static void decode(
-                    thread const Raw& raw, thread decoded_weight (&w)[Layout::values],
-                    thread Scale& s) {
-                    decode_fp4<Layout::values>(raw.words, w);
-                    s = fp8_e8m0_value(raw.scale);
-                }
-
-                static float sum(thread const float (&)[Layout::values]) {
-                    return 0;
-                }
-
-                static float dot(
-                    thread const decoded_weight (&w)[Layout::values],
-                    thread const float (&x_thread)[Layout::values], thread const Scale& s, float) {
-                    return s * pack_sums<Layout::values>(w, x_thread);
-                }
-            };
-
-            /// The rows whose inputs one SIMD group puts in threadgroup memory: the rows
-            /// `simd_gid`, `simd_gid + SIMD_GROUPS` and so on.
-            template <int ROWS, int SIMD_GROUPS>
-            struct StagedRows {
-                static constexpr constant int loads = (ROWS + SIMD_GROUPS - 1) / SIMD_GROUPS;
-
-                static int row(uint simd_gid, int load) {
-                    return int(simd_gid) + load * SIMD_GROUPS;
-                }
-            };
-
-            /// One stage of the inputs in threadgroup memory: for each row, the float4
-            /// vectors of the inputs of each lane, lane by lane so the lanes of a SIMD
-            /// group read consecutive vectors, and the sum of the inputs of each lane.
-            template <int ROWS>
-            struct InputStage {
-                static constexpr constant int vectors = ROWS * MOST_VECTORS * SIMD_WIDTH;
-                static constexpr constant int sums = ROWS * SIMD_WIDTH;
-
-                threadgroup float4* x;
-                threadgroup float* sum;
-
-                InputStage(threadgroup float4* staged_x, threadgroup float* staged_sums, int stage) thread
-                    : x(staged_x + stage * vectors), sum(staged_sums + stage * sums) {}
-
-                int vector(int r, int v, uint simd_lid) const thread {
-                    return (r * MOST_VECTORS + v) * SIMD_WIDTH + simd_lid;
-                }
-
-                int lane_sum(int r, uint simd_lid) const thread {
-                    return r * SIMD_WIDTH + simd_lid;
-                }
-            };
-
-            /// The packed words and the scales of the `RESULTS` weight rows of one lane in
-            /// the block whose first row starts at `ws`, read through `format`.
-            template <typename Format>
-            inline void fetch_block(
-                thread const Format& format, const device uint8_t* ws, int row_bytes,
-                int row_groups, thread typename Format::Raw (&raw)[RESULTS]) {
+        /// Closes each row with the SIMD sum of `qmv_fast` and writes it.
+        template <typename T, int ROWS>
+        inline void store_rows(
+            thread float (&result)[ROWS][RESULTS], device T* y, int out_vec_size,
+            int row_count, uint simd_lid) {
+            UNROLL_FULL for (int r = 0; r < ROWS; r++) {
                 UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                    format.fetch_row(
-                        (const device uint32_t*)(ws + row * row_bytes), row * row_groups, raw[row]);
+                    float total = simd_sum(result[r][row]);
+                    if (simd_lid == 0 && r < row_count) {
+                        y[r * out_vec_size + row] = static_cast<T>(total);
+                    }
                 }
             }
+        }
 
-            /// Runs the rows of one threadgroup through the weights `format` reads.
-            ///
-            /// The loop keeps the weights, the inputs and the results of a block in
-            /// its own body: a helper that takes those arrays by reference made the
-            /// 4-row matmuls of a Qwen3.8 step about 0.3 ms slower on the M5 Ultra.
-            template <typename T, typename Format, int ROWS, int SIMD_GROUPS>
-            inline void project_rows(
-                Format format, const device T* x, const device uint32_t* w, device T* y,
-                int in_vec_size, int out_vec_size, int first_row, int row_count, uint3 tid,
-                uint simd_gid, uint simd_lid, threadgroup float4* staged_x,
-                threadgroup float* staged_sums) {
-                typedef typename Format::Layout Layout;
-                typedef StagedRows<ROWS, SIMD_GROUPS> Staged;
-                const Layout layout(in_vec_size, tid, simd_gid);
-                const device uint8_t* ws = (const device uint8_t*)w + layout.weight_offset(simd_lid);
-                format.advance(layout.scale_offset(simd_lid));
-                x += first_row * in_vec_size + simd_lid * Layout::values;
-                y += first_row * out_vec_size + layout.out_row;
+        /// The scale and the bias of one output row in one affine block.
+        struct AffineScale {
+            float scale;
+            float bias;
+        };
 
-                float pending[Staged::loads][Layout::values];
+        /// The affine weights of `project_rows`.
+        template <typename T, int GROUP_SIZE, int BITS, int SIMD_GROUPS>
+        struct AffineFormat {
+            typedef LaneLayout<BITS, GROUP_SIZE, SIMD_GROUPS> Layout;
+            typedef AffineScale Scale;
+
+            /// The packed words, the scale and the bias of one output row in one
+            /// block, as the lane reads them.
+            struct Raw {
+                uint32_t words[PACKS];
+                T scale;
+                T bias;
+            };
+
+            const device T* scales;
+            const device T* biases;
+
+            void advance(int groups) thread {
+                scales += groups;
+                biases += groups;
+            }
+
+            void fetch_row(const device uint32_t* wl, int group, thread Raw& raw) const thread {
+                load_words_and_scale(wl, scales, group, raw.words, raw.scale);
+                raw.bias = biases[group];
+            }
+
+            static void decode(
+                thread const Raw& raw, thread decoded_weight (&w)[Layout::values],
+                thread Scale& s) {
+                decode_affine<BITS, Layout::values>(raw.words, w);
+                s.scale = raw.scale;
+                s.bias = raw.bias;
+            }
+
+            static float sum(thread const float (&x_thread)[Layout::values]) {
+                return affine_sum<BITS, Layout::values>(x_thread);
+            }
+
+            static float dot(
+                thread const decoded_weight (&w)[Layout::values],
+                thread const float (&x_thread)[Layout::values], thread const Scale& s,
+                float sum) {
+                return affine_dot<BITS, Layout::values>(w, x_thread, s.scale, s.bias, sum);
+            }
+        };
+
+        /// The mxfp4 weights of `project_rows`: no bias, thus no sum of the inputs.
+        template <typename T, int GROUP_SIZE, int SIMD_GROUPS>
+        struct Mxfp4Format {
+            typedef LaneLayout<4, GROUP_SIZE, SIMD_GROUPS> Layout;
+            typedef float Scale;
+
+            /// The packed words and the e8m0 scale of one output row in one block,
+            /// as the lane reads them.
+            struct Raw {
+                uint32_t words[PACKS];
+                uint8_t scale;
+            };
+
+            const device uint8_t* scales;
+
+            void advance(int groups) thread {
+                scales += groups;
+            }
+
+            void fetch_row(const device uint32_t* wl, int group, thread Raw& raw) const thread {
+                load_words_and_scale(wl, scales, group, raw.words, raw.scale);
+            }
+
+            static void decode(
+                thread const Raw& raw, thread decoded_weight (&w)[Layout::values],
+                thread Scale& s) {
+                decode_fp4<Layout::values>(raw.words, w);
+                s = fp8_e8m0_value(raw.scale);
+            }
+
+            static float sum(thread const float (&)[Layout::values]) {
+                return 0;
+            }
+
+            static float dot(
+                thread const decoded_weight (&w)[Layout::values],
+                thread const float (&x_thread)[Layout::values], thread const Scale& s, float) {
+                return s * pack_sums<Layout::values>(w, x_thread);
+            }
+        };
+
+        /// The rows whose inputs one SIMD group puts in threadgroup memory: the rows
+        /// `simd_gid`, `simd_gid + SIMD_GROUPS` and so on.
+        template <int ROWS, int SIMD_GROUPS>
+        struct StagedRows {
+            static constexpr constant int loads = (ROWS + SIMD_GROUPS - 1) / SIMD_GROUPS;
+
+            static int row(uint simd_gid, int load) {
+                return int(simd_gid) + load * SIMD_GROUPS;
+            }
+        };
+
+        /// One stage of the inputs in threadgroup memory: for each row, the float4
+        /// vectors of the inputs of each lane, lane by lane so the lanes of a SIMD
+        /// group read consecutive vectors, and the sum of the inputs of each lane.
+        template <int ROWS>
+        struct InputStage {
+            static constexpr constant int vectors = ROWS * MOST_VECTORS * SIMD_WIDTH;
+            static constexpr constant int sums = ROWS * SIMD_WIDTH;
+
+            threadgroup float4* x;
+            threadgroup float* sum;
+
+            InputStage(threadgroup float4* staged_x, threadgroup float* staged_sums, int stage) thread
+                : x(staged_x + stage * vectors), sum(staged_sums + stage * sums) {}
+
+            int vector(int r, int v, uint simd_lid) const thread {
+                return (r * MOST_VECTORS + v) * SIMD_WIDTH + simd_lid;
+            }
+
+            int lane_sum(int r, uint simd_lid) const thread {
+                return r * SIMD_WIDTH + simd_lid;
+            }
+        };
+
+        /// The packed words and the scales of the `RESULTS` weight rows of one lane in
+        /// the block whose first row starts at `ws`, read through `format`.
+        template <typename Format>
+        inline void fetch_block(
+            thread const Format& format, const device uint8_t* ws, int row_bytes,
+            int row_groups, thread typename Format::Raw (&raw)[RESULTS]) {
+            UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
+                format.fetch_row(
+                    (const device uint32_t*)(ws + row * row_bytes), row * row_groups, raw[row]);
+            }
+        }
+
+        /// Runs the rows of one threadgroup through the weights `format` reads.
+        ///
+        /// The loop keeps the weights, the inputs and the results of a block in
+        /// its own body: a helper that takes those arrays by reference made the
+        /// 4-row matmuls of a Qwen3.8 step about 0.3 ms slower on the M5 Ultra.
+        template <typename T, typename Format, int ROWS, int SIMD_GROUPS>
+        inline void project_rows(
+            Format format, const device T* x, const device uint32_t* w, device T* y,
+            int in_vec_size, int out_vec_size, int first_row, int row_count, uint3 tid,
+            uint simd_gid, uint simd_lid, threadgroup float4* staged_x,
+            threadgroup float* staged_sums) {
+            typedef typename Format::Layout Layout;
+            typedef StagedRows<ROWS, SIMD_GROUPS> Staged;
+            const Layout layout(in_vec_size, tid, simd_gid);
+            const device uint8_t* ws = (const device uint8_t*)w + layout.weight_offset(simd_lid);
+            format.advance(layout.scale_offset(simd_lid));
+            x += first_row * in_vec_size + simd_lid * Layout::values;
+            y += first_row * out_vec_size + layout.out_row;
+
+            float pending[Staged::loads][Layout::values];
+            UNROLL_FULL for (int load = 0; load < Staged::loads; load++) {
+                const int r = Staged::row(simd_gid, load);
+                if (r < row_count) {
+                    load_vector<T, Layout::values>(x + r * in_vec_size, pending[load]);
+                }
+            }
+            typename Format::Raw raw[RESULTS];
+            fetch_block(format, ws, layout.row_bytes, layout.row_groups, raw);
+
+            float result[ROWS][RESULTS] = {};
+            int stage = 0;
+            for (int k = 0; k < in_vec_size; k += Layout::block) {
+                const bool has_next = k + Layout::block < in_vec_size;
+                decoded_weight weights[RESULTS][Layout::values];
+                typename Format::Scale s[RESULTS];
+                UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
+                    Format::decode(raw[row], weights[row], s[row]);
+                }
+                if (has_next) {
+                    ws += Layout::block_bytes;
+                    format.advance(Layout::groups_per_block);
+                    fetch_block(format, ws, layout.row_bytes, layout.row_groups, raw);
+                }
+
+                const InputStage<ROWS> input_stage(staged_x, staged_sums, stage);
                 UNROLL_FULL for (int load = 0; load < Staged::loads; load++) {
                     const int r = Staged::row(simd_gid, load);
                     if (r < row_count) {
-                        load_vector<T, Layout::values>(x + r * in_vec_size, pending[load]);
-                    }
-                }
-                typename Format::Raw raw[RESULTS];
-                fetch_block(format, ws, layout.row_bytes, layout.row_groups, raw);
-
-                float result[ROWS][RESULTS] = {};
-                int stage = 0;
-                for (int k = 0; k < in_vec_size; k += Layout::block) {
-                    const bool has_next = k + Layout::block < in_vec_size;
-                    decoded_weight weights[RESULTS][Layout::values];
-                    typename Format::Scale s[RESULTS];
-                    UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                        Format::decode(raw[row], weights[row], s[row]);
-                    }
-                    if (has_next) {
-                        ws += Layout::block_bytes;
-                        format.advance(Layout::groups_per_block);
-                        fetch_block(format, ws, layout.row_bytes, layout.row_groups, raw);
-                    }
-
-                    const InputStage<ROWS> input_stage(staged_x, staged_sums, stage);
-                    UNROLL_FULL for (int load = 0; load < Staged::loads; load++) {
-                        const int r = Staged::row(simd_gid, load);
-                        if (r < row_count) {
-                            UNROLL_FULL for (int v = 0; v < Layout::vectors; v++) {
-                                input_stage.x[input_stage.vector(r, v, simd_lid)] = float4(
-                                    pending[load][4 * v], pending[load][4 * v + 1],
-                                    pending[load][4 * v + 2], pending[load][4 * v + 3]);
-                            }
-                            input_stage.sum[input_stage.lane_sum(r, simd_lid)] =
-                                Format::sum(pending[load]);
-                            if (has_next) {
-                                load_vector<T, Layout::values>(
-                                    x + Layout::block + r * in_vec_size, pending[load]);
-                            }
+                        UNROLL_FULL for (int v = 0; v < Layout::vectors; v++) {
+                            input_stage.x[input_stage.vector(r, v, simd_lid)] = float4(
+                                pending[load][4 * v], pending[load][4 * v + 1],
+                                pending[load][4 * v + 2], pending[load][4 * v + 3]);
+                        }
+                        input_stage.sum[input_stage.lane_sum(r, simd_lid)] =
+                            Format::sum(pending[load]);
+                        if (has_next) {
+                            load_vector<T, Layout::values>(
+                                x + Layout::block + r * in_vec_size, pending[load]);
                         }
                     }
-                    x += Layout::block;
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                x += Layout::block;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
 
-                    UNROLL_FULL for (int r = 0; r < ROWS; r++) {
-                        if (r < row_count) {
-                            float x_thread[Layout::values];
-                            UNROLL_FULL for (int v = 0; v < Layout::vectors; v++) {
-                                const float4 vector = input_stage.x[input_stage.vector(r, v, simd_lid)];
-                                x_thread[4 * v] = vector.x;
-                                x_thread[4 * v + 1] = vector.y;
-                                x_thread[4 * v + 2] = vector.z;
-                                x_thread[4 * v + 3] = vector.w;
-                            }
-                            const float sum = input_stage.sum[input_stage.lane_sum(r, simd_lid)];
-                            UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
-                                result[r][row] += Format::dot(weights[row], x_thread, s[row], sum);
-                            }
+                UNROLL_FULL for (int r = 0; r < ROWS; r++) {
+                    if (r < row_count) {
+                        float x_thread[Layout::values];
+                        UNROLL_FULL for (int v = 0; v < Layout::vectors; v++) {
+                            const float4 vector = input_stage.x[input_stage.vector(r, v, simd_lid)];
+                            x_thread[4 * v] = vector.x;
+                            x_thread[4 * v + 1] = vector.y;
+                            x_thread[4 * v + 2] = vector.z;
+                            x_thread[4 * v + 3] = vector.w;
+                        }
+                        const float sum = input_stage.sum[input_stage.lane_sum(r, simd_lid)];
+                        UNROLL_FULL for (int row = 0; row < RESULTS; row++) {
+                            result[r][row] += Format::dot(weights[row], x_thread, s[row], sum);
                         }
                     }
-                    stage ^= 1;
                 }
-                store_rows<T, ROWS>(result, y, out_vec_size, row_count, simd_lid);
+                stage ^= 1;
             }
+            store_rows<T, ROWS>(result, y, out_vec_size, row_count, simd_lid);
+        }
 
-            """
-    }
+        """
 
     /// The start of the kernel bodies: the rows of this threadgroup and the
     /// threadgroup memory of their inputs. The row groups of one output tile
@@ -663,33 +677,35 @@ public enum MultiRowQuantizedMatvec {
             project_rows<T, Mxfp4Format<T, GROUP_SIZE, SIMD_GROUPS>, ROWS, SIMD_GROUPS>({scales},
             """ + projectRowsArguments
 
+    /// The kernels of one weight format, one for each matvec layout.
+    ///
+    /// - Parameters:
+    ///   - name: the start of the kernel names; the layout's suffix ends each.
+    ///   - inputNames: the inputs of the kernels.
+    ///   - source: the kernel body of the format.
+    /// - Returns: the kernel of each layout.
+    private static func makeKernels(name: String, inputNames: [String], source: String)
+        -> [MatvecLayout: MLXFast.MLXFastKernel]
+    {
+        Dictionary(
+            uniqueKeysWithValues: MatvecLayout.allCases.map { layout in
+                (
+                    layout,
+                    MLXFast.metalKernel(
+                        name: "\(name)_\(layout.kernelSuffix)", inputNames: inputNames,
+                        outputNames: ["y"], source: source, header: header(layout))
+                )
+            })
+    }
+
     /// The kernel of affine weights in each matvec layout.
-    private static let affineKernels = Dictionary(
-        uniqueKeysWithValues: MatvecLayout.allCases.map { layout in
-            (
-                layout,
-                MLXFast.metalKernel(
-                    name: "multi_row_affine_qmv_\(layout.kernelSuffix)",
-                    inputNames: ["x", "w", "scales", "biases"],
-                    outputNames: ["y"],
-                    source: affineSource,
-                    header: header(layout))
-            )
-        })
+    private static let affineKernels = makeKernels(
+        name: "multi_row_affine_qmv", inputNames: ["x", "w", "scales", "biases"],
+        source: affineSource)
 
     /// The kernel of mxfp4 weights in each matvec layout.
-    private static let mxfp4Kernels = Dictionary(
-        uniqueKeysWithValues: MatvecLayout.allCases.map { layout in
-            (
-                layout,
-                MLXFast.metalKernel(
-                    name: "multi_row_mxfp4_qmv_\(layout.kernelSuffix)",
-                    inputNames: ["x", "w", "scales"],
-                    outputNames: ["y"],
-                    source: mxfp4Source,
-                    header: header(layout))
-            )
-        })
+    private static let mxfp4Kernels = makeKernels(
+        name: "multi_row_mxfp4_qmv", inputNames: ["x", "w", "scales"], source: mxfp4Source)
 
     /// The projection of `x` by `layer`, with each output row bit-identical
     /// to the projection of that row alone in the input range of the type

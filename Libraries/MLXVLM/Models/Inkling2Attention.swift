@@ -308,7 +308,6 @@ final class Inkling2Attention: Module {
         }
         let sharedInput = queryInput === keyInput && keyInput === valueInput
 
-        var result: Projections
         if isSliding, sharedInput, let fused = fusedQuery.fused {
             let (queries, relative, gate, sinks, keys, values) = unpacked(
                 split(
@@ -317,38 +316,41 @@ final class Inkling2Attention: Module {
             return Projections(
                 queries: queries, relative: relative, gate: gate, sinks: sinks, keys: keys,
                 values: values)
-        } else if let fused = isSliding ? queryRows.value : fusedQuery.fused {
-            let (queries, relative, gate, sinks) = unpacked(
+        }
+        let queries: MLXArray
+        let relative: MLXArray
+        let gate: MLXArray
+        let sinks: MLXArray
+        if let fused = isSliding ? queryRows.value : fusedQuery.fused {
+            (queries, relative, gate, sinks) = unpacked(
                 split(apply(fused, queryInput), [queryDim, relativeDim, queryDim, heads]))
-            result = Projections(
-                queries: queries, relative: relative, gate: gate, sinks: sinks,
-                keys: apply(keyProj, keyInput), values: apply(valueProj, valueInput))
         } else {
-            result = Projections(
-                queries: apply(queryProj, queryInput), relative: apply(relativeProj, queryInput),
-                gate: apply(gateProj, queryInput), sinks: apply(sinkProj, queryInput),
-                keys: apply(keyProj, keyInput), values: apply(valueProj, valueInput))
+            (queries, relative, gate, sinks) = (
+                apply(queryProj, queryInput), apply(relativeProj, queryInput),
+                apply(gateProj, queryInput), apply(sinkProj, queryInput)
+            )
         }
 
-        if let convolution = dynamicKeyConvolution {
-            if let fused = fusedKey.fused {
-                let parts = split(
-                    apply(fused, keyInput), [kvDim, convolution.weightProj.weight.dim(0)])
-                (result.keys, result.keyTaps) = (parts[0], parts[1])
-            } else {
-                result.keyTaps = apply(convolution.weightProj, keyInput)
+        /// The projection of `input` by `linear`, and the taps of `convolution` when it is
+        /// dynamic: one matmul when `cache` holds the two fused.
+        func convolvedProjection(
+            _ convolution: Inkling2DynamicShortConvolution?, linear: Linear,
+            cache: FusedQuantizedLinearProjectionCache, input: MLXArray
+        ) -> (MLXArray, MLXArray?) {
+            guard let convolution else { return (apply(linear, input), nil) }
+            guard let fused = cache.fused else {
+                return (apply(linear, input), apply(convolution.weightProj, input))
             }
+            let parts = split(apply(fused, input), [kvDim, convolution.weightProj.weight.dim(0)])
+            return (parts[0], parts[1])
         }
-        if let convolution = dynamicValueConvolution {
-            if let fused = fusedValue.fused {
-                let parts = split(
-                    apply(fused, valueInput), [kvDim, convolution.weightProj.weight.dim(0)])
-                (result.values, result.valueTaps) = (parts[0], parts[1])
-            } else {
-                result.valueTaps = apply(convolution.weightProj, valueInput)
-            }
-        }
-        return result
+        let (keys, keyTaps) = convolvedProjection(
+            dynamicKeyConvolution, linear: keyProj, cache: fusedKey, input: keyInput)
+        let (values, valueTaps) = convolvedProjection(
+            dynamicValueConvolution, linear: valueProj, cache: fusedValue, input: valueInput)
+        return Projections(
+            queries: queries, relative: relative, gate: gate, sinks: sinks, keys: keys,
+            values: values, keyTaps: keyTaps, valueTaps: valueTaps)
     }
 
     private func convolve(

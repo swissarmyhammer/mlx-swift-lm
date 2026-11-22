@@ -127,6 +127,8 @@ extension MTPDrafterModel {
     }
 
     public var maximumBlockSize: Int? { nil }
+    /// No preference: a generation that sets no block size takes
+    /// ``SpeculativeDecodingConfig/defaultMTPBlockSize``.
     public var preferredBlockSize: Int? { nil }
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }

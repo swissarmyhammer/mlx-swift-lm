@@ -33,8 +33,8 @@ struct SpeculativeDecodingConfigTests {
 
     @Test("An MTP block size the caller sets wins over the drafter's preferred block")
     func mtpBlockSizeResolution() {
-        let preferring = PreferredBlockDrafter(preferredBlockSize: 3)
-        let indifferent = PreferredBlockDrafter(preferredBlockSize: nil)
+        let preferring = ConfigTestMTPDrafter(preferredBlockSize: 3)
+        let indifferent = ConfigTestMTPDrafter(preferredBlockSize: nil)
         #expect(SpeculativeDecodingConfig.mtpBlockSize(nil, for: preferring) == 3)
         #expect(SpeculativeDecodingConfig.mtpBlockSize(5, for: preferring) == 5)
         #expect(
@@ -230,27 +230,9 @@ private func makeDraftModelContainer() -> ModelContainer {
 }
 
 private final class ConfigTestMTPDrafter: Module, MTPDrafterModel {
-    func validateCompatibility(with _: any LanguageModel) throws {}
-
-    func draftBlock(
-        target: any LanguageModel,
-        lastToken: MLXArray,
-        lastHidden: MLXArray,
-        sharedKV: [String: (MLXArray, MLXArray)],
-        positionDeltas: MLXArray?,
-        queryOffset: Int,
-        blockSize: Int,
-        sampler: any LogitSampler
-    ) -> MLXArray {
-        MLXArray.zeros([lastToken.dim(0), blockSize - 1], dtype: .int32)
-    }
-}
-
-/// A drafter with a preferred block, or with none.
-private final class PreferredBlockDrafter: Module, MTPDrafterModel {
     let preferredBlockSize: Int?
 
-    init(preferredBlockSize: Int?) {
+    init(preferredBlockSize: Int? = nil) {
         self.preferredBlockSize = preferredBlockSize
         super.init()
     }

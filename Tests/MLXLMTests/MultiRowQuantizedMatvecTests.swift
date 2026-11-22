@@ -105,6 +105,9 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
     private static let everyFormatSeed: UInt64 = 1
     private static let everyThreadgroupWidthSeed: UInt64 = 200
 
+    /// The seed before the first layer of the generic-layout test.
+    private static let genericLayoutSeed: UInt64 = 300
+
     private func makeLayer(
         _ format: Format, inputs: Int, outputs: Int, dtype: DType, seed: UInt64,
         bias: MLXArray? = nil
@@ -142,14 +145,15 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
     }
 
     /// Checks every row of a layer of each format and dtype, for each output
-    /// width of `outputSizes` and the input width `inputs`. The layer seeds
-    /// count up from one past `seed`.
+    /// width of `outputSizes` and the input width `inputs` gives for the bits
+    /// of the format. The layer seeds count up from one past `seed`.
     private func assertEveryFormatAndDtypeMatches(
-        outputSizes: [Int], inputs: Int, seed: UInt64,
+        outputSizes: [Int], inputs inputWidth: (Int) -> Int, seed: UInt64,
         file: StaticString = #filePath, line: UInt = #line
     ) {
         var seed = seed
         for format in Self.formats {
+            let inputs = inputWidth(format.bits)
             for dtype in Self.dtypes {
                 for outputs in outputSizes {
                     seed += 1
@@ -166,12 +170,13 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
 
     func testEveryRowIsBitIdenticalToItsOwnMatvecForEveryFormat() {
         assertEveryFormatAndDtypeMatches(
-            outputSizes: Self.smallOutputSizes, inputs: Self.inputSize, seed: Self.everyFormatSeed)
+            outputSizes: Self.smallOutputSizes, inputs: { _ in Self.inputSize },
+            seed: Self.everyFormatSeed)
     }
 
     func testEveryRowIsBitIdenticalToItsOwnMatvecForEveryThreadgroupWidth() {
         assertEveryFormatAndDtypeMatches(
-            outputSizes: Self.everyTileOutputs, inputs: Self.oddBlockInputSize,
+            outputSizes: Self.everyTileOutputs, inputs: { _ in Self.oddBlockInputSize },
             seed: Self.everyThreadgroupWidthSeed)
     }
 
@@ -184,23 +189,15 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
     }
 
     func testEveryRowIsBitIdenticalToItsOwnMatvecInTheGenericLayout() {
-        var seed: UInt64 = 300
         for format in Self.formats {
             let inputs = Self.genericLayoutWidth(bits: format.bits)
             XCTAssertEqual(
                 MultiRowQuantizedMatvec.MatvecLayout.of(width: inputs, bits: format.bits),
                 .generic, "\(format) K=\(inputs)")
-            for dtype in Self.dtypes {
-                for outputs in Self.everyTileOutputs {
-                    seed += 1
-                    let layer = makeLayer(
-                        format, inputs: inputs, outputs: outputs, dtype: dtype, seed: seed)
-                    assertEveryRowMatches(
-                        layer, width: inputs, dtype: dtype,
-                        label: "\(format) \(dtype) N=\(outputs) K=\(inputs) generic")
-                }
-            }
         }
+        assertEveryFormatAndDtypeMatches(
+            outputSizes: Self.everyTileOutputs, inputs: Self.genericLayoutWidth(bits:),
+            seed: Self.genericLayoutSeed)
     }
 
     func testTheInputWidthPicksTheMatvecLayoutOfMLX() {
