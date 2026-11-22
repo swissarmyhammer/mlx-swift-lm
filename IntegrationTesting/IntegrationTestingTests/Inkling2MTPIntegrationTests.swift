@@ -76,14 +76,6 @@ private let warmUpTokens = 16
 /// The tokens the chat turns may generate.
 private let chatTokens = 384
 
-/// The largest gap of the two best logits at which MTP may write the second best token past the
-/// sliding window, as the fork judges MTP against plain decoding.
-///
-/// Past the window plain decoding reads each sliding layer's keys from a wrapped ring, and a
-/// verify pass reads them in temporal order, so the two sum the attention in another order; a
-/// bfloat16 logit near 30 has a step of 0.125, so the sums can round a near tie apart.
-private let nearTieLogitGap: Float = 0.5
-
 // MARK: - Loading
 
 /// The containers of the target and the drafter, loaded once per test process.
@@ -249,14 +241,17 @@ struct Inkling2MTPIntegrationTests {
     }
 
     /// A verify pass of several tokens computes the logits of each token as a decode step at its
-    /// position does, bit for bit, below the sliding window.
-    @Test(arguments: verifyWidths)
-    func verifyPassMatchesDecodeSteps(width: Int) async throws {
+    /// position does, bit for bit, below the sliding window and past it, where plain decoding
+    /// reads each sliding layer's keys from a wrapped ring and the verify reads them oldest first.
+    @Test(arguments: verifyWidths, [false, true])
+    func verifyPassMatchesDecodeSteps(width: Int, pastTheWindow: Bool) async throws {
         let pair = try await Inkling2MTPPairLoader.shared.pair()
         try await pair.perform { context, _ in
             let model = context.model
-            let prompt = try await chatInput(context, Self.parityPrompts[1]).text.tokens
-                .reshaped(1, -1)
+            let question =
+                pastTheWindow
+                ? Inkling2CheckpointIntegrationTests.longPrompt : Self.parityPrompts[1]
+            let prompt = try await chatInput(context, question).text.tokens.reshaped(1, -1)
             let tokens = MLXArray(
                 (0 ..< width).map { Int32(verifyTokenBase + verifyTokenStride * $0) }
             ).reshaped(1, -1)
@@ -275,7 +270,8 @@ struct Inkling2MTPIntegrationTests {
             let difference = abs(verify - concatenated(steps, axis: 1)).max().item(Float.self)
             Inkling2ResultLog.report(
                 "INKLING2-MTP",
-                "verify L=\(width) vs decode steps: max |logit difference| \(difference)")
+                "verify L=\(width) after \(prompt.dim(1)) tokens vs decode steps: max |logit "
+                    + "difference| \(difference)")
             #expect(difference == 0)
         }
     }
@@ -340,22 +336,22 @@ struct Inkling2MTPIntegrationTests {
 
     /// Plain and MTP decode throughput at a short prompt and at a prompt of about 4k tokens, at
     /// every measured block, each the median of three runs after a warm-up, with the
-    /// acceptance. Below the sliding window MTP emits the tokens of plain decoding; past it each
-    /// divergence is a bfloat16 near tie (see ``nearTieLogitGap``).
+    /// acceptance. At both contexts, below and past the sliding window, MTP emits the tokens of
+    /// plain decoding.
     @Test
     func throughputAtShortAndLongContext() async throws {
         let pair = try await Inkling2MTPPairLoader.shared.pair()
         try await pair.perform { context, drafter in
             let model = context.model
             let contexts = [
-                ("short", try await chatInput(context, Self.storyPrompt), shortContextTokens, true),
+                ("short", try await chatInput(context, Self.storyPrompt), shortContextTokens),
                 (
                     "long",
                     try await chatInput(context, Inkling2CheckpointIntegrationTests.longPrompt),
-                    longContextTokens, false
+                    longContextTokens
                 ),
             ]
-            for (label, input, tokens, exact) in contexts {
+            for (label, input, tokens) in contexts {
                 _ = try plainRun(model, input: input, tokens: warmUpTokens)
                 for blockSize in measuredBlockSizes {
                     _ = try mtpRun(
@@ -399,15 +395,9 @@ struct Inkling2MTPIntegrationTests {
                         #expect(run.passthroughReason == nil, "\(run.passthroughReason ?? "")")
                         let divergence = await findDivergence(
                             model, input: input, mtp: run.tokens, plain: plainRuns[0].tokens)
-                        let description = divergence.map(String.init) ?? ""
-                        if exact {
-                            #expect(
-                                divergence == nil, "\(label) block \(blockSize): \(description)")
-                        } else {
-                            #expect(
-                                divergence?.isNearTie(within: nearTieLogitGap) ?? true,
-                                "\(label): \(description)")
-                        }
+                        #expect(
+                            divergence == nil,
+                            "\(label) block \(blockSize): \(divergence.map(String.init) ?? "")")
                     }
                 }
             }

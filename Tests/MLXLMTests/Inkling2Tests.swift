@@ -688,6 +688,37 @@ struct Inkling2ModelTests {
         #expect(worst < 0.1)
     }
 
+    /// A verify pass of several tokens past the sliding window of 8, where plain decoding reads
+    /// the sliding keys from a wrapped ring and the verify reads them oldest first, computes the
+    /// logits of each token bit for bit as a decode step at its position does.
+    @Test("A verify pass past the sliding window matches decode steps bit for bit")
+    func verifyPastTheWindowMatchesDecodeSteps() throws {
+        let model = try Self.makeModel(bfloat16: true)
+        let tokens = MLXArray((0 ..< 40).map { Int32(($0 * 7 + 3) % 48) }).reshaped(1, -1)
+        let prefill = 12
+        let verifyWidth = 4
+        for start in [prefill, 21, 33] {
+            let stepped = try model.newCache(parameters: nil)
+            eval(model(tokens[0..., ..<prefill], cache: stepped))
+            for position in prefill ..< start {
+                eval(model(tokens[0..., position ..< (position + 1)], cache: stepped))
+            }
+            let steps = (start ..< (start + verifyWidth)).map { position in
+                let step = model(tokens[0..., position ..< (position + 1)], cache: stepped)
+                eval(step)
+                return step
+            }
+            let verified = try model.newCache(parameters: nil)
+            eval(model(tokens[0..., ..<prefill], cache: verified))
+            for position in prefill ..< start {
+                eval(model(tokens[0..., position ..< (position + 1)], cache: verified))
+            }
+            let verify = model(tokens[0..., start ..< (start + verifyWidth)], cache: verified)
+            #expect(
+                maxDifference(verify, concatenated(steps, axis: 1)) == 0, "verify at \(start)")
+        }
+    }
+
     @Test("Chunked prefill matches one prefill")
     func chunkedPrefill() throws {
         let model = try Self.makeModel()

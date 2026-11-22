@@ -791,12 +791,30 @@ func inkling2RowConvolution(
 /// The distance of slot `j` from the newest key. The first `keep` slots are pinned and
 /// `evicted` positions older than their slots. A wrapped ring over the other slots holds the
 /// newest key at `ring - 1`; `ring` is negative when the keys are oldest first.
+///
+/// `key_slot` is its inverse over the ranks `u` of the keys, newest first: rank `u` below
+/// `S - keep` is the key at distance `u`, and the ranks after them are the pinned slots in
+/// order (all `S` of them when a row holds no more keys than the pinned prefix). A loop over the ranks thus reads the keys of each distance in the same order whether
+/// they lie in a wrapped ring, as plain decoding past the sliding window keeps them, or oldest
+/// first, as a speculative verify reads them.
 private let keyDistanceHeader = """
     inline int key_distance(int j, int S, int ring, int keep, int evicted) {
         if (j < keep) {
             return S - 1 - j + evicted;
         }
         return ring >= 0 ? (ring - 1 - j + S - keep) % (S - keep) : S - 1 - j;
+    }
+
+    inline int key_slot(int u, int S, int ring, int keep) {
+        // A row of fewer keys than the pinned prefix holds only pinned keys.
+        const int unpinned = S - min(keep, S);
+        if (u >= unpinned) {
+            return u - unpinned;
+        }
+        if (ring < 0) {
+            return S - 1 - u;
+        }
+        return keep + ((ring - 1 - u - keep) % unpinned + unpinned) % unpinned;
     }
     """
 
@@ -841,7 +859,9 @@ private let relativeDecodeSource = """
         for (int i = 0; i < E; i++) {
             acc[i] = 0.0f;
         }
-        for (int j = int(sg); j < S; j += NSG) {
+        // The keys newest first, so that the sums run in one order in a ring and oldest first.
+        for (int u = int(sg); u < S; u += NSG) {
+            const int j = key_slot(u, S, ring, keep);
             const int d = key_distance(j, S, ring, keep, evicted);
             if (WINDOW > 0 && d >= WINDOW) {
                 continue;
@@ -1085,8 +1105,12 @@ func inkling2DecodeAttention(
         ("T", q.dtype), ("D", d), ("HQ", hq), ("HKV", hkv), ("R", table.dim(1)),
         ("DR", table.dim(0)), ("WINDOW", window), ("PS", causalRows > 0 ? rowParameters : 0),
     ]
-    // Up to a sliding window, one threadgroup per head is fastest; longer caches are split.
-    if s <= singleThreadgroupDecodeKeys {
+    // Up to a sliding window, one threadgroup per head is fastest; longer caches are split. A
+    // sliding layer always takes one threadgroup: the window bounds the keys each row reads, and
+    // the rows of a verify past the window then sum as the decode steps of a wrapped ring do.
+    if s <= singleThreadgroupDecodeKeys
+        || (window > 0 && window <= singleThreadgroupDecodeKeys)
+    {
         let simdgroups = 32
         return kernels.single(
             inputs, template: template + [("NSG", simdgroups)],
