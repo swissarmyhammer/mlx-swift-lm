@@ -31,15 +31,9 @@ public enum Gemma4AssistantRegistration {
         // variant differs only in its `text_config` (`gemma4_unified_text`,
         // `attention_k_eq_v`, `num_global_key_value_heads`), which
         // `Gemma4TextConfiguration` already decodes.
-        for modelType in ["gemma4_assistant", "gemma4_unified_assistant"] {
-            await MTPDrafterTypeRegistry.shared.registerModelType(
-                modelType,
-                creator: { data in
-                    let config = try JSONDecoder().decode(
-                        Gemma4AssistantConfiguration.self, from: data)
-                    return Gemma4AssistantDraftModel(config)
-                }
-            )
-        }
+        await MTPDrafterTypeRegistry.shared.registerDrafter(
+            modelTypes: ["gemma4_assistant", "gemma4_unified_assistant"],
+            configuration: Gemma4AssistantConfiguration.self,
+            create: { Gemma4AssistantDraftModel($0) })
     }
 }

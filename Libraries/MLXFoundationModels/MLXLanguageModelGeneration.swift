@@ -253,12 +253,29 @@ extension MLXLanguageModel.Executor {
                 channel: channel)
             return
         }
+        // A framed token protocol writes tool calls only in its own frames: the
+        // required turn constrains the call to the frame of the model, or
+        // refuses the protocol before it generates.
+        let frame: RequiredToolCallFrame
+        do {
+            frame = try RequiredToolCallFrame(format: resolved.toolCallFormat)
+        } catch let unsupported as RequiredToolCallFrame.UnsupportedFormat {
+            throw Self.unsupportedCapability(.toolCalling, unsupported.description)
+        }
+        // A frame that opens the thinking for the model thinks before every
+        // call, at the rendered effort, even when the caller declared no
+        // reasoning; its thinking frames stream as reasoning, as the frame
+        // decoder streams them on the allowed path.
+        let requiredThinkThenCallConfig =
+            thinkThenCallConfig
+            ?? (frame.reasoningOpenerMarkers.isEmpty ? nil : resolved.reasoningConfig)
         try await runRequiredToolTurn(
             request: request,
             messages: messages,
             enabledToolDefinitions: enabledToolDefinitions,
+            frame: frame,
             toolAwareRender: toolAwareRender,
-            thinkThenCallConfig: thinkThenCallConfig,
+            thinkThenCallConfig: requiredThinkThenCallConfig,
             modelID: modelID,
             requestedMaxTokens: requestedMaxTokens,
             samplingConfiguration: samplingConfiguration,
@@ -402,6 +419,7 @@ extension MLXLanguageModel.Executor {
     ///   - request: The generation request for this turn
     ///   - messages: The chat messages the tool-aware prompt renders from
     ///   - enabledToolDefinitions: The tool definitions the grammar constrains to
+    ///   - frame: The frame the grammar constrains the one tool call to
     ///   - toolAwareRender: The thinking state the tool-aware render carries
     ///   - thinkThenCallConfig: The reasoning config of the think-then-call phase, when active
     ///   - modelID: The model identifier the constraint caches key on
@@ -419,6 +437,7 @@ extension MLXLanguageModel.Executor {
         request: LanguageModelExecutorGenerationRequest,
         messages: [Chat.Message],
         enabledToolDefinitions: [Transcript.ToolDefinition],
+        frame: RequiredToolCallFrame,
         toolAwareRender: ThinkingRender,
         thinkThenCallConfig: ReasoningConfig?,
         modelID: String,
@@ -439,10 +458,7 @@ extension MLXLanguageModel.Executor {
         let toolAwareInput = try await toolAwareRender.prepare(
             messages: messages, tools: toolSpecs, context: context)
 
-        let toolCallingGrammar =
-            try SchemaConverter.encodeToolCallingGrammar(
-                tools: requiredToolDefinitions
-            )
+        let toolCallingGrammar = try frame.grammar(tools: requiredToolDefinitions)
         // The inner JSON envelope is still needed separately to
         // seed `CompletionReserve` -- the wrapper tokens
         // (`<tool_call>`, two `\n`s, `</tool_call>`) are small
@@ -472,13 +488,24 @@ extension MLXLanguageModel.Executor {
         // PHASE 1 (think-then-call): reason unconstrained until
         // `</think>`, retaining the token IDs to prefill into the
         // constrained phase below. Empty on the single-phase path.
+        // A frame that opens the thinking for the model (Inkling 2) appends
+        // its opener to the prompt of the phase, so the phase reasons inside
+        // that frame; phase 2 continues from the opener and the reasoning.
         var reasoningTokenIDs: [Int] = []
+        var openerTokenIDs: [Int] = []
         if let thinkThenCallConfig {
+            openerTokenIDs = frame.reasoningOpenerMarkers.flatMap {
+                context.tokenizer.encode(text: $0, addSpecialTokens: false)
+            }
+            let phase1Input =
+                openerTokenIDs.isEmpty
+                ? toolAwareInput
+                : Self.continuationInput(from: toolAwareInput, appending: openerTokenIDs)
             let primedInside = Self.reasoningPrimedInside(
-                input: toolAwareInput, config: thinkThenCallConfig,
+                input: phase1Input, config: thinkThenCallConfig,
                 tokenizer: context.tokenizer)
             let phase1 = try await runToolCallReasoningPhase(
-                input: toolAwareInput, config: thinkThenCallConfig,
+                input: phase1Input, config: thinkThenCallConfig,
                 primedInside: primedInside, maxTokens: maxTokens,
                 requestedTemperature: request.generationOptions
                     .temperature,
@@ -505,7 +532,7 @@ extension MLXLanguageModel.Executor {
             reasoningTokenIDs.isEmpty
             ? toolAwareInput
             : Self.continuationInput(
-                from: toolAwareInput, appending: reasoningTokenIDs)
+                from: toolAwareInput, appending: openerTokenIDs + reasoningTokenIDs)
         // Shared budget (match the unconstrained path): the
         // envelope continues under the remaining budget, floored
         // at the completion reserve so it always has room to close
@@ -528,6 +555,7 @@ extension MLXLanguageModel.Executor {
 
         let emittedToolCall = await emitRequiredToolCallEvent(
             outputBuffer: outputBuffer,
+            frame: frame,
             toolCallsEntryID: toolCallsEntryID,
             channel: channel
         )
@@ -1736,39 +1764,37 @@ extension MLXLanguageModel.Executor {
         return (collector.reasoningTokenIDs, closed)
     }
 
-    /// Parses a required-mode tool-calling envelope JSON object and emits
+    /// Parses a required-mode tool call in the frame of the turn and emits
     /// its developer tool call.
     ///
-    /// The output buffer is expected to be a JSON object matching the
-    /// shape `{"name": <tool-name>, "arguments": <args>}`. Grammars from
+    /// For the `<tool_call>` envelope frame the output buffer is expected to
+    /// be a JSON object matching the shape `{"name": <tool-name>,
+    /// "arguments": <args>}`. Grammars from
     /// `SchemaConverter.encodeToolCallingGrammar` guarantee either that
     /// shape directly (bare JSON) or that shape wrapped in Qwen's
     /// `<tool_call>\n...\n</tool_call>` special-token delimiters --
-    /// `unwrapToolCallMarkers` below strips the wrapper if present. The
-    /// guided path emits a single `.toolCallDelta` with the arguments JSON
-    /// and a freshly minted toolCallID.
+    /// `unwrapToolCallMarkers` below strips the wrapper if present. Other
+    /// frames parse their own shape (see ``RequiredToolCallFrame/call(in:)``).
+    /// The guided path emits a single `.toolCallDelta` with the arguments
+    /// JSON and a freshly minted toolCallID.
     ///
     /// Required mode never degrades malformed or partial output into a
     /// response event.
     ///
     /// - Parameters:
     ///   - outputBuffer: The output of the guided generation.
+    ///   - frame: The frame the grammar constrained the call to.
     ///   - toolCallsEntryID: The entry of the tool call.
     ///   - channel: The channel that receives the tool call.
     /// - Returns: `true` when the tool call was emitted, and `false` when the output was
     ///   dropped, so the caller can mark the entry as incomplete output.
     func emitRequiredToolCallEvent(
         outputBuffer: String,
+        frame: RequiredToolCallFrame = .toolCallEnvelope,
         toolCallsEntryID: ToolCallsEntryID,
         channel: LanguageModelExecutorGenerationChannel
     ) async -> Bool {
-        let unwrapped = Self.unwrapToolCallMarkers(outputBuffer)
-        let data = Data(unwrapped.utf8)
-        guard
-            let envelope = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-            let name = envelope["name"] as? String
-        else {
+        guard let (name, arguments) = frame.call(in: outputBuffer) else {
             GuidedGenerationDiagnosticSink.current?.recordParse(
                 parsedAsToolCall: false, parsedName: nil)
             Self.logger.error(
@@ -1786,7 +1812,7 @@ extension MLXLanguageModel.Executor {
         // exception for such a value, which `try?` cannot catch, and the
         // process stops.
         guard
-            let arguments = envelope["arguments"],
+            let arguments,
             let argumentsData = try? JSONSerialization.data(
                 withJSONObject: arguments, options: [.fragmentsAllowed]),
             let argumentsJSON = String(data: argumentsData, encoding: .utf8)

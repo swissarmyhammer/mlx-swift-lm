@@ -856,7 +856,7 @@ public final class LLMModelFactory: GenericModelFactory {
         // Chat conventions. An explicit value on the configuration wins, followed
         // by a registered resolver that sees the repo id. Checkpoint metadata then
         // resolves the model declaration against the selected tool template.
-        let modelId = configuration.name
+        let modelId = configuration.repositoryID
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat =
                 conventionsRegistry.toolCallFormat(

@@ -67,7 +67,7 @@ public struct LFM2DSparkConfiguration: Codable, Sendable {
 extension LFM2DSparkConfiguration: ModelConfigurationValidating {
     public func validateModelConfiguration() throws {
         guard modelType == "qwen3",
-            architectures.contains("Lfm2DSparkDraftModel")
+            architectures.contains(LFM2DSparkRegistration.architecture)
         else {
             throw ModelFactoryError.invalidConfiguration(
                 "LFM2 DSpark requires architecture 'Lfm2DSparkDraftModel' and model_type 'qwen3'."
@@ -468,13 +468,10 @@ public final class LFM2DSparkDraftModel: Module, StatefulMTPDrafterModel {
         )
     }
 
+    /// Throws when ``isCompatible(with:)`` does not hold for `target`.
     public func validateCompatibility(with target: any LanguageModel) throws {
-        guard isCompatible(with: target) else {
-            throw MTPDrafterCompatibilityError.incompatibleTarget(
-                drafter: "LFM2DSparkDraftModel",
-                expected: "an LFM2 target with matching dimensions and RoPE parameters",
-                actual: String(describing: type(of: target)))
-        }
+        try requireCompatibleTarget(
+            target, expected: "an LFM2 target with matching dimensions and RoPE parameters")
     }
 
     public func isCompatible(with target: any LanguageModel) -> Bool {

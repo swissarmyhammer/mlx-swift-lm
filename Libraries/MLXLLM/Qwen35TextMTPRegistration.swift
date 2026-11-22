@@ -12,36 +12,17 @@ import MLXLMCommon
 public enum Qwen35TextMTPRegistration {
     public static func register() async {
         let registry = MTPDrafterTypeRegistry.shared
-
-        for modelType in ["qwen3_5_text", "qwen3_8_text"] {
-            await registry.registerModelType(
-                modelType,
-                creator: { data in
-                    let config = try JSONDecoder.json5().decode(
-                        Qwen35TextConfiguration.self, from: data)
-                    return Qwen35MTPDraftModel(config)
-                })
-        }
-
-        for modelType in ["qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe"] {
-            await registry.registerModelType(
-                modelType,
-                creator: { data in
-                    let config = try JSONDecoder.json5().decode(
-                        Qwen35Configuration.self, from: data)
-                    return Qwen35MTPDraftModel(config)
-                })
-        }
-
-        for modelType in ["qwen3_5_mtp", "qwen3_8_mtp"] {
-            await registry.registerModelType(
-                modelType,
-                creator: { data in
-                    let config = try JSONDecoder.json5().decode(
-                        Qwen35Configuration.self, from: data)
-                    return Qwen35MTPDraftModel(config, preconvertedNorms: true)
-                })
-        }
+        await registry.registerDrafter(
+            modelTypes: ["qwen3_5_text", "qwen3_8_text"],
+            configuration: Qwen35TextConfiguration.self,
+            create: { Qwen35MTPDraftModel($0) })
+        await registry.registerDrafter(
+            modelTypes: ["qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe"],
+            configuration: Qwen35Configuration.self,
+            create: { Qwen35MTPDraftModel($0) })
+        await registry.registerDrafter(
+            modelTypes: ["qwen3_5_mtp", "qwen3_8_mtp"], configuration: Qwen35Configuration.self,
+            create: { Qwen35MTPDraftModel($0, preconvertedNorms: true) })
     }
 }
 

@@ -220,57 +220,12 @@ enum SchemaConverter {
     static func encodeToolCallingGrammar(
         tools: [Transcript.ToolDefinition]
     ) throws -> String {
-        guard !tools.isEmpty else {
-            throw SchemaConversionError.noTools
-        }
-
-        let encoder = JSONEncoder()
         // One tag per tool. `begin` fixes `{"name": "<tool>", "arguments": `
         // so the tool name is committed before the arguments schema opens;
         // `content` is the tool's parameter schema; `end` closes the object.
-        //
-        // Each tag's `content.json_schema` compiles as its own independent
-        // JSON Schema document, so a nested `@Generable` type's `$defs` stay
-        // local to that document rather than hoisting to a shared root (contrast
-        // `toolCallingEnvelopeObject`, whose single `oneOf` document needs
-        // per-tool namespacing to avoid same-named defs colliding at one
-        // root). Still run `rewriteDefsRefs` and rename this tool's own
-        // `$defs` keys to the same `<tool>__<def>` scheme, for one
-        // predictable naming convention across both encoders.
-        let toolTags: [[String: Any]] = try tools.map { tool in
-            let paramsData = try encoder.encode(tool.parameters)
-            var paramsAny = rewriteDefsRefs(
-                in: try JSONSerialization.jsonObject(with: paramsData),
-                toolName: tool.name
-            )
-            if var paramsObj = paramsAny as? [String: Any],
-                let defs = paramsObj.removeValue(forKey: "$defs") as? [String: Any]
-            {
-                var renamedDefs: [String: Any] = [:]
-                for (key, value) in defs {
-                    renamedDefs["\(tool.name)__\(key)"] = value
-                }
-                paramsObj["$defs"] = renamedDefs
-                paramsAny = paramsObj
-            }
-            let nameData = try JSONSerialization.data(
-                withJSONObject: tool.name, options: [.fragmentsAllowed])
-            let nameJSON = String(data: nameData, encoding: .utf8) ?? "\"\(tool.name)\""
-            return [
-                "type": "tag",
-                "begin": "{\"name\": \(nameJSON), \"arguments\": ",
-                "content": [
-                    "type": "json_schema",
-                    "json_schema": paramsAny,
-                ],
-                "end": ["}"],
-            ]
+        let perToolOr = try toolCallTags(tools: tools, end: "}") { nameJSON, _ in
+            "{\"name\": \(nameJSON), \"arguments\": "
         }
-        let perToolOr: [String: Any] = [
-            "type": "or",
-            "elements": toolTags,
-        ]
-
         let structuralTag: [String: Any] = [
             "type": "structural_tag",
             "format": [
@@ -292,6 +247,96 @@ enum SchemaConverter {
             "Tool-calling structural-tag JSON (\(jsonString.utf8.count) bytes, \(tools.count) tools)"
         )
         return jsonString
+    }
+
+    /// Encodes the structural-tag grammar of one tool call in Inkling 2's own tool frame:
+    /// `<|message_model|>NAME<|content_invoke_tool_json|>{"name": "NAME", "args": ARGS}<|end_message|>`,
+    /// where `ARGS` follows the parameter schema of the tool `NAME`.
+    ///
+    /// The frame is the one the Inkling 2 chat template renders for a past tool call, thus the
+    /// constrained call is a call in the protocol of the model, and the next turn's render of it
+    /// is a frame the model reads as its own. The keys carry the spaces the model writes.
+    ///
+    /// - Parameter tools: The tools the call may name; not empty.
+    /// - Returns: The structural-tag JSON.
+    /// - Throws: ``SchemaConverter/SchemaConversionError/noTools`` for an empty tool list, or the error of
+    ///   encoding a parameter schema.
+    static func encodeInklingToolCallingGrammar(
+        tools: [Transcript.ToolDefinition]
+    ) throws -> String {
+        let perToolOr = try toolCallTags(tools: tools, end: "}<|end_message|>") {
+            nameJSON, name in
+            "<|message_model|>\(name)<|content_invoke_tool_json|>"
+                + "{\"name\": \(nameJSON), \"args\": "
+        }
+        let structuralTag: [String: Any] = ["type": "structural_tag", "format": perToolOr]
+        let jsonString = try orderedJSONString(structuralTag)
+        logger.debug(
+            "Inkling tool-frame structural-tag JSON (\(jsonString.utf8.count) bytes, \(tools.count) tools)"
+        )
+        return jsonString
+    }
+
+    /// The `or` of one structural tag per tool: `begin` commits to the tool before its parameter
+    /// schema opens, the tool's parameter schema is the content, and `end` closes the call.
+    ///
+    /// Each tag's `content.json_schema` compiles as its own independent JSON Schema document, so
+    /// a nested `@Generable` type's `$defs` stay local to that document rather than hoisting to
+    /// a shared root (contrast `toolCallingEnvelopeObject`, whose single `oneOf` document needs
+    /// per-tool namespacing to avoid same-named defs colliding at one root). Still run
+    /// `rewriteDefsRefs` and rename this tool's own `$defs` keys to the same `<tool>__<def>`
+    /// scheme, for one predictable naming convention across both encoders.
+    ///
+    /// - Parameters:
+    ///   - tools: The tools; not empty.
+    ///   - end: The text that closes a call.
+    ///   - begin: The text that opens the call of a tool, from the JSON string of its name and
+    ///     the name itself.
+    /// - Returns: The `or` format of the tags.
+    /// - Throws: ``SchemaConverter/SchemaConversionError/noTools`` for an empty tool list, or the error of
+    ///   encoding a parameter schema.
+    private static func toolCallTags(
+        tools: [Transcript.ToolDefinition], end: String,
+        begin: (_ nameJSON: String, _ name: String) -> String
+    ) throws -> [String: Any] {
+        guard !tools.isEmpty else {
+            throw SchemaConversionError.noTools
+        }
+
+        let encoder = JSONEncoder()
+        let toolTags: [[String: Any]] = try tools.map { tool in
+            let paramsData = try encoder.encode(tool.parameters)
+            var paramsAny = rewriteDefsRefs(
+                in: try JSONSerialization.jsonObject(with: paramsData),
+                toolName: tool.name
+            )
+            if var paramsObj = paramsAny as? [String: Any],
+                let defs = paramsObj.removeValue(forKey: "$defs") as? [String: Any]
+            {
+                var renamedDefs: [String: Any] = [:]
+                for (key, value) in defs {
+                    renamedDefs["\(tool.name)__\(key)"] = value
+                }
+                paramsObj["$defs"] = renamedDefs
+                paramsAny = paramsObj
+            }
+            let nameData = try JSONSerialization.data(
+                withJSONObject: tool.name, options: [.fragmentsAllowed])
+            let nameJSON = String(data: nameData, encoding: .utf8) ?? "\"\(tool.name)\""
+            return [
+                "type": "tag",
+                "begin": begin(nameJSON, tool.name),
+                "content": [
+                    "type": "json_schema",
+                    "json_schema": paramsAny,
+                ],
+                "end": [end],
+            ]
+        }
+        return [
+            "type": "or",
+            "elements": toolTags,
+        ]
     }
 
     private static func toolCallingEnvelopeObject(

@@ -79,6 +79,10 @@ Declare what a model may do with the `capabilities:` list at construction. Decla
 | `.reasoning` | Run "thinking" models that emit a reasoning trace. |
 | `.vision` | Accept image inputs. |
 
+### Required tool calls
+
+`GenerationOptions(toolCallingMode: .required)` makes the turn call one of the enabled tools: a grammar constrains the output to one tool call, after an unconstrained reasoning phase when the model reasons. The call takes the frame of the model's tool-call format. A plain text syntax writes the `<tool_call>` JSON envelope. Inkling 2 (`ToolCallFormat.inkling`) writes its own tool frame, `<|message_model|>NAME<|content_invoke_tool_json|>{"name": ..., "args": ...}<|end_message|>`, and reasons first, at every effort including `none`, inside a thinking frame that the turn opens, whose text streams as reasoning. Harmony (`gpt_oss`) and ATEM (`atem`) write tool calls only in frames that have no required-mode grammar, so a required turn of such a model throws `LanguageModelError.unsupportedCapability` for `.toolCalling` before it generates; use `.allowed` for them.
+
 ### The schema in the prompt
 
 During guided generation, `MLXLanguageModel` adds the response schema, including its `@Guide` descriptions, to the session's system prompt, so the model knows what each property is for. To leave the prompt unchanged, pass `includeSchemaInPrompt: false`. The grammar enforces the structure either way, but including the schema directly gives the model more information about what it's generating.
