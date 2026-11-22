@@ -2,6 +2,7 @@
 
 import Foundation
 import MLXLMCommon
+import os
 
 /// A ``Downloader`` that records each request and downloads nothing.
 ///
@@ -35,8 +36,8 @@ public struct RecordingDownloader: Downloader {
     /// The parent of the repository directories that the requests answer with.
     public let directory: URL
 
-    /// The requests, in order.
-    private let recorded = RecordedCalls()
+    /// The requests, in order, behind a lock, because a load can download from any thread.
+    private let recorded = OSAllocatedUnfairLock<[Call]>(initialState: [])
 
     /// Creates a downloader whose requests answer with directories under `directory`.
     ///
@@ -47,7 +48,7 @@ public struct RecordingDownloader: Downloader {
 
     /// The requests so far, in order.
     public var calls: [Call] {
-        recorded.calls
+        recorded.withLock { $0 }
     }
 
     /// The directory that a request for `id` answers with.
@@ -59,6 +60,15 @@ public struct RecordingDownloader: Downloader {
         directory.appending(component: id.replacingOccurrences(of: "/", with: "_"))
     }
 
+    /// Records the request and answers with the directory of the repository.
+    ///
+    /// - Parameters:
+    ///   - id: the repository.
+    ///   - revision: the revision, `nil` for the default revision.
+    ///   - patterns: the file patterns of the request.
+    ///   - useLatest: unused: nothing is downloaded.
+    ///   - progressHandler: unused: nothing is downloaded.
+    /// - Returns: ``directory(for:)`` of `id`.
     public func download(
         id: String,
         revision: String?,
@@ -66,26 +76,7 @@ public struct RecordingDownloader: Downloader {
         useLatest: Bool,
         progressHandler: @Sendable @escaping (Progress) -> Void
     ) async throws -> URL {
-        recorded.append(Call(id: id, revision: revision, patterns: patterns))
+        recorded.withLock { $0.append(Call(id: id, revision: revision, patterns: patterns)) }
         return directory(for: id)
-    }
-}
-
-/// The requests of a ``RecordingDownloader``, behind a lock, because a load can download from
-/// any thread.
-private final class RecordedCalls: @unchecked Sendable {
-    private let lock = NSLock()
-    private var values: [RecordingDownloader.Call] = []
-
-    /// The requests so far, in order.
-    var calls: [RecordingDownloader.Call] {
-        lock.withLock { values }
-    }
-
-    /// Records `call` after the requests so far.
-    ///
-    /// - Parameter call: the request.
-    func append(_ call: RecordingDownloader.Call) {
-        lock.withLock { values.append(call) }
     }
 }

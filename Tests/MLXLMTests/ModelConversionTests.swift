@@ -2,6 +2,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import MLXNN
 import XCTest
 
@@ -20,7 +21,7 @@ final class ModelConversionTests: XCTestCase {
     }
 
     func testResolveForModelConversionDownloadsTokenizerSidecarPatterns() async throws {
-        let downloader = ConversionMockDownloader()
+        let downloader = RecordingDownloader()
         let configuration = ModelConfiguration(
             id: "org/model",
             revision: "abc123",
@@ -32,7 +33,7 @@ final class ModelConversionTests: XCTestCase {
             useLatest: false,
             progressHandler: { _ in })
 
-        let calls = downloader.calls.value
+        let calls = downloader.calls
         XCTAssertEqual(calls.count, 2)
         XCTAssertEqual(calls[0].id, "org/model")
         XCTAssertEqual(calls[0].revision, "abc123")
@@ -776,46 +777,4 @@ final class ModelConversionTests: XCTestCase {
         }
     }
 
-}
-
-private struct ConversionMockDownloader: Downloader {
-    struct Call: Equatable, Sendable {
-        let id: String
-        let revision: String?
-        let patterns: [String]
-    }
-
-    let calls = ConversionLockIsolated<[Call]>([])
-
-    func download(
-        id: String,
-        revision: String?,
-        matching patterns: [String],
-        useLatest: Bool,
-        progressHandler: @Sendable @escaping (Progress) -> Void
-    ) async throws -> URL {
-        calls.withLock { $0.append(Call(id: id, revision: revision, patterns: patterns)) }
-        return URL(filePath: "/mock/\(id.replacingOccurrences(of: "/", with: "_"))")
-    }
-}
-
-private final class ConversionLockIsolated<Value: Sendable>: @unchecked Sendable {
-    private var storage: Value
-    private let lock = NSLock()
-
-    init(_ value: Value) {
-        storage = value
-    }
-
-    func withLock<R>(_ body: (inout Value) -> R) -> R {
-        lock.lock()
-        defer { lock.unlock() }
-        return body(&storage)
-    }
-
-    var value: Value {
-        lock.lock()
-        defer { lock.unlock() }
-        return storage
-    }
 }
