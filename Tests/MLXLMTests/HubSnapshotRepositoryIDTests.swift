@@ -69,9 +69,12 @@ struct HubSnapshotRepositoryIDTests {
         arguments: [
             "/models/LiquidAI/LFM2.5-2.6B-MLX", "/cache/models--org/other/rev",
             "/cache/models--/snapshots/rev", "/cache/models--org--name/snapshots",
+            "/cache/models--org--name",
         ])
     func otherDirectoryNamesItsPath(path: String) {
-        let configuration = ModelConfiguration(directory: URL(fileURLWithPath: path))
+        let directory = URL(fileURLWithPath: path)
+        let configuration = ModelConfiguration(directory: directory)
+        #expect(ModelConfiguration.hubCacheRepositoryID(of: directory) == nil)
         #expect(configuration.repositoryID == configuration.name)
     }
 

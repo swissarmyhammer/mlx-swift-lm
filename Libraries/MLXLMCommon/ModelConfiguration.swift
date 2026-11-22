@@ -97,10 +97,11 @@ public struct ModelConfiguration: Sendable {
         else { return nil }
         // The repository directory holds `snapshots`, which holds a directory per revision.
         let snapshotsIndex = components.index(after: repositoryIndex)
-        let revisionIndex = components.index(after: snapshotsIndex)
-        guard revisionIndex < components.endIndex,
+        guard snapshotsIndex < components.endIndex,
             components[snapshotsIndex] == HubCacheLayout.snapshots
         else { return nil }
+        let revisionIndex = components.index(after: snapshotsIndex)
+        guard revisionIndex < components.endIndex else { return nil }
         let encoded = components[repositoryIndex].dropFirst(HubCacheLayout.modelPrefix.count)
         guard let separator = encoded.range(of: HubCacheLayout.ownerSeparator) else { return nil }
         let organization = encoded[..<separator.lowerBound]
