@@ -82,6 +82,16 @@ private let warmUpTokens = 16
 /// The tokens the chat turns may generate.
 private let chatTokens = 384
 
+/// The largest gap of the two best logits at which MTP may write the second best token past the
+/// sliding window, as the fork judges MTP against plain decoding.
+///
+/// Past the window plain decoding reads each sliding layer's keys from a wrapped ring, and a
+/// verify pass reads them in temporal order, so the two sum the attention in another order; a
+/// bfloat16 logit near 30 has a step of 0.125, so the sums can round a near tie apart. Summing
+/// the verify in ring order made it exact but cost the long-context verify about 4% and MTP
+/// about 5% on the M5 (^2r778tc), thus the port keeps the near tie.
+private let nearTieLogitGap: Float = 0.5
+
 // MARK: - Loading
 
 /// The containers of the target and the drafter, loaded once per test process.
@@ -211,7 +221,7 @@ private func findDivergence(
 }
 
 /// Expects `run` to speculate throughout and to emit `plain`, the tokens of plain greedy
-/// decoding after `input`.
+/// decoding after `input`, or to part from it only at a near tie within `nearTieGap`.
 ///
 /// - Parameters:
 ///   - run: the MTP decode.
@@ -219,14 +229,22 @@ private func findDivergence(
 ///   - input: the prompt of both decodes.
 ///   - plain: the tokens of plain greedy decoding.
 ///   - label: the label of the expectations.
+///   - nearTieGap: the largest logit gap of a near tie MTP may round apart, or `nil` to expect
+///     the tokens of plain decoding exactly.
 /// - Returns: where MTP first parts from plain decoding, or `nil` when the two agree.
 @discardableResult
 private func expectMatchesPlain(
-    _ run: DecodeRun, _ target: any LanguageModel, input: LMInput, plain: [Int], label: String
+    _ run: DecodeRun, _ target: any LanguageModel, input: LMInput, plain: [Int], label: String,
+    nearTieGap: Float? = nil
 ) async -> MTPDivergence? {
     #expect(run.passthroughReason == nil, "\(label): \(run.passthroughReason ?? "")")
     let divergence = await findDivergence(target, input: input, mtp: run.tokens, plain: plain)
-    #expect(divergence == nil, "\(label): \(divergence.map(String.init) ?? "")")
+    let description = "\(label): \(divergence.map(String.init) ?? "")"
+    if let nearTieGap {
+        #expect(divergence?.isNearTie(within: nearTieGap) ?? true, "\(description)")
+    } else {
+        #expect(divergence == nil, "\(description)")
+    }
     return divergence
 }
 
@@ -275,17 +293,14 @@ struct Inkling2MTPIntegrationTests {
     }
 
     /// A verify pass of several tokens computes the logits of each token as a decode step at its
-    /// position does, bit for bit, below the sliding window and past it, where plain decoding
-    /// reads each sliding layer's keys from a wrapped ring and the verify reads them oldest first.
-    @Test(arguments: verifyWidths, [false, true])
-    func verifyPassMatchesDecodeSteps(width: Int, pastTheWindow: Bool) async throws {
+    /// position does, bit for bit, below the sliding window.
+    @Test(arguments: verifyWidths)
+    func verifyPassMatchesDecodeSteps(width: Int) async throws {
         let pair = try await Inkling2MTPPairLoader.shared.pair()
         try await pair.perform { context, _ in
             let model = context.model
-            let question =
-                pastTheWindow
-                ? Inkling2CheckpointIntegrationTests.longPrompt : Self.parityPrompts[1]
-            let prompt = try await chatInput(context, question).text.tokens.reshaped(1, -1)
+            let prompt = try await chatInput(context, Self.parityPrompts[1]).text.tokens
+                .reshaped(1, -1)
             let tokens = MLXArray(
                 (0 ..< width).map { Int32(verifyTokenBase + verifyTokenStride * $0) }
             ).reshaped(1, -1)
@@ -370,22 +385,25 @@ struct Inkling2MTPIntegrationTests {
 
     /// Plain and MTP decode throughput at a short prompt and at a prompt of about 4k tokens, at
     /// every measured block, each the median of three runs after a warm-up, with the
-    /// acceptance. At both contexts, below and past the sliding window, MTP emits the tokens of
-    /// plain decoding.
+    /// acceptance. Below the sliding window MTP emits the tokens of plain decoding; past it each
+    /// divergence is a bfloat16 near tie (see ``nearTieLogitGap``).
     @Test
     func throughputAtShortAndLongContext() async throws {
         let pair = try await Inkling2MTPPairLoader.shared.pair()
         try await pair.perform { context, drafter in
             let model = context.model
             let contexts = [
-                ("short", try await chatInput(context, Self.storyPrompt), shortContextTokens),
+                (
+                    "short", try await chatInput(context, Self.storyPrompt), shortContextTokens,
+                    Float?.none
+                ),
                 (
                     "long",
                     try await chatInput(context, Inkling2CheckpointIntegrationTests.longPrompt),
-                    longContextTokens
+                    longContextTokens, Float?.some(nearTieLogitGap)
                 ),
             ]
-            for (label, input, tokens) in contexts {
+            for (label, input, tokens, nearTieGap) in contexts {
                 _ = try plainRun(model, input: input, tokens: warmUpTokens)
                 for blockSize in measuredBlockSizes {
                     _ = try mtpRun(
@@ -428,7 +446,7 @@ struct Inkling2MTPIntegrationTests {
                     for run in runs {
                         await expectMatchesPlain(
                             run, model, input: input, plain: plainRuns[0].tokens,
-                            label: "\(label) block \(blockSize)")
+                            label: "\(label) block \(blockSize)", nearTieGap: nearTieGap)
                     }
                 }
             }
@@ -438,7 +456,8 @@ struct Inkling2MTPIntegrationTests {
     /// The oQ4e target (oMLX layout) beside the 4bit target, with one protocol: the parameter
     /// memory of each, its plain and MTP decode throughput at the short and the long prompt at the
     /// drafter's preferred block and at the shared default (each the median of three runs after a
-    /// warm-up), and greedy MTP emitting the tokens of plain greedy decoding.
+    /// warm-up), and greedy MTP emitting the tokens of plain greedy decoding (past the sliding
+    /// window up to a near tie, see ``nearTieLogitGap``).
     @Test
     func oQ4eTargetBesideThe4BitTarget() async throws {
         let pair = try await Inkling2MTPPairLoader.shared.pair()
@@ -461,16 +480,16 @@ struct Inkling2MTPIntegrationTests {
                     let contexts = [
                         (
                             "short", try await chatInput(context, Self.storyPrompt),
-                            shortContextTokens
+                            shortContextTokens, Float?.none
                         ),
                         (
                             "long",
                             try await chatInput(
                                 context, Inkling2CheckpointIntegrationTests.longPrompt),
-                            longContextTokens
+                            longContextTokens, Float?.some(nearTieLogitGap)
                         ),
                     ]
-                    for (label, input, tokens) in contexts {
+                    for (label, input, tokens, nearTieGap) in contexts {
                         _ = try plainRun(model, input: input, tokens: warmUpTokens)
                         for blockSize in blocks {
                             _ = try mtpRun(
@@ -506,7 +525,8 @@ struct Inkling2MTPIntegrationTests {
                             for run in runs {
                                 await expectMatchesPlain(
                                     run, model, input: input, plain: plain[0].tokens,
-                                    label: "\(name) \(label) block \(blockSize)")
+                                    label: "\(name) \(label) block \(blockSize)",
+                                    nearTieGap: nearTieGap)
                             }
                         }
                     }

@@ -50,8 +50,7 @@ public struct Inkling2TextConfiguration: Codable, Sendable {
     public let slidingKVHeads: Int
     /// The width of one head of a sliding-window layer.
     public let slidingHeadDim: Int
-    /// The tokens a sliding-window layer attends to; at most the 1024 keys of the decode
-    /// attention's single threadgroup, which every sliding layer runs.
+    /// The tokens a sliding-window layer attends to.
     public let slidingWindow: Int
     /// The layers that use sliding-window attention.
     public let localLayerIds: [Int]
@@ -141,13 +140,6 @@ public struct Inkling2TextConfiguration: Codable, Sendable {
         slidingKVHeads = try c.decodeIfPresent(Int.self, forKey: .slidingKVHeads) ?? kvHeads
         slidingHeadDim = try c.decodeIfPresent(Int.self, forKey: .slidingHeadDim) ?? headDim
         slidingWindow = try c.decode(Int.self, forKey: .slidingWindow)
-        guard slidingWindow <= singleThreadgroupDecodeKeys else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .slidingWindow, in: c,
-                debugDescription:
-                    "A sliding window of \(slidingWindow) exceeds the \(singleThreadgroupDecodeKeys) "
-                    + "keys of the single-threadgroup decode attention")
-        }
         localLayerIds = try c.decodeIfPresent([Int].self, forKey: .localLayerIds) ?? []
         relativeDim = try c.decode(Int.self, forKey: .relativeDim)
         relativeExtent = try c.decode(Int.self, forKey: .relativeExtent)

@@ -685,24 +685,12 @@ struct Inkling2ModelTests {
         #expect(worst < 0.1)
     }
 
-    /// A verify pass of several tokens past the sliding window of 8, where plain decoding reads
-    /// the sliding keys from a wrapped ring and the verify reads them oldest first, computes the
-    /// logits of each token bit for bit as a decode step at its position does.
-    @Test("A sliding window beyond the single-threadgroup decode attention is rejected")
-    func slidingWindowBound() throws {
-        let json = Self.tinyJSON.replacingOccurrences(
-            of: "\"sliding_window_size\": 8", with: "\"sliding_window_size\": 2048")
-        #expect(throws: DecodingError.self) {
-            try JSONDecoder().decode(Inkling2Configuration.self, from: Data(json.utf8))
-        }
-        let bound = Self.tinyJSON.replacingOccurrences(
-            of: "\"sliding_window_size\": 8", with: "\"sliding_window_size\": 1024")
-        #expect(
-            try JSONDecoder().decode(Inkling2Configuration.self, from: Data(bound.utf8))
-                .textConfiguration.slidingWindow == 1024)
-    }
-
-    @Test("A verify pass past the sliding window matches decode steps bit for bit")
+    /// A verify pass of several tokens past the sliding window of 8 agrees with decode steps at
+    /// its positions up to bfloat16 rounding. Plain decoding reads the sliding keys from a wrapped
+    /// ring and the verify reads them oldest first, so the attention sums run in another order;
+    /// summing a verify in ring order costs the long-context verify about 4% (^2r778tc), thus the
+    /// port keeps the two orders.
+    @Test("A verify pass past the sliding window matches decode steps up to rounding")
     func verifyPastTheWindowMatchesDecodeSteps() throws {
         let model = try Self.makeModel(bfloat16: true)
         let tokens = MLXArray((0 ..< 40).map { Int32(($0 * 7 + 3) % 48) }).reshaped(1, -1)
@@ -713,7 +701,7 @@ struct Inkling2ModelTests {
             let difference = try verifyDifferenceFromDecodeSteps(
                 model, prefix: [tokens[0..., ..<prefill]] + steps,
                 verify: tokens[0..., start ..< (start + verifyWidth)])
-            #expect(difference == 0, "verify at \(start)")
+            #expect(difference < 0.1, "verify at \(start)")
         }
     }
 
