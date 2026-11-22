@@ -437,11 +437,19 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         }
     }
 
-    /// Strips the `model.` scope and sets each expert layer to its checkpoint's quantization.
+    /// Maps an oMLX checkpoint onto the Hugging Face layout (``Inkling2OMLXLayout``), strips the
+    /// `model.` scope and sets each expert layer to its checkpoint's quantization.
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = checkpoint
-        var weights = [String: MLXArray](minimumCapacity: checkpoint.weights.count)
-        for (key, value) in checkpoint.weights {
+        var source = checkpoint.weights
+        if Inkling2OMLXLayout.holdsOMLXLayout(source) {
+            source = Inkling2OMLXLayout.remap(source, text: config.textConfiguration)
+            checkpoint.perLayerQuantization = checkpoint.perLayerQuantization.map {
+                Inkling2OMLXLayout.remap($0)
+            }
+        }
+        var weights = [String: MLXArray](minimumCapacity: source.count)
+        for (key, value) in source {
             var key = key
             if key.hasPrefix("model.") { key = String(key.dropFirst("model.".count)) }
             weights[key] = value

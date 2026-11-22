@@ -3,14 +3,14 @@
 // Real-checkpoint tests of the Inkling 2 Mini DSpark drafter (`mtp.safetensors`): greedy MTP
 // emits the tokens of plain greedy decoding, a verify pass computes the logits of decode steps
 // bit for bit, the cost of the parts of a round, the decode throughput of plain and MTP decoding
-// at a short and a 4k-token context with the acceptance rate, and prompt cache reuse across the
-// turns of a `ChatSession` with MTP on.
+// at a short and a 4k-token context with the acceptance rate, prompt cache reuse across the
+// turns of a `ChatSession` with MTP on, and the oQ4e target beside the 4bit target.
 //
-// The target is `mlx-community/Inkling-2-Mini-4bit`, which the port loads, the checkpoint the
-// Inkling 2 suites share. The drafter loads alone from `mlx-community/Inkling-2-Mini-oQ4e-mtp`,
-// the checkpoint that ships the head; its target weights use the oMLX layout, which the port does
-// not load. Both download through the Hugging Face downloader, or come from the cache, thus no
-// test skips. The two checkpoints are 31.8 GiB.
+// The target is `mlx-community/Inkling-2-Mini-4bit`, the checkpoint the Inkling 2 suites share.
+// The drafter loads alone from `mlx-community/Inkling-2-Mini-oQ4e-mtp`, the checkpoint that ships
+// the head; its target weights, in the oMLX layout that `Inkling2.prepareCheckpoint` maps, load
+// as a second target in one test. Both download through the Hugging Face downloader, or come from
+// the cache, thus no test skips. The two checkpoints are 31.8 GiB.
 //
 // `swift test` is BLIND to this file. Build for Release, or the numbers measure the debug build:
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -skipPackagePluginValidation -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:IntegrationTestingTests/Inkling2MTPIntegrationTests`
@@ -33,6 +33,11 @@ private let inkling2MiniOQ4eMTPRevision = "3eea042751cd296b7266628a8342c1749242e
 /// The DSpark head of Inkling 2 Mini, at ``inkling2MiniOQ4eMTPRevision``.
 private let inkling2MiniDrafter = ModelConfiguration(
     id: MTPDrafterRegistry.inkling2_mini_oq4e_mtp.name, revision: inkling2MiniOQ4eMTPRevision)
+
+/// The oQ4e checkpoint as a target: its weights in the oMLX layout, which
+/// `Inkling2.prepareCheckpoint` maps onto the port's modules.
+private let inkling2MiniOQ4eTarget = ModelConfiguration(
+    id: "mlx-community/Inkling-2-Mini-oQ4e-mtp", revision: inkling2MiniOQ4eMTPRevision)
 
 /// The block of the parity and chat tests: the shared MTP default.
 private let defaultBlockSize = SpeculativeDecodingConfig.defaultMTPBlockSize
@@ -128,6 +133,32 @@ private actor Inkling2MTPPairLoader {
         loading = load
         return try await load.value
     }
+}
+
+/// Loads the oQ4e target on the first call and shares it.
+private actor Inkling2OQ4eTargetLoader {
+    static let shared = Inkling2OQ4eTargetLoader()
+
+    private var loading: Task<ModelContainer, Error>?
+
+    func container() async throws -> ModelContainer {
+        if let loading {
+            return try await loading.value
+        }
+        let load = Task {
+            try await VLMModelFactory.shared.loadContainer(
+                from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+                configuration: inkling2MiniOQ4eTarget)
+        }
+        loading = load
+        return try await load.value
+    }
+}
+
+/// The bytes of the parameters of `model`, in GiB.
+private func parameterGiB(_ model: any LanguageModel) -> Double {
+    let bytes = model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
+    return Double(bytes) / Double(1 << 30)
 }
 
 // MARK: - Decoding
@@ -398,6 +429,91 @@ struct Inkling2MTPIntegrationTests {
                         #expect(
                             divergence == nil,
                             "\(label) block \(blockSize): \(divergence.map(String.init) ?? "")")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The oQ4e target (oMLX layout) beside the 4bit target, with one protocol: the parameter
+    /// memory of each, its plain and MTP decode throughput at the short and the long prompt at the
+    /// drafter's preferred block and at the shared default (each the median of three runs after a
+    /// warm-up), and greedy MTP emitting the tokens of plain greedy decoding.
+    @Test
+    func oQ4eTargetBesideThe4BitTarget() async throws {
+        let pair = try await Inkling2MTPPairLoader.shared.pair()
+        let targets = [
+            ("4bit", pair.target), ("oQ4e", try await Inkling2OQ4eTargetLoader.shared.container()),
+        ]
+        for (name, target) in targets {
+            try await pair.drafter.perform { drafterContext in
+                try await target.perform(nonSendable: drafterContext.model) {
+                    context, drafterModel in
+                    let drafter = try #require(drafterModel as? Inkling2DraftModel)
+                    let model = context.model
+                    let preferred = SpeculativeDecodingConfig.mtpBlockSize(nil, for: drafter)
+                    let blocks = [preferred, defaultBlockSize]
+                    Inkling2ResultLog.report(
+                        "INKLING2-OQ4E",
+                        "\(name): parameters \(formatted(parameterGiB(model), "%.2f")) GiB, "
+                            + "active \(formatted(Double(Memory.activeMemory) / Double(1 << 30), "%.2f")) GiB"
+                    )
+                    let contexts = [
+                        (
+                            "short", try await chatInput(context, Self.storyPrompt),
+                            shortContextTokens
+                        ),
+                        (
+                            "long",
+                            try await chatInput(
+                                context, Inkling2CheckpointIntegrationTests.longPrompt),
+                            longContextTokens
+                        ),
+                    ]
+                    for (label, input, tokens) in contexts {
+                        _ = try plainRun(model, input: input, tokens: warmUpTokens)
+                        for blockSize in blocks {
+                            _ = try mtpRun(
+                                model, drafter: drafter, input: input, tokens: warmUpTokens,
+                                blockSize: blockSize)
+                        }
+                        Memory.clearCache()
+                        Memory.peakMemory = 0
+                        let plain = try (0 ..< repetitions).map { _ in
+                            try plainRun(model, input: input, tokens: tokens)
+                        }
+                        let plainRate = SampleMedian.of(plain.map(\.tokensPerSecond))
+                        Inkling2ResultLog.report(
+                            "INKLING2-OQ4E",
+                            "\(name) \(label): prompt \(input.text.tokens.size) tok, plain "
+                                + "\(formatted(plainRate)) tok/s, peak "
+                                + "\(formatted(Double(Memory.peakMemory) / Double(1 << 30), "%.2f")) GiB"
+                        )
+                        for blockSize in blocks {
+                            let runs = try (0 ..< repetitions).map { _ in
+                                try mtpRun(
+                                    model, drafter: drafter, input: input, tokens: tokens,
+                                    blockSize: blockSize)
+                            }
+                            let rate = SampleMedian.of(runs.map(\.tokensPerSecond))
+                            let accepted = runs.map(\.accepted).reduce(0, +)
+                            let proposed = runs.map(\.proposed).reduce(0, +)
+                            Inkling2ResultLog.report(
+                                "INKLING2-OQ4E",
+                                "\(name) \(label) block \(blockSize): MTP \(formatted(rate)) tok/s "
+                                    + "(\(formatted(rate / plainRate, "%.2f"))x), acceptance "
+                                    + "\(accepted)/\(proposed)")
+                            for run in runs {
+                                #expect(
+                                    run.passthroughReason == nil, "\(run.passthroughReason ?? "")")
+                                let divergence = await findDivergence(
+                                    model, input: input, mtp: run.tokens, plain: plain[0].tokens)
+                                #expect(
+                                    divergence == nil,
+                                    "\(name) \(label) block \(blockSize): "
+                                        + "\(divergence.map(String.init) ?? "")")
+                            }
+                        }
                     }
                 }
             }
