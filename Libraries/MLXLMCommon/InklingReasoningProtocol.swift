@@ -11,7 +11,9 @@
 /// or a number and not a Boolean. Thinking off is the level `none`; thinking on
 /// keeps the default level of the template, or the level the caller set. The
 /// template writes the reasoning of every past assistant message in its own
-/// thinking frame, thus the history replays it.
+/// thinking frame, thus the history replays it. The template writes no
+/// generation prompt: the model opens its answer frame itself, and a guided
+/// pass appends that header (``answerOpening``) before its grammar starts.
 public enum InklingReasoningProtocol {
     /// The template variable that sets the thinking effort.
     public static let effortKey = "reasoning_effort"
@@ -19,14 +21,23 @@ public enum InklingReasoningProtocol {
     /// The effort level that turns thinking off.
     public static let thinkingOffEffort = "none"
 
-    /// The thinking frame, without claiming that a hard-budget transition is
-    /// safe for the model.
-    public static let frames = ReasoningConfig(
-        startDelimiter: "<|content_thinking|>", endDelimiter: "<|end_message|>",
-        promptStrategy: .templateFlag(
-            key: effortKey, defaultOn: true, thinkingOff: .templateValue(thinkingOffEffort)),
-        isSpecialToken: true,
-        replaysReasoningIntoHistory: true)
+    /// The header of the frame of the answer: the model frame, then the text payload. The
+    /// template writes no generation prompt, thus the model writes this header itself after
+    /// the prompt.
+    public static let answerOpening = "<|message_model|><|content_text|>"
+
+    /// The thinking frame and the header of the answer frame, without claiming that a
+    /// hard-budget transition is safe for the model.
+    public static let frames: ReasoningConfig = {
+        var config = ReasoningConfig(
+            startDelimiter: "<|content_thinking|>", endDelimiter: "<|end_message|>",
+            promptStrategy: .templateFlag(
+                key: effortKey, defaultOn: true, thinkingOff: .templateValue(thinkingOffEffort)),
+            isSpecialToken: true,
+            replaysReasoningIntoHistory: true)
+        config.answerOpening = answerOpening
+        return config
+    }()
 
     /// Inkling 2, which answers from a frame that was only closed.
     ///

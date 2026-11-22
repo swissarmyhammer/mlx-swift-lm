@@ -88,6 +88,10 @@ Consider `includeSchemaInPrompt: false` when:
 - Your instructions or prompt already describe the response.
 - You want to control the wording or placement within the transcript, such as in cases where multiple different schemas are used within a single session.
 
+### Where the grammar starts
+
+The grammar of a schema pass starts at the end of the prompt, thus the prompt must end where the answer starts. Most chat templates write a generation prompt that ends there. The Inkling 2 template writes none: the model writes the header of its answer frame, `<|message_model|><|content_text|>`, after the prompt. Its reasoning protocol declares that header as its `answerOpening`, and a schema pass of such a model renders the prompt with thinking off and appends the header before the grammar starts. Without the header, the grammar forbids the tokens the model was trained to write first, and Inkling 2 Mini filled every string of the schema with `"}"`.
+
 ## Multi-token prediction (MTP)
 
 Pass an `MLXSpeculativeDecoding` to decode with the model's MTP head as a drafter. Each round the head drafts a few tokens and the model checks them in one forward pass, so a round can write several tokens for the cost of about one. The output is the output of plain decoding. The Qwen3.5-family targets (Qwen3.5, Qwen3.6 and Qwen3.8) have MTP heads.

@@ -104,6 +104,27 @@ final class ForwardStepCounter: Sendable {
     }
 }
 
+/// A thread-safe record of the prompt of each round a scripted model ran.
+///
+/// The model writes it on the generation thread, and a test reads it from its own task, thus a
+/// mutex guards the prompts.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+final class ScriptedPromptRecorder: Sendable {
+    private let recorded = Mutex<[[Int]]>([])
+
+    /// Records the prompt tokens of one round.
+    ///
+    /// - Parameter prompt: the tokens the round starts from.
+    func record(_ prompt: [Int]) {
+        recorded.withLock { $0.append(prompt) }
+    }
+
+    /// The prompt tokens of each round so far, in the order of the rounds.
+    var prompts: [[Int]] {
+        recorded.withLock { $0 }
+    }
+}
+
 /// The shape of what the scripted models and the prompt-cache fixtures write
 /// into a cache.
 enum ScriptedCacheShape {
@@ -207,6 +228,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
 
     private let rounds: [[Int]]
     private let forwardSteps: ForwardStepCounter?
+    private let promptRecorder: ScriptedPromptRecorder?
     private let forwardDelay: TimeInterval
     private let cacheLayerCount: Int
     private let recurrentLayerCount: Int
@@ -237,6 +259,9 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     /// a real model holds its parameters. No forward pass reads it. The
     /// default of `nil` gives the model no weights.
     ///
+    /// `promptRecorder` records the prompt tokens of each round when one is
+    /// given. The default of `nil` records nothing.
+    ///
     /// `headDimension` is the width of each key and value the model writes.
     /// The default of ``ScriptedCacheShape/headDimension`` keeps the caches
     /// small; a width the affine group size divides lets a KV-cache
@@ -245,10 +270,12 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
         rounds: [[Int]], forwardSteps: ForwardStepCounter? = nil,
         forwardDelay: TimeInterval = 0, cacheLayerCount: Int = 0,
         recurrentLayerCount: Int = 0, weights: MLXArray? = nil,
+        promptRecorder: ScriptedPromptRecorder? = nil,
         headDimension: Int = ScriptedCacheShape.headDimension
     ) {
         self.rounds = rounds
         self.forwardSteps = forwardSteps
+        self.promptRecorder = promptRecorder
         self.forwardDelay = forwardDelay
         self.cacheLayerCount = cacheLayerCount
         self.recurrentLayerCount = recurrentLayerCount
@@ -272,6 +299,7 @@ final class ScriptedLanguageModel: Module, MLXLMCommon.LanguageModel,
     ) throws -> PrepareResult {
         roundIndex += 1
         step = 0
+        promptRecorder?.record(input.text.tokens.asArray(Int.self))
         return .tokens(input.text)
     }
 

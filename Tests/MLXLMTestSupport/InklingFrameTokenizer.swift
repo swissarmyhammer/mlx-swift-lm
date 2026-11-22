@@ -142,17 +142,29 @@ public struct InklingFrameTokenizer: Tokenizer {
     /// The vocabulary names no unknown token as text; ``unknownTokenID`` stands for it.
     public var unknownToken: String? { nil }
 
-    /// The one token of `text`: its marker, its piece, or ``unknownTokenID``.
+    /// The tokens of `text`: one token for each marker, as a real tokenizer encodes each special
+    /// token, and one token for each text between two markers, its piece or ``unknownTokenID``.
     ///
     /// - Parameters:
-    ///   - text: a marker or a piece of the vocabulary.
+    ///   - text: markers and pieces of the vocabulary.
     ///   - addSpecialTokens: ignored, the vocabulary has no special tokens to add.
-    /// - Returns: the one token of `text`.
+    /// - Returns: the tokens of `text`.
     public func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        if let marker = Marker(rawValue: text) {
-            return [token(marker)]
+        var tokens: [Int] = []
+        var rest = Substring(text)
+        while !rest.isEmpty {
+            if let marker = Marker.allCases.first(where: { rest.hasPrefix($0.rawValue) }) {
+                tokens.append(token(marker))
+                rest = rest.dropFirst(marker.rawValue.count)
+                continue
+            }
+            let pieceEnd =
+                Marker.allCases.compactMap { rest.range(of: $0.rawValue)?.lowerBound }.min()
+                ?? rest.endIndex
+            tokens.append(token(String(rest[..<pieceEnd])))
+            rest = rest[pieceEnd...]
         }
-        return [token(text)]
+        return tokens
     }
 
     /// The joined text of `tokenIds`, with an empty text for a token outside the vocabulary.

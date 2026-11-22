@@ -1457,9 +1457,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         baselineInput: input,
                         context: context)
 
+                    // A schema pass of a model that writes the header of its answer itself
+                    // starts after that header.
+                    let schemaInput =
+                        schemaJSON == nil
+                        ? input
+                        : try await Self.schemaInput(
+                            messages: promptMessages.withSchema, input: input, resolved: resolved,
+                            context: context)
+
                     try await dispatchGeneration(
-                        turn, messages: messages, input: input, reasoningPlan: reasoningPlan,
-                        resolved: resolved, speculation: speculation, context: context)
+                        turn, messages: messages, input: input, schemaInput: schemaInput,
+                        reasoningPlan: reasoningPlan, resolved: resolved, speculation: speculation,
+                        context: context)
 
                     Stream.gpu.synchronize()
                 }
@@ -1546,13 +1556,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ///   - turn: The values of the call.
         ///   - messages: The chat messages the prompt renders from.
         ///   - input: The prompt rendered with no thinking state.
+        ///   - schemaInput: The prompt of a schema pass, which
+        ///     ``schemaInput(messages:input:resolved:context:)`` made.
         ///   - reasoningPlan: The reasoning inputs of the text path.
         ///   - resolved: The resolver-patched configuration of the call.
         ///   - speculation: The MTP drafter of the model, or nil.
         ///   - context: The loaded model context.
         /// - Throws: The error of the generation path.
         private func dispatchGeneration(
-            _ turn: RespondTurn, messages: [Chat.Message], input: LMInput,
+            _ turn: RespondTurn, messages: [Chat.Message], input: LMInput, schemaInput: LMInput,
             reasoningPlan: ReasoningPlan, resolved: ModelConfiguration,
             speculation: MTPSpeculation?, context: ModelContext
         ) async throws {
@@ -1572,7 +1584,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     enabledToolDefinitions: turn.enabledToolDefinitions,
                     toolCallingMode: turn.toolCallingMode,
                     schemaJSON: turn.schemaJSON,
-                    baselineInput: input,
+                    baselineInput: schemaInput,
                     resolved: resolved,
                     declaresReasoning: turn.declaresReasoning,
                     modelID: turn.modelID,
@@ -1588,7 +1600,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else if let schemaJSON = turn.schemaJSON {
                 try await runSchemaGeneration(
                     schemaJSON: schemaJSON,
-                    input: input,
+                    input: schemaInput,
                     modelID: turn.modelID,
                     requestedMaxTokens: turn.requestedMaxTokens,
                     entryID: turn.entryID,

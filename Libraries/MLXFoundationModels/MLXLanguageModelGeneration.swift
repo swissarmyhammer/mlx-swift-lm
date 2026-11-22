@@ -131,7 +131,7 @@ extension MLXLanguageModel.Executor {
     ///   - enabledToolDefinitions: The tool definitions this turn exposes
     ///   - toolCallingMode: The resolved tool-calling mode
     ///   - schemaJSON: The encoded response schema, when the request carries one
-    ///   - baselineInput: The prompt rendered without tool awareness
+    ///   - baselineInput: The prompt of the schema pass, rendered without tool awareness
     ///   - resolved: The resolver-patched configuration
     ///   - declaresReasoning: Whether `.reasoning` was declared at init
     ///   - modelID: The model identifier the constraint caches key on
@@ -308,7 +308,7 @@ extension MLXLanguageModel.Executor {
     ///   - routedReasoningConfig: The reasoning config whose thinking the turn routes apart from
     ///     the answer, when the caller declares reasoning
     ///   - schemaJSON: The encoded response schema, when the request carries one
-    ///   - baselineInput: The prompt rendered without tool awareness
+    ///   - baselineInput: The prompt of the schema pass, rendered without tool awareness
     ///   - modelID: The model identifier the schema fallback keys on
     ///   - requestedMaxTokens: The caller's token budget, when set
     ///   - samplingConfiguration: The translated sampling mode
@@ -1139,6 +1139,41 @@ extension MLXLanguageModel.Executor {
         } catch GuidedGenerationError.incompleteOutput {
             return (nil, true)
         }
+    }
+
+    /// The description of the error for a model that declares where its answer opens but
+    /// cannot turn thinking off, which the schema pass needs.
+    static let answerOpeningNeedsThinkingOffMessage =
+        "This model always reasons; a guided answer after its answer opening needs thinking off."
+
+    /// The prompt of a schema pass.
+    ///
+    /// A model whose reasoning protocol declares an ``ReasoningConfig/answerOpening`` (Inkling 2)
+    /// renders no generation prompt: the model writes the header of its answer after the
+    /// prompt. The pass renders `messages` with thinking off, as no thinking frame comes before
+    /// that header then, and appends the header, thus the grammar starts where the answer
+    /// starts. Every other model keeps `input`.
+    ///
+    /// - Parameters:
+    ///   - messages: The chat messages of the schema prompt, the schema included
+    ///   - input: The prompt rendered with no thinking state
+    ///   - resolved: The resolver-patched configuration of the call
+    ///   - context: The loaded model context
+    /// - Returns: The prompt the schema pass feeds.
+    /// - Throws: `unsupportedCapability` when thinking cannot go off, or the error of the
+    ///   processor.
+    static func schemaInput(
+        messages: [Chat.Message], input: LMInput, resolved: ModelConfiguration,
+        context: ModelContext
+    ) async throws -> LMInput {
+        guard let config = resolved.reasoningConfig, config.answerOpening != nil else {
+            return input
+        }
+        let prompt = try await preparedInput(
+            messages: messages, config: config, thinkingEnabled: false, context: context,
+            cannotDisableMessage: answerOpeningNeedsThinkingOffMessage)
+        return ThinkingRender.openingAnswer(
+            of: prompt.input, config: config, tokenizer: context.tokenizer)
     }
 
     /// Runs schema output: guided generation constrained to the JSON schema of the request.
