@@ -152,7 +152,11 @@ struct MTPVerifyForwardProfileTests {
         await releaseAllGPUMemory()
         let mtpModel = try Qwen38FourBitMTPModel.make(
             speculates: true, path: .text)
-        let blockSize = try #require(mtpModel.speculativeDecoding).blockSize
+        // The test loads no drafter; the Qwen head has no preferred block, thus a block left
+        // unset is the shared default.
+        let blockSize =
+            try #require(mtpModel.speculativeDecoding).blockSize
+            ?? SpeculativeDecodingConfig.defaultMTPBlockSize
         let container = try await mtpModel.loadContainer()
         let tokenizer = await container.tokenizer
         let historyTokens = (0 ..< Self.maximumHistoryRoundCount).flatMap {
