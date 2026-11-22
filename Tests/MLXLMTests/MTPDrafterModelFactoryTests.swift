@@ -7,49 +7,77 @@ import Testing
 
 // MARK: - Type-registry registration
 
+private let gemma4AssistantRegistrationJSON = """
+    {
+      "model_type": "gemma4_assistant",
+      "backbone_hidden_size": 4,
+      "tie_word_embeddings": true,
+      "use_ordered_embeddings": false,
+      "num_centroids": 2,
+      "centroid_intermediate_top_k": 1,
+      "text_config": {
+        "model_type": "gemma4_text",
+        "hidden_size": 4,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 2,
+        "global_head_dim": 2,
+        "vocab_size": 10,
+        "num_kv_shared_layers": 0,
+        "hidden_size_per_layer_input": 0,
+        "sliding_window": 4,
+        "sliding_window_pattern": 1,
+        "max_position_embeddings": 16,
+        "rms_norm_eps": 1e-6,
+        "rope_traditional": false,
+        "use_double_wide_mlp": false,
+        "enable_moe_block": false,
+        "attention_k_eq_v": true,
+        "intermediate_size": 8,
+        "layer_types": ["full_attention"],
+        "rope_parameters": {},
+        "tie_word_embeddings": true
+      }
+    }
+    """
+
 @Test
 func testGemma4AssistantRegistrationRegistersType() async throws {
     await Gemma4AssistantRegistration.register()
 
-    let json = """
-        {
-          "model_type": "gemma4_assistant",
-          "backbone_hidden_size": 4,
-          "tie_word_embeddings": true,
-          "use_ordered_embeddings": false,
-          "num_centroids": 2,
-          "centroid_intermediate_top_k": 1,
-          "text_config": {
-            "model_type": "gemma4_text",
-            "hidden_size": 4,
-            "num_hidden_layers": 1,
-            "num_attention_heads": 2,
-            "num_key_value_heads": 1,
-            "head_dim": 2,
-            "global_head_dim": 2,
-            "vocab_size": 10,
-            "num_kv_shared_layers": 0,
-            "hidden_size_per_layer_input": 0,
-            "sliding_window": 4,
-            "sliding_window_pattern": 1,
-            "max_position_embeddings": 16,
-            "rms_norm_eps": 1e-6,
-            "rope_traditional": false,
-            "use_double_wide_mlp": false,
-            "enable_moe_block": false,
-            "attention_k_eq_v": true,
-            "intermediate_size": 8,
-            "layer_types": ["full_attention"],
-            "rope_parameters": {},
-            "tie_word_embeddings": true
-          }
-        }
-        """
-    let data = Data(json.utf8)
+    let data = Data(gemma4AssistantRegistrationJSON.utf8)
 
     let model = try await MTPDrafterTypeRegistry.shared.createModel(
         configuration: data, modelType: "gemma4_assistant")
     #expect(model is Gemma4AssistantDraftModel)
+}
+
+@Test
+func testUnconditionalDrafterRegistrationReplacesTheEarlierCreator() async throws {
+    let registry = ModelTypeRegistry<any MTPDrafterModel>()
+    await registry.registerDrafter(
+        modelTypes: ["gemma4_assistant"], configuration: Gemma4AssistantConfiguration.self,
+        create: { _ in throw ModelFactoryError.unsupportedModelType("replaced") })
+    await registry.registerDrafter(
+        modelTypes: ["gemma4_assistant"], configuration: Gemma4AssistantConfiguration.self,
+        create: { Gemma4AssistantDraftModel($0) })
+    let model = try await registry.createModel(
+        configuration: Data(gemma4AssistantRegistrationJSON.utf8), modelType: "gemma4_assistant")
+    #expect(model is Gemma4AssistantDraftModel)
+}
+
+@Test
+func testUnconditionalDrafterRegistrationThrowsTheDecodingError() async {
+    let registry = ModelTypeRegistry<any MTPDrafterModel>()
+    await registry.registerDrafter(
+        modelTypes: ["gemma4_assistant"], configuration: Gemma4AssistantConfiguration.self,
+        create: { Gemma4AssistantDraftModel($0) })
+    await #expect(throws: DecodingError.self) {
+        _ = try await registry.createModel(
+            configuration: Data(#"{"model_type":"gemma4_assistant"}"#.utf8),
+            modelType: "gemma4_assistant")
+    }
 }
 
 @Test

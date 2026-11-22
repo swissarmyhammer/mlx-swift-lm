@@ -11,29 +11,18 @@ import MLXLMCommon
 public enum Qwen35VLMMTPRegistration {
     public static func register() async {
         let registry = MTPDrafterTypeRegistry.visionLanguage
-
-        for modelType in ["qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe"] {
-            await registry.registerModelType(
-                modelType,
-                creator: { data in
-                    let config = try JSONDecoder.json5().decode(
-                        Qwen35MTPTextConfiguration.self, from: data)
-                    return Qwen35VLMNextNDraftModel(config.textConfiguration)
-                })
-        }
-
-        for modelType in ["qwen3_5_mtp", "qwen3_8_mtp"] {
-            await registry.registerModelType(
-                modelType,
-                creator: { data in
-                    let config = try JSONDecoder.json5().decode(
-                        Qwen35MTPTextConfiguration.self, from: data)
-                    return Qwen35VLMNextNDraftModel(
-                        config.textConfiguration,
-                        checkpointPolicy: .init(
-                            modelType: config.modelType, preconvertedNorms: true))
-                })
-        }
+        await registry.registerDrafter(
+            modelTypes: ["qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe"],
+            configuration: Qwen35MTPTextConfiguration.self,
+            create: { Qwen35VLMNextNDraftModel($0.textConfiguration) })
+        await registry.registerDrafter(
+            modelTypes: ["qwen3_5_mtp", "qwen3_8_mtp"],
+            configuration: Qwen35MTPTextConfiguration.self,
+            create: {
+                Qwen35VLMNextNDraftModel(
+                    $0.textConfiguration,
+                    checkpointPolicy: .init(modelType: $0.modelType, preconvertedNorms: true))
+            })
     }
 }
 

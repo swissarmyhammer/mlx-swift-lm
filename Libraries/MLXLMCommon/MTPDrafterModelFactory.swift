@@ -9,14 +9,15 @@ import MLX
 ///
 /// Empty at bootstrap because drafter implementations live in MLXVLM —
 /// importing them here would create a circular dependency. Downstream
-/// modules call ``ModelTypeRegistry/registerModelType(_:creator:)`` on the
-/// shared registry at app/import time. See `Gemma4AssistantRegistration`
-/// in MLXVLM.
+/// modules call `registerDrafter(modelTypes:configuration:create:)` (or the
+/// variant with a `matches` predicate, for a `model_type` that several
+/// architectures share) on the shared registry at app/import time. See
+/// `Gemma4AssistantRegistration` in MLXVLM.
 ///
 /// Note: ``ModelTypeRegistry`` is an `actor`; registration is `async`.
 public enum MTPDrafterTypeRegistry {
     /// Shared registry. Empty until a downstream module registers a drafter
-    /// type via `await MTPDrafterTypeRegistry.shared.registerModelType(...)`.
+    /// type via `await MTPDrafterTypeRegistry.shared.registerDrafter(...)`.
     public static let shared: ModelTypeRegistry<any MTPDrafterModel> = .init()
 
     /// Registry for drafters whose forward pass consumes multimodal position
@@ -42,7 +43,7 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
     public func registerDrafter<Configuration: Decodable & ModelConfigurationValidating>(
         modelTypes: [String], configuration: Configuration.Type,
         matches: @escaping (Configuration) -> Bool,
-        create: @escaping (Configuration) -> any MTPDrafterModel
+        create: @escaping (Configuration) throws -> any MTPDrafterModel
     ) {
         for modelType in modelTypes {
             registerModelType(
@@ -54,8 +55,33 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
                 creator: { data in
                     let decoded = try JSONDecoder.json5().decode(Configuration.self, from: data)
                     try decoded.validateModelConfiguration()
-                    return create(decoded)
+                    return try create(decoded)
                 })
+        }
+    }
+
+    /// Registers the only drafter of each of `modelTypes`, read from a `config.json` that decodes
+    /// as `Configuration`, in place of any creator registered for those model types before.
+    ///
+    /// The creator decodes the `config.json`, throwing the decoding error of one that does not
+    /// decode, validates the configuration when `Configuration` is
+    /// ``ModelConfigurationValidating``, and builds the drafter from it. Registering again
+    /// replaces the creator, so a registration that runs more than once leaves one creator.
+    ///
+    /// - Parameters:
+    ///   - modelTypes: The `model_type` values of the checkpoints that ship the drafter.
+    ///   - configuration: The configuration the drafter is built from.
+    ///   - create: The drafter of a validated configuration.
+    public func registerDrafter<Configuration: Decodable>(
+        modelTypes: [String], configuration: Configuration.Type,
+        create: @escaping (Configuration) throws -> any MTPDrafterModel
+    ) {
+        for modelType in modelTypes {
+            registerModelType(modelType) { data in
+                let decoded = try JSONDecoder.json5().decode(Configuration.self, from: data)
+                try (decoded as? any ModelConfigurationValidating)?.validateModelConfiguration()
+                return try create(decoded)
+            }
         }
     }
 }

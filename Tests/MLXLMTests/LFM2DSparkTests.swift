@@ -125,6 +125,57 @@ func lfm2DSparkRegistrationDisambiguatesTheQwen3ModelType() async throws {
 }
 
 @Test
+func lfm2DSparkRegistrationValidatesTheDecodedConfiguration() async throws {
+    await LFM2DSparkRegistration.register()
+    var object =
+        try JSONSerialization.jsonObject(with: Data(tinyLFM2DSparkJSON.utf8)) as! [String: Any]
+    object["num_key_value_heads"] = 3
+    await #expect(throws: ModelFactoryError.self) {
+        _ = try await MTPDrafterTypeRegistry.shared.createModel(
+            configuration: JSONSerialization.data(withJSONObject: object), modelType: "qwen3")
+    }
+}
+
+@Test
+func unconditionalDrafterRegistrationValidatesTheDecodedConfiguration() async throws {
+    let registry = ModelTypeRegistry<any MTPDrafterModel>()
+    await registry.registerDrafter(
+        modelTypes: ["qwen3"], configuration: LFM2DSparkConfiguration.self,
+        create: { LFM2DSparkDraftModel($0) })
+    #expect(
+        try await registry.createModel(
+            configuration: Data(tinyLFM2DSparkJSON.utf8), modelType: "qwen3")
+            is LFM2DSparkDraftModel)
+
+    var object =
+        try JSONSerialization.jsonObject(with: Data(tinyLFM2DSparkJSON.utf8)) as! [String: Any]
+    object["architectures"] = ["Qwen3ForCausalLM"]
+    await #expect(throws: ModelFactoryError.self) {
+        _ = try await registry.createModel(
+            configuration: JSONSerialization.data(withJSONObject: object), modelType: "qwen3")
+    }
+}
+
+@Test
+func lfm2DSparkIncompatibleTargetNamesTheDrafterAndTheTarget() throws {
+    let drafter = LFM2DSparkDraftModel(try tinyDSparkConfiguration())
+    let target = Qwen3Model(
+        try JSONDecoder.json5().decode(
+            Qwen3Configuration.self,
+            from: Data(
+                #"{"model_type":"qwen3","hidden_size":8,"num_hidden_layers":1,"intermediate_size":16,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,"rms_norm_eps":1e-6,"vocab_size":32,"rope_theta":1000000.0,"max_position_embeddings":128,"tie_word_embeddings":true}"#
+                    .utf8)))
+    #expect(
+        throws: MTPDrafterCompatibilityError.incompatibleTarget(
+            drafter: "LFM2DSparkDraftModel",
+            expected: "an LFM2 target with matching dimensions and RoPE parameters",
+            actual: "Qwen3Model")
+    ) {
+        try drafter.validateCompatibility(with: target)
+    }
+}
+
+@Test
 func lfm2DSparkRegistryContainsEveryReleasedCheckpoint() {
     #expect(MTPDrafterRegistry.shared.contains(id: "LiquidAI/LFM2.5-1.2B-Instruct-DSpark"))
     #expect(MTPDrafterRegistry.shared.contains(id: "LiquidAI/LFM2.5-2.6B-DSpark"))
