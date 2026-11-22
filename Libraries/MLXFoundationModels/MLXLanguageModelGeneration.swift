@@ -131,7 +131,8 @@ extension MLXLanguageModel.Executor {
     ///   - enabledToolDefinitions: The tool definitions this turn exposes
     ///   - toolCallingMode: The resolved tool-calling mode
     ///   - schemaJSON: The encoded response schema, when the request carries one
-    ///   - baselineInput: The prompt of the schema pass, rendered without tool awareness
+    ///   - schemaInput: Makes the prompt of the schema pass, rendered without tool awareness;
+    ///     only the schema fallback calls it
     ///   - resolved: The resolver-patched configuration
     ///   - declaresReasoning: Whether `.reasoning` was declared at init
     ///   - modelID: The model identifier the constraint caches key on
@@ -150,7 +151,7 @@ extension MLXLanguageModel.Executor {
         enabledToolDefinitions: [Transcript.ToolDefinition],
         toolCallingMode: GenerationOptions.ToolCallingMode,
         schemaJSON: String?,
-        baselineInput: LMInput,
+        schemaInput: () async throws -> LMInput,
         resolved: ModelConfiguration,
         declaresReasoning: Bool,
         modelID: String,
@@ -240,7 +241,7 @@ extension MLXLanguageModel.Executor {
                 toolAwareRender: toolAwareRender,
                 routedReasoningConfig: routedReasoningConfig,
                 schemaJSON: schemaJSON,
-                baselineInput: baselineInput,
+                schemaInput: schemaInput,
                 modelID: modelID,
                 requestedMaxTokens: requestedMaxTokens,
                 samplingConfiguration: samplingConfiguration,
@@ -314,7 +315,8 @@ extension MLXLanguageModel.Executor {
     ///   - routedReasoningConfig: The reasoning config whose thinking the turn routes apart from
     ///     the answer, when the caller declares reasoning
     ///   - schemaJSON: The encoded response schema, when the request carries one
-    ///   - baselineInput: The prompt of the schema pass, rendered without tool awareness
+    ///   - schemaInput: Makes the prompt of the schema pass, rendered without tool awareness;
+    ///     only the schema fallback calls it
     ///   - modelID: The model identifier the schema fallback keys on
     ///   - requestedMaxTokens: The caller's token budget, when set
     ///   - samplingConfiguration: The translated sampling mode
@@ -332,7 +334,7 @@ extension MLXLanguageModel.Executor {
         toolAwareRender: ThinkingRender,
         routedReasoningConfig: ReasoningConfig?,
         schemaJSON: String?,
-        baselineInput: LMInput,
+        schemaInput: () async throws -> LMInput,
         modelID: String,
         requestedMaxTokens: Int?,
         samplingConfiguration: MLXSamplingConfiguration?,
@@ -391,7 +393,7 @@ extension MLXLanguageModel.Executor {
         } else if let schemaJSON {
             try await runSchemaGeneration(
                 schemaJSON: schemaJSON,
-                input: baselineInput,
+                input: try await schemaInput(),
                 modelID: modelID,
                 requestedMaxTokens: requestedMaxTokens,
                 entryID: entryID,
@@ -1046,6 +1048,19 @@ extension MLXLanguageModel.Executor {
         let hardReserve: Int
     }
 
+    /// The closing reserves of one guided pass, in tokens before the end of its budget.
+    ///
+    /// ``closingReserves(structuralReserve:maxTokens:)`` sizes them. `completion` is never
+    /// less than `hard`, thus the soft zone starts before the hard zone or with it.
+    struct ClosingReserves: Equatable {
+        /// The tokens before the budget at which the soft zone starts: the closing tokens
+        /// (`"`, `}`, `]` and digits) are favored from there.
+        let completion: Int
+        /// The tokens before the budget at which the hard zone starts: only the closing tokens
+        /// are allowed from there.
+        let hard: Int
+    }
+
     /// Builds the grammar of one guided pass and sizes its reserves.
     ///
     /// Schema output and required tool calls build the same setup; they
@@ -1101,25 +1116,26 @@ extension MLXLanguageModel.Executor {
     /// Each reserve scales with the shortest valid output, and is capped by the budget, thus the
     /// start of the output always decodes free of the closing bias. Without the caps, a schema
     /// whose shortest output takes 32 tokens put the hard zone over the whole budget of 256
-    /// (32 × 8): every string closed at once or filled with `}` and `]`. A cap never cuts a
-    /// reserve below the shortest valid output, which the pass needs to close.
+    /// (32 × 8): every string closed at once or filled with `}` and `]`. A cap never cuts the
+    /// hard zone below ``hardReserveStructuralFloorMultiplier`` times the shortest valid output,
+    /// the room the pass needs to close from wherever the hard zone finds it.
     ///
     /// - Parameters:
     ///   - structuralReserve: The tokens of the shortest valid output (``CompletionReserve``)
     ///   - maxTokens: The token budget of the pass
     /// - Returns: The tokens before the budget at which the soft and the hard zone start.
-    static func closingReserves(structuralReserve: Int, maxTokens: Int) -> (
-        completion: Int, hard: Int
-    ) {
+    static func closingReserves(structuralReserve: Int, maxTokens: Int) -> ClosingReserves {
         let hard = Swift.min(
             structuralReserve * hardReserveStructuralMultiplier,
-            Swift.max(structuralReserve, maxTokens / hardReserveBudgetDivisor))
+            Swift.max(
+                structuralReserve * hardReserveStructuralFloorMultiplier,
+                maxTokens / hardReserveBudgetCeilingDivisor))
         let completion = Swift.min(
             Swift.max(
                 structuralReserve * completionReserveStructuralMultiplier,
-                maxTokens / completionReserveBudgetDivisor),
+                maxTokens / completionReserveBudgetFloorDivisor),
             maxTokens / completionReserveBudgetCeilingDivisor)
-        return (Swift.max(completion, hard), hard)
+        return ClosingReserves(completion: Swift.max(completion, hard), hard: hard)
     }
 
     /// Runs one guided pass inside the guided-generation section.
@@ -1178,6 +1194,21 @@ extension MLXLanguageModel.Executor {
     /// cannot turn thinking off, which the schema pass needs.
     static let answerOpeningNeedsThinkingOffMessage =
         "This model always reasons; a guided answer after its answer opening needs thinking off."
+
+    /// Throws the error ``schemaInput(messages:input:resolved:context:)`` throws when thinking
+    /// cannot go off, without rendering the prompt, thus a call fails before any generation.
+    ///
+    /// - Parameter resolved: The resolver-patched configuration of the call
+    /// - Throws: `unsupportedCapability(.reasoning)` when the reasoning protocol declares an
+    ///   ``ReasoningConfig/answerOpening`` but cannot turn thinking off.
+    static func checkSchemaInput(resolved: ModelConfiguration) throws {
+        guard let config = resolved.reasoningConfig, config.answerOpening != nil else { return }
+        do {
+            _ = try ThinkingRender(config: config, thinkingEnabled: false)
+        } catch ReasoningError.cannotDisableReasoning {
+            throw unsupportedCapability(.reasoning, answerOpeningNeedsThinkingOffMessage)
+        }
+    }
 
     /// The prompt of a schema pass.
     ///

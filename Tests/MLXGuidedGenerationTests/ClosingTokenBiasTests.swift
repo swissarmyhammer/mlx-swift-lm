@@ -1,9 +1,10 @@
 // Copyright © 2025 Apple Inc.
 
 import MLX
-import MLXGuidedGeneration
 import MLXLMCommon
 import Testing
+
+@testable import MLXGuidedGeneration
 
 // MARK: - Stub Tokenizer
 
@@ -39,7 +40,7 @@ private struct ListTokenizer: MLXLMCommon.Tokenizer {
 @Suite
 struct ClosingTokenBiasTests {
 
-    @Test("Tier-2 closing characters get +100 bias")
+    @Test("Tier-2 closing characters get +100 bias, the quote one more")
     func tier2CharactersGetHundredBias() {
         let tok = ListTokenizer(tokens: [
             "\"",  // 0
@@ -53,7 +54,7 @@ struct ClosingTokenBiasTests {
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
         let values = bias.asArray(Float.self)
 
-        #expect(values[0] == 100.0)  // "
+        #expect(values[0] == 101.0)  // " (the string-closing quote)
         #expect(values[1] == 100.0)  // }
         #expect(values[2] == 100.0)  // ]
         #expect(values[3] == 100.0)  // 0
@@ -113,6 +114,29 @@ struct ClosingTokenBiasTests {
 
         // Discovered vocab size should be 5
         #expect(bias.shape == [5])
+    }
+
+    @Test("The hard zone prefers the quote, which closes a string, over the other closing tokens")
+    func hardZonePrefersTheStringClosingQuote() {
+        let tok = ListTokenizer(tokens: [
+            "\"",  // 0 - closes a string
+            "}",  // 1 - string content inside a string
+            "]",  // 2 - string content inside a string
+            "6",  // 3 - string content inside a string
+            "abc",  // 4 - not closing
+            "<EOS>",  // 5 - stop
+        ])
+        let closing = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 5)
+        let values = GuidedDecisionRules.hardZoneBias(closingBias: closing, stopTokenIDs: [5])
+            .asArray(Float.self)
+
+        let preference = Float(GuidedDecisionRules.hardZoneStringClosingBias)
+        #expect(values[0] == preference)
+        #expect(values[1] == 0)
+        #expect(values[2] == 0)
+        #expect(values[3] == 0)
+        #expect(values[4] < 0)
+        #expect(values[5] < 0)
     }
 
     @Test("Out-of-range EOS id is ignored")

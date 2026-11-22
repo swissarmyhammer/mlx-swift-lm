@@ -18,7 +18,6 @@
 
 import Foundation
 import FoundationModels
-import Tokenizers
 import MLXLMCommon
 import Testing
 
@@ -90,8 +89,11 @@ struct Inkling2GuidedGenerationTests {
         ),
     ]
 
-    /// String values that are JSON debris or placeholders and not text.
-    private static let debris: Set<String> = ["", "}", "{", "\"", ",", "]", "[", "..."]
+    /// The placeholder a model writes for a value it does not know, which is not text.
+    private static let placeholder = "..."
+
+    /// The special tokens of the header of the answer frame, in order.
+    private static let answerHeaderTokens = ["<|message_model|>", "<|content_text|>"]
 
     /// The prompt of the city call.
     private static let cityPrompt = "Give the facts of the city of Lisbon."
@@ -99,9 +101,12 @@ struct Inkling2GuidedGenerationTests {
     /// The country the city call must name.
     private static let cityCountry = "Portugal"
 
-    /// Whether `value` is JSON debris or a placeholder.
+    /// Whether `value` is JSON debris or a placeholder: a value with no letter (`"}"`, `"]"`,
+    /// `","`, the empty string) or the placeholder `"..."`.
     private static func isDebris(_ value: String) -> Bool {
-        debris.contains(value.trimmingCharacters(in: .whitespaces))
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        return trimmed == placeholder
+            || !trimmed.unicodeScalars.contains(where: \.properties.isAlphabetic)
     }
 
     /// The model without MTP and without reasoning, as the Router makes it.
@@ -154,7 +159,25 @@ struct Inkling2GuidedGenerationTests {
             + "<<<\(json)>>>"
         Inkling2ResultLog.report("INKLING2 GUIDED", line)
         print("[INKLING2 GUIDED] \(line)")
+        #expect(!sink.incompleteOutput, "the budget cut the output <<<\(json)>>>")
         return (try result.get().content, json)
+    }
+
+    /// The tokenizer of the checkpoint encodes the answer opening as the two special tokens of
+    /// the header of the answer frame, and not as the characters of their names.
+    @Test
+    func theAnswerOpeningEncodesAsTheTwoHeaderTokens() async throws {
+        let container = try await Inkling2MiniCheckpoint.shared.container()
+        let (encoded, header) = await container.perform { context in
+            (
+                context.tokenizer.encode(
+                    text: InklingReasoningProtocol.answerOpening, addSpecialTokens: false),
+                Self.answerHeaderTokens.map { context.tokenizer.convertTokenToId($0) }
+            )
+        }
+
+        #expect(header.allSatisfy { $0 != nil }, "header ids \(header)")
+        #expect(encoded == header.compactMap { $0 })
     }
 
     /// A greedy ranker call picks the candidate the prompt names and writes sentences.

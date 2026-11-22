@@ -42,6 +42,15 @@ struct GuidedDecisionRules {
     /// non-closing token, and the stop-token penalty on every stop token.
     private static let suppressingBias: Float32 = -10000
 
+    /// The bias the hard zone adds to the string-closing quote
+    /// (``ClosingTokenBias/stringClosingBias``) over the other closing tokens. Inside a string the
+    /// grammar allows `}`, `]` and the digits as content, and a model that prefers them there
+    /// writes `666…` or `}266}266…` to the end of the budget without closing the string. Measured
+    /// on Gemma with `HardReserveStressTests`: without the preference, budgets of 4, 6 and 8 times
+    /// the shortest valid output ended in incomplete output at each hard-reserve floor from 2 to
+    /// 6 times the shortest output; with it, every pass at 6 times and more completed.
+    static let hardZoneStringClosingBias: Float32 = 100
+
     /// The grammar constraint, whose matcher every decision advances.
     let constraint: GrammarConstraint
 
@@ -113,16 +122,21 @@ struct GuidedDecisionRules {
         self.whitespaceTokenIDs = whitespaceTokenIDs
     }
 
-    /// The hard-zone bias of `closingBias`: every non-closing token suppressed, and every stop
+    /// The hard-zone bias of `closingBias`: every non-closing token suppressed, every stop
     /// token penalized, because the grammar may allow a stop at an intermediate valid state
-    /// before every required field is present.
-    private static func hardZoneBias(closingBias: MLXArray, stopTokenIDs: Set<Int>) -> MLXArray {
+    /// before every required field is present, and the string-closing quote preferred
+    /// (``hardZoneStringClosingBias``), thus an open string closes.
+    static func hardZoneBias(closingBias: MLXArray, stopTokenIDs: Set<Int>) -> MLXArray {
         let biasLength = closingBias.shape[0]
         var penalty = [Float32](repeating: 0, count: biasLength)
         for stopToken in stopTokenIDs where stopToken >= 0 && stopToken < biasLength {
             penalty[stopToken] = suppressingBias
         }
-        return which(closingBias .> 0, Float32(0), suppressingBias) + MLXArray(penalty)
+        let closing = which(closingBias .> 0, Float32(0), suppressingBias)
+        let stringClosing = which(
+            closingBias .== ClosingTokenBias.stringClosingBias, hardZoneStringClosingBias,
+            Float32(0))
+        return closing + stringClosing + MLXArray(penalty)
     }
 
     /// The position of the first decision: the matcher's mask before any token.
