@@ -101,8 +101,15 @@ comments:
     - evidence: `review sha HEAD~1..HEAD` (f0ce3a2c): 62 findings confirmed, 10 refuted, 21 files attempted, 0 failed. The duplication validator ran on all six split Inkling2 files with no prompt-cap skip. Two findings are in scope here: Libraries/IntegrationTestHelpers/CollectedGeneration.swift:72 (completeness/public-output-contract, `.rejectedToolCall` dropped) and Libraries/MLXVLM/Models/Inkling2Layers.swift:92 (no_unchecked_sendable on the renamed `Inkling2ConstantBox`). The other 60 are on moved code (Inkling2Attention.swift:27/45/237, Inkling2Configuration.swift missing docs, Inkling2DecoderLayer.swift:548). They predate the split, none is serious, and they are filed on ^v51b4m7.
     - next: fix the two in-scope items, then re-review with HEAD~1..HEAD.
   timestamp: 2026-11-22T01:13:20.687879+00:00
-position_column: review
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m80djk3y07bskpm6y2g9jvb5
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (361b666b): 0 findings, 0 confirmed, 0 refuted; 7 attempted, 0 failed; 3 source files reviewed, 4 .kanban files not matched by any validator. Every prior Review Findings item is checked.
+    - next: moved to done
+  timestamp: 2026-11-22T01:22:50.622190+00:00
+position_column: done
+position_ordinal: ffffd080
 title: 'Inkling 2 Mini: MTP block drafter (mtp.safetensors) in the fork''s speculative framework'
 ---
 Wire Inkling 2 Mini's shipped MTP draft head into the fork's speculative decoding. The head is `mtp.safetensors`, kept in `mlx-community/Inkling-2-Mini-oQ4e-mtp` (15.7 GiB) and the official thinkingmachines/Inkling-2-Mini.
