@@ -8,7 +8,8 @@ import Testing
 @testable import MLXLLM
 @testable import MLXLMCommon
 
-private let tinyLFM2DSparkTargetJSON = """
+/// A tiny LFM2 target that the DSpark tests and the directory-load tests build.
+let tinyLFM2DSparkTargetJSON = """
     {
       "model_type": "lfm2",
       "vocab_size": 32,

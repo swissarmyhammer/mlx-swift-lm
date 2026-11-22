@@ -493,7 +493,7 @@ public final class VLMModelFactory: GenericModelFactory {
         // Chat conventions. An explicit value on the configuration wins, followed
         // by a registered resolver that sees the repo id. Checkpoint metadata then
         // resolves the model declaration against the selected tool template.
-        let modelId = configuration.name
+        let modelId = configuration.repositoryID
         if mutableConfiguration.toolCallFormat == nil {
             mutableConfiguration.toolCallFormat =
                 conventionsRegistry.toolCallFormat(
@@ -515,7 +515,7 @@ public final class VLMModelFactory: GenericModelFactory {
         // parallel scheduling. This may briefly block a cooperative thread pool thread,
         // but the config file is small and model loading is not a high-concurrency path.
         let processorLoadingContext = VLMProcessorLoadingContext(
-            modelId: configuration.name,
+            modelId: configuration.repositoryID,
             modelType: baseConfig.modelType,
             configurationData: configData)
         async let tokenizerTask = tokenizerLoader.load(

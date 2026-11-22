@@ -63,6 +63,41 @@ public struct ModelConfiguration: Sendable {
         }
     }
 
+    /// The Hub repository id of the model, for the chat-convention resolvers and the other
+    /// lookups that key on the repository rather than on where the files are.
+    ///
+    /// For a Hub model this is the repo ID. A local directory inside a snapshot of the Hugging
+    /// Face hub cache (`models--<org>--<name>/snapshots/<revision>`, or a directory below that
+    /// snapshot) gives the `<org>/<name>` that the cache layout encodes. Any other directory
+    /// gives ``name``.
+    public var repositoryID: String {
+        guard case .directory(let url) = id else { return name }
+        return Self.hubCacheRepositoryID(of: url) ?? name
+    }
+
+    /// The `<org>/<name>` of a directory inside a snapshot of the Hugging Face hub cache, or
+    /// `nil` for a directory outside that layout.
+    ///
+    /// The cache stores `<org>/<name>` as `models--<org>--<name>`, and the Hub admits no `--`
+    /// in a repo ID, thus the first `--` after the prefix separates the two.
+    ///
+    /// - Parameter directory: A local model directory.
+    /// - Returns: The repo ID the cache layout of `directory` encodes, or `nil`.
+    static func hubCacheRepositoryID(of directory: URL) -> String? {
+        let components = directory.standardizedFileURL.pathComponents
+        let prefix = "models--"
+        guard
+            let index = components.lastIndex(where: { $0.hasPrefix(prefix) }),
+            index + 2 < components.count, components[index + 1] == "snapshots"
+        else { return nil }
+        let encoded = components[index].dropFirst(prefix.count)
+        guard let separator = encoded.range(of: "--") else { return nil }
+        let organization = encoded[..<separator.lowerBound]
+        let repository = encoded[separator.upperBound...]
+        guard !organization.isEmpty, !repository.isEmpty else { return nil }
+        return "\(organization)/\(repository)"
+    }
+
     /// The resolved local directory containing model files.
     ///
     /// - Throws: ``DirectoryError/unresolvedModelDirectory(_:)`` if this configuration still
@@ -222,6 +257,7 @@ public struct ModelConfiguration: Sendable {
             modelDirectory: modelDirectory,
             tokenizerDirectory: tokenizerDirectory,
             name: name,
+            repositoryID: repositoryID,
             defaultPrompt: defaultPrompt,
             extraEOSTokens: extraEOSTokens,
             stopStrings: stopStrings,

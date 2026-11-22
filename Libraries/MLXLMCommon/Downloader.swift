@@ -70,6 +70,13 @@ public struct ResolvedModelConfiguration: Sendable {
     public var modelDirectory: URL
     public var tokenizerDirectory: URL
     public var name: String
+
+    /// The Hub repository id of the model, which the chat-convention resolvers key on.
+    ///
+    /// ## See Also
+    /// - ``ModelConfiguration/repositoryID``
+    public var repositoryID: String
+
     public var defaultPrompt: String
     public var extraEOSTokens: Set<String>
     public var stopStrings: Set<String>
@@ -95,6 +102,7 @@ public struct ResolvedModelConfiguration: Sendable {
         modelDirectory: URL,
         tokenizerDirectory: URL,
         name: String,
+        repositoryID: String? = nil,
         defaultPrompt: String,
         extraEOSTokens: Set<String>,
         stopStrings: Set<String>? = nil,
@@ -109,6 +117,8 @@ public struct ResolvedModelConfiguration: Sendable {
         self.modelDirectory = modelDirectory
         self.tokenizerDirectory = tokenizerDirectory
         self.name = name
+        self.repositoryID =
+            repositoryID ?? ModelConfiguration.hubCacheRepositoryID(of: modelDirectory) ?? name
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
         self.stopStrings = stopStrings ?? extraEOSTokens
