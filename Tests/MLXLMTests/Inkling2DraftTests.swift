@@ -421,16 +421,43 @@ struct Inkling2DraftingTests {
         return state
     }
 
+    /// The anchor token of each drafted block.
+    private static let anchorToken: Int32 = 5
+
+    /// The position of the anchor of each drafted block, after a primed prompt of nine tokens.
+    private static let anchorPosition = 9
+
+    /// The argmax drafts of one block after ``anchorToken``.
+    private func draftTokens(
+        _ drafter: Inkling2DraftModel, target: Inkling2, blockSize: Int,
+        state: inout MTPDrafterState
+    ) -> MLXArray {
+        drafter.draftBlock(
+            target: target, lastToken: MLXArray([Self.anchorToken]),
+            lastHidden: MLXArray.zeros([1, 1, 1]),
+            sharedKV: [:], positionDeltas: nil, queryOffset: Self.anchorPosition,
+            blockSize: blockSize, state: &state, sampler: ArgMaxSampler())
+    }
+
+    /// The argmax drafts of one block after ``anchorToken`` with their processed logits.
+    private func draftWithLogits(
+        _ drafter: Inkling2DraftModel, target: Inkling2, blockSize: Int,
+        state: inout MTPDrafterState, processor: (any LogitProcessor)? = nil
+    ) -> MTPDraftBlockOutput {
+        drafter.draftBlockWithLogits(
+            target: target, lastToken: MLXArray([Self.anchorToken]),
+            lastHidden: MLXArray.zeros([1, 1, 1]),
+            sharedKV: [:], positionDeltas: nil, queryOffset: Self.anchorPosition,
+            blockSize: blockSize, state: &state, processor: processor, sampler: ArgMaxSampler())
+    }
+
     @Test("A block proposes the requested drafts and leaves the drafter state", arguments: [2, 4])
     func blockShapes(blockSize: Int) throws {
         let target = try tinyTarget()
         let drafter = try tinyDrafter()
         var state = try primed(drafter, target: target, count: 9)
         #expect(state.nextPosition == 9)
-        let drafts = drafter.draftBlock(
-            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
-            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: blockSize,
-            state: &state, sampler: ArgMaxSampler())
+        let drafts = draftTokens(drafter, target: target, blockSize: blockSize, state: &state)
         #expect(drafts.shape == [1, blockSize - 1])
         #expect(drafts.max().item(Int.self) < tinyVocabulary)
         #expect(state.nextPosition == 9)
@@ -464,14 +491,8 @@ struct Inkling2DraftingTests {
         let target = try tinyTarget()
         let drafter = try tinyDrafter()
         var state = try primed(drafter, target: target, count: 9)
-        let tokens = drafter.draftBlock(
-            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
-            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: blockSize,
-            state: &state, sampler: ArgMaxSampler())
-        let output = drafter.draftBlockWithLogits(
-            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
-            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: blockSize,
-            state: &state, processor: nil, sampler: ArgMaxSampler())
+        let tokens = draftTokens(drafter, target: target, blockSize: blockSize, state: &state)
+        let output = draftWithLogits(drafter, target: target, blockSize: blockSize, state: &state)
 
         #expect(output.tokens.asArray(Int32.self) == tokens.asArray(Int32.self))
         #expect(output.processedLogits.shape == [1, blockSize - 1, tinyVocabulary])
@@ -489,11 +510,9 @@ struct Inkling2DraftingTests {
         var state = try primed(drafter, target: target, count: 9)
         let forced: [Int32] = [7, 11, 13]
         let log = ForcingProcessor.Log()
-        let output = drafter.draftBlockWithLogits(
-            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
-            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: tinyBlock,
-            state: &state, processor: ForcingProcessor(forced: forced, log: log),
-            sampler: ArgMaxSampler())
+        let output = draftWithLogits(
+            drafter, target: target, blockSize: tinyBlock, state: &state,
+            processor: ForcingProcessor(forced: forced, log: log))
 
         #expect(output.tokens.asArray(Int32.self) == forced)
         #expect(log.sampled == forced)

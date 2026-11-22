@@ -44,6 +44,22 @@ struct MTPFallbackReasonTests {
         #expect(probe.draftCount == 0)
     }
 
+    @Test("a cache that stops staging rounds mid-stream reports an unsupported cache")
+    func aCacheThatStopsStagingReportsAnUnsupportedCache() throws {
+        let probe = MTPStagingProbe()
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([Int32(7)])),
+            mainModel: MTPStateEmittingTarget(probe: probe),
+            drafter: QwenStyleMTPDrafter(probe: probe),
+            parameters: GenerateParameters(maxTokens: Self.generatedTokenCount, temperature: 0),
+            blockSize: Self.probeBlockSize)
+        probe.cache.refusesSpeculativeStaging = true
+        while iterator.next() != nil {}
+
+        #expect(iterator.passthroughFallbackReason == .unsupportedCache)
+        #expect(iterator.passthroughReason?.contains("cannot stage") == true)
+    }
+
     @Test("a stream that stands down before its first round reports the kind of its fallback")
     func aStreamThatStandsDownReportsItsFallback() async throws {
         let fixture = try Qwen35MTPFixture()

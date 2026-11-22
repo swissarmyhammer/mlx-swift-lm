@@ -137,13 +137,6 @@ private final class Inkling2MTPCallLog: Sendable {
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 private enum Inkling2MTPLanguageModel {
 
-    /// The snapshot directory of `id` at `revision` in the Hugging Face cache.
-    static func snapshotDirectory(id: String, revision: String?) -> URL? {
-        let cache = HuggingFace.HubCache.default
-        guard let repo = HuggingFace.Repo.ID(rawValue: id), let revision else { return nil }
-        return try? cache.snapshotPath(repo: repo, kind: .model, commitHash: revision)
-    }
-
     /// The bytes Extras passes as `drafterBytes`: the sum of every `*.safetensors` file of the
     /// drafter snapshot, the oQ4e target weights included.
     static func snapshotSafetensorsBytes() async throws -> Int {
@@ -175,8 +168,7 @@ private enum Inkling2MTPLanguageModel {
             configuration: inkling2Mini4Bit, capabilities: [.guidedGeneration, .toolCalling],
             speculativeDecoding: speculation,
             weightsLocation: {
-                snapshotDirectory(id: $0, revision: inkling2Mini4BitRevision)
-                    ?? HuggingFace.HubCache.default.cacheDirectory
+                testWeightsLocation(modelID: $0, revision: inkling2Mini4BitRevision)
             },
             load: { _, _ in try await Inkling2MiniCheckpoint.shared.container() })
     }

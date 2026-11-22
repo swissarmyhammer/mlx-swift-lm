@@ -160,6 +160,24 @@ func testWeightsLocation(modelID: String) -> URL {
     return cache.repoDirectory(repo: repo, kind: .model)
 }
 
+/// The snapshot directory of `modelID` at the pinned `revision` in the Hugging Face cache, or the
+/// cache directory when the cache holds no such snapshot: the `weightsLocation:` of a suite that
+/// pins its checkpoint.
+///
+/// - Parameters:
+///   - modelID: The Hugging Face id of the checkpoint.
+///   - revision: The commit hash the suite pins.
+/// - Returns: The snapshot directory.
+func testWeightsLocation(modelID: String, revision: String) -> URL {
+    let cache = HuggingFace.HubCache.default
+    guard let repo = HuggingFace.Repo.ID(rawValue: modelID),
+        let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: revision)
+    else {
+        return cache.cacheDirectory
+    }
+    return snapshot
+}
+
 // MARK: - Executor Helpers
 
 /// Creates an MLX executor for the given model.

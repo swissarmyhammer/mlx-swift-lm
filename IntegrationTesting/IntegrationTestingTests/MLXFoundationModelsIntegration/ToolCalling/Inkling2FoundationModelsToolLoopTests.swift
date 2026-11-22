@@ -19,7 +19,6 @@
 
 import Foundation
 import FoundationModels
-import HuggingFace
 import MLX
 import MLXLMCommon
 import Testing
@@ -126,18 +125,6 @@ struct Inkling2FoundationModelsToolLoopTests {
         GenerationOptions(samplingMode: .greedy, temperature: 0, maximumResponseTokens: maxTokens)
     }
 
-    /// The snapshot directory of the pinned checkpoint in the Hugging Face cache.
-    private static func snapshotDirectory(modelID: String) -> URL {
-        let cache = HuggingFace.HubCache.default
-        guard let repo = HuggingFace.Repo.ID(rawValue: modelID),
-            let snapshot = try? cache.snapshotPath(
-                repo: repo, kind: .model, commitHash: inkling2Mini4BitRevision)
-        else {
-            return cache.cacheDirectory
-        }
-        return snapshot
-    }
-
     /// The model of the pinned checkpoint. Thinking off is a model that does not declare
     /// `.reasoning`, which the executor renders with the thinking effort `none`.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -145,7 +132,9 @@ struct Inkling2FoundationModelsToolLoopTests {
         MLXLanguageModel(
             configuration: inkling2Mini4Bit,
             capabilities: thinking ? [.reasoning, .toolCalling] : [.toolCalling],
-            weightsLocation: { snapshotDirectory(modelID: $0) },
+            weightsLocation: {
+                testWeightsLocation(modelID: $0, revision: inkling2Mini4BitRevision)
+            },
             load: { _, _ in try await Inkling2MiniCheckpoint.shared.container() })
     }
 
