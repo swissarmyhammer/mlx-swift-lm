@@ -45,6 +45,8 @@ public struct MTPDivergence: CustomStringConvertible, Sendable {
     /// cached forward passes rounded the other way.
     public var wroteTheArgmax: Bool { mtpToken == topTokens[0] }
 
+    /// One line that names the token where MTP parts from plain decoding, the token MTP wrote
+    /// there, and the best tokens and logits of the forward pass.
     public var description: String {
         """
         MTP parts from plain decode at token \(step): MTP \(mtpToken ?? -1), plain best \

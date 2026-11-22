@@ -70,6 +70,30 @@ comments:
     - files: Inkling2.swift, Inkling2Draft.swift, Inkling2Kernels.swift, KVCache.swift, ArraysCache.swift, MTPDrafterModel.swift, MTPDrafterModelFactory.swift, IntegrationTestHelpers/{MTPDivergence,TokenIteratorDrain}.swift, Inkling2MTPIntegrationTests.swift, Inkling2CheckpointIntegrationTests.swift, Inkling2Turn.swift (new), Qwen38FourBitMTPModel.swift, Inkling2DraftTests.swift, Inkling2Tests.swift
     - next: /review. Note: the Inkling result lines go to the unified log at info level. Capture them with `/usr/bin/log stream --level info --predicate 'category == "Inkling2"'` during the run (zsh's `log` builtin shadows /usr/bin/log, and info-level lines are not persisted for `log show`).
   timestamp: 2026-11-22T00:15:28.169413+00:00
+- actor: claude-code
+  id: 01m80aeyjc6e8j87rpa4fa35wv
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (fa71841a) — 4 findings (4 confirmed, 10 refuted, 1/28 review tasks failed, duplication validator skipped Inkling2.swift over prompt cap): IntegrationTesting/IntegrationTestingTests/Inkling2Turn.swift:17, Libraries/IntegrationTestHelpers/MTPDivergence.swift:48, Libraries/IntegrationTestHelpers/TokenIteratorDrain.swift:10, Libraries/MLXVLM/Models/Inkling2.swift:1
+    - next: address the 2026-11-21 18:16 findings, then re-review
+  timestamp: 2026-11-22T00:28:25.548127+00:00
+- actor: claude-code
+  id: 01m80bcp3waj55tr4tt96j71r0
+  text: |-
+    Working the 2026-11-21 18:16 findings:
+    - Collector: `ChatTurnTranscript` (BenchmarkHelpers, internal) merges reasoning into text and throws without info, so its contract does not fit. New canonical `CollectedGeneration` in Libraries/IntegrationTestHelpers (collect = whole turn, collectPasses = one value per completion info; one private `record(_:)` holds the event switch). Inkling2Turn.swift deleted; Inkling2Pass deleted (tool-loop suite keeps only a fileprivate `passSummary` formatter extension). Unit tests: Tests/MLXFoundationModelsTests/CollectedGenerationTests.swift (that bundle already links IntegrationTestHelpers).
+    - LFM2 suite now imports IntegrationTestHelpers and calls the shared `drain`.
+    - Split of Inkling2.swift (pure move, verified by a line-multiset diff against the original): Inkling2Configuration.swift, Inkling2Layers.swift (shared constants, unpacked, unweightedRMSNorm, convolutions, depth readout), Inkling2Attention.swift (+ the attention-only helpers l2Clip/l2ClipScaled/sigmoidGate/valueNorm/QuantizedLinearBox/ScaledL2Clip/RelativeLogits, still private), Inkling2MoE.swift (+ routeWeightEpsilon/softcappedSwiGLU/weightedExperts/residualAdd, private), Inkling2DecoderLayer.swift (+ MessageGate/messageMerge, private), Inkling2.swift (text model, MessageInput, top-level model).
+    - Gotchas: (1) a private top-level name in one file and an internal one of the same name in another file of the module is an "invalid redeclaration" (no shadowing), so Inkling2Draft's private copy of `headPositionAxis` was deleted (same value, now uses the shared one) and Inkling2's `ConstantBox` was renamed `Inkling2ConstantBox` (MuseGlimmer has its own private `ConstantBox`). (2) An internal class cannot have an internal property of a private type: where the property is only read inside its file it became `fileprivate` (message gates, rel_logits_proj/q_l2_clip/rel_l2_clip, router) and the type stayed private; Inkling2DepthwiseWeight and Inkling2ExpertProjection became internal because other files read conv1d.weight / gateUpProj.format. (3) Dropping `import Foundation` from Inkling2Attention.swift makes one expression miss the type-check time limit, so every split file keeps Foundation.
+  timestamp: 2026-11-22T00:44:39.932260+00:00
+- actor: claude-code
+  id: 01m80c8gzyw2b5hwpd6ktkyar7
+  text: |-
+    ### implement — changed
+    - evidence: all 4 findings of `## Review Findings (2026-11-21 18:16)` are checked. swift build --build-tests is clean (no warnings). xctest: MLXLMTests 1258 XCTest + 2561 Swift Testing pass (the 3 known issues come from withKnownIssue tests that were there before), MLXGuidedGenerationTests 86, MLXFoundationModelsTests 568 (6 of them the new CollectedGenerationTests), CXGrammarTests 7, MLXHuggingFaceMacrosTests 11. IntegrationTesting Release build-for-testing succeeded. Under the GPU lock: Inkling2CheckpointIntegrationTests 4/4. LFM2CheckpointIntegrationTests 4/6: the drain users (dsparkCheckpointLoadsAndGenerates, dsparkCheckpointPerformance) and both performance tests pass. denseCheckpointLoadsThroughFactory and moeCheckpointLoadsWithMixedPrecisionRouting fail on reasoningConfig assertions. Those assertions do not touch the changed `drain`; the likely cause is that a directory load gives the LFM2.5 resolver a snapshot-hash model id. Filed as ^4z5df0d. MTP suite not run (the split is a pure move, checked by a line-multiset diff against the original). ^1t0jagr is covered here.
+    - files: Libraries/IntegrationTestHelpers/CollectedGeneration.swift (new), Libraries/IntegrationTestHelpers/MTPDivergence.swift, Tests/MLXFoundationModelsTests/CollectedGenerationTests.swift (new), IntegrationTesting/IntegrationTestingTests/{Inkling2Turn.swift (deleted), Inkling2CheckpointIntegrationTests.swift, Inkling2MTPIntegrationTests.swift, Inkling2ToolLoopIntegrationTests.swift, LFM2CheckpointIntegrationTests.swift}, Libraries/MLXVLM/Models/{Inkling2.swift, Inkling2Configuration.swift, Inkling2Layers.swift, Inkling2Attention.swift, Inkling2MoE.swift, Inkling2DecoderLayer.swift (new split files), Inkling2Draft.swift}
+    - next: /review
+  timestamp: 2026-11-22T00:59:52.190970+00:00
 position_column: review
 position_ordinal: '80'
 title: 'Inkling 2 Mini: MTP block drafter (mtp.safetensors) in the fork''s speculative framework'
@@ -177,3 +201,25 @@ Acceptance:
 - [x] `Tests/MLXLMTests/Inkling2DraftTests.swift:79` `code-hygiene/idioms-swift` — AlwaysUseLiteralForEmptyCollectionInit: replace '[String: MLXArray]()' with ': [String: MLXArray] = [:]'.
 - [x] `Tests/MLXLMTests/Inkling2DraftTests.swift:81` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
 - [x] `Tests/MLXLMTests/Inkling2DraftTests.swift:91` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+
+## Review Findings (2026-11-21 18:16)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 15 file(s) reviewed, 7 not reviewed.
+
+> ⚠️ 1/28 review tasks failed — results are INCOMPLETE.
+
+> ⚠️ 1 file(s) not reviewed — the rendered prompt would exceed the agent's prompt cap:
+> - `Libraries/MLXVLM/Models/Inkling2.swift` — 318936 rendered bytes, over the 262144-byte per-file cap; not reviewed by: duplication (split the file)
+
+> 6 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M7ZVJZZEZ9MVVGHG404YN8Q4.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M7ZVJZZEZ9MVVGHG404YN8Q4.md` — no validator matches this file
+> - `.kanban/tasks/01M8094SSN7KYTQGDFV1T0JAGR.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8094SSN7KYTQGDFV1T0JAGR.md` — no validator matches this file
+> - `.kanban/tasks/01M8094YJVABKGHAPC46E0MTQT.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8094YJVABKGHAPC46E0MTQT.md` — no validator matches this file
+
+- [x] `IntegrationTesting/IntegrationTestingTests/Inkling2Turn.swift:17` `reuse/reuse` — `Inkling2Turn.collect` drains a `Generation` stream into text, reasoning, tool calls and info. That is the job of an existing collector, so the new code is a second copy of a capability that is already implemented. Two copies will drift apart, and a fix to one will not reach the other. Pick one canonical collector. Put it in `Libraries/IntegrationTestHelpers` next to `drain`, or reuse `ChatTurnTranscript.collect` if its shape fits. Point `Inkling2Pass::collect` and the Inkling2 suites at it, and delete the duplicates.
+- [x] `Libraries/IntegrationTestHelpers/MTPDivergence.swift:48` `code-hygiene/missing-docs-swift` — AllPublicDeclarationsHaveDocumentation: add a documentation comment for 'description'.
+- [x] `Libraries/IntegrationTestHelpers/TokenIteratorDrain.swift:10` `reuse/reuse` — The new shared `drain` reimplements a `drain` that already exists in the LFM2 suite. The change added the shared copy and left the original in place, so there are now two implementations of the same loop. Delete the private `drain` in `LFM2CheckpointIntegrationTests.swift` and call the shared `drain` from `IntegrationTestHelpers`.
+- [x] `Libraries/MLXVLM/Models/Inkling2.swift:1` `review-engine/prompt-cap` — This file exceeds the review prompt cap — 318936 rendered bytes against the 262144-byte per-file cap — so these validators could not review it: duplication. Split the file into smaller modules that fit the review prompt cap.

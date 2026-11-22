@@ -181,11 +181,6 @@ private func mixedTaps(_ taps: MLXArray, weights: MLXArray, normWeight: MLXArray
 /// The exponent of the attention scale, `headDim^(-1/2)`.
 private let attentionScaleExponent: Float = -0.5
 
-/// The axis of the positions of `[B, H, L, D]` heads, along which the context precedes the block.
-/// It is the axis of the heads of `[B, L, H, D]` rows, so swapping it with axis 1 turns rows into
-/// heads and heads into rows.
-private let headPositionAxis = 2
-
 private final class Inkling2DraftAttention: Module {
     @ModuleInfo(key: "q_proj") var queryProjection: Linear
     @ModuleInfo(key: "k_proj") var keyProjection: Linear

@@ -15,6 +15,7 @@
 
 import Foundation
 import HuggingFace
+import IntegrationTestHelpers
 import MLX
 import MLXHuggingFace
 import MLXLMCommon
@@ -83,14 +84,6 @@ private let shortPromptTokens = (1 ... shortPromptLength).map { Int32($0) }
 /// A batch of one sequence of `tokens`, as a model takes it.
 private func batch(_ tokens: [Int32]) -> MLXArray {
     MLXArray(tokens).reshaped(1, tokens.count)
-}
-
-/// Drains `iterator` and returns the tokens it emitted. `iterator` keeps its
-/// final state, thus a caller can read its draft counts afterwards.
-private func drain<Iterator: TokenIteratorProtocol>(_ iterator: inout Iterator) -> [Int] {
-    var tokens: [Int] = []
-    while let token = iterator.next() { tokens.append(token) }
-    return tokens
 }
 
 // MARK: - Benchmark shape

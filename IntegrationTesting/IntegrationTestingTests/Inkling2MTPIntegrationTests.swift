@@ -435,8 +435,9 @@ struct Inkling2MTPIntegrationTests {
             pair.target, instructions: instructions, generateParameters: parameters)
 
         for (index, question) in questions.enumerated() {
-            let mtp = try await Inkling2Turn.collect(mtpSession.streamDetails(to: question))
-            let plain = try await Inkling2Turn.collect(plainSession.streamDetails(to: question))
+            let mtp = try await CollectedGeneration.collect(mtpSession.streamDetails(to: question))
+            let plain = try await CollectedGeneration.collect(
+                plainSession.streamDetails(to: question))
             let info = try #require(mtp.info)
             let plainInfo = try #require(plain.info)
             Inkling2ResultLog.report(

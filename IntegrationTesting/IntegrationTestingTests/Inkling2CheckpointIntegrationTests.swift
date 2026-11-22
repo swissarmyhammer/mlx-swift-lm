@@ -18,6 +18,7 @@
 import BenchmarkHelpers
 import Foundation
 import HuggingFace
+import IntegrationTestHelpers
 import MLX
 import MLXHuggingFace
 import MLXLMCommon
@@ -93,7 +94,7 @@ struct Inkling2CheckpointIntegrationTests {
             container, generateParameters: GenerateParameters(maxTokens: 768, temperature: 0),
             additionalContext: Self.lowEffort)
 
-        let turn = try await Inkling2Turn.collect(
+        let turn = try await CollectedGeneration.collect(
             session.streamDetails(
                 to: "Write a Python function `is_prime(n)` that returns whether n is prime. "
                     + "Reply with only the code."))
@@ -169,9 +170,9 @@ struct Inkling2CheckpointIntegrationTests {
             "What is my favourite number?",
             "And what is my name?",
         ]
-        var turns: [Inkling2Turn] = []
+        var turns: [CollectedGeneration] = []
         for question in questions {
-            let turn = try await Inkling2Turn.collect(session.streamDetails(to: question))
+            let turn = try await CollectedGeneration.collect(session.streamDetails(to: question))
             Inkling2ResultLog.report(
                 "INKLING2", "chat[\(effort)] turn \(turns.count): \(turn.summary) -> \(turn.text)")
             turns.append(turn)
@@ -215,7 +216,7 @@ struct Inkling2CheckpointIntegrationTests {
             container, generateParameters: GenerateParameters(maxTokens: 512, temperature: 0),
             additionalContext: Self.lowEffort, tools: [weatherTool])
 
-        let turn = try await Inkling2Turn.collect(
+        let turn = try await CollectedGeneration.collect(
             session.streamDetails(to: "What is the weather in Paris right now?"))
 
         Inkling2ResultLog.report(

@@ -14,6 +14,7 @@
 // `xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj -scheme IntegrationTesting -destination 'platform=macOS' -skipPackagePluginValidation -configuration Release ENABLE_TESTABILITY=YES ONLY_ACTIVE_ARCH=YES -only-testing:IntegrationTestingTests/Inkling2ToolLoopIntegrationTests`
 
 import Foundation
+import IntegrationTestHelpers
 import MLXLMCommon
 import MLXVLM
 import Testing
@@ -161,43 +162,12 @@ final class Inkling2ToolCallLog: Sendable {
 
 // MARK: - One generation pass
 
-/// What one generation pass of a `ChatSession` streamed, up to its completion info.
-private struct Inkling2Pass {
-    var reasoning = ""
-    var text = ""
-    var toolCalls: [ToolCall] = []
-    var info: GenerateCompletionInfo?
-
-    /// One line that names the calls, the cached prompt tokens and the decode rate.
-    var summary: String {
+extension CollectedGeneration {
+    /// One line that names the calls, the token counts and rates, the reasoning length and the
+    /// text of one pass.
+    fileprivate var passSummary: String {
         let calls = toolCalls.map { "\($0.function.name)(\($0.function.arguments))" }
-        guard let info else { return "calls \(calls), no completion info" }
-        return
-            "calls \(calls), prompt \(info.promptTokenCount) tok (cached "
-            + "\(info.cachedPromptTokenCount)), generated \(info.generationTokenCount) tok, "
-            + "decode \(String(format: "%.1f", info.tokensPerSecond)) tok/s, "
-            + "reasoning \(reasoning.count) chars, text <<<\(text)>>>"
-    }
-
-    /// Drains `stream` into one pass for each completion info it carries.
-    static func collect(_ stream: AsyncThrowingStream<Generation, Error>) async throws
-        -> [Inkling2Pass]
-    {
-        var passes: [Inkling2Pass] = []
-        var pass = Inkling2Pass()
-        for try await event in stream {
-            switch event {
-            case .chunk(let chunk): pass.text += chunk
-            case .reasoning(let chunk): pass.reasoning += chunk
-            case .toolCall(let call): pass.toolCalls.append(call)
-            case .info(let info):
-                pass.info = info
-                passes.append(pass)
-                pass = Inkling2Pass()
-            default: break
-            }
-        }
-        return passes
+        return "calls \(calls), \(summary), reasoning \(reasoning.count) chars, text <<<\(text)>>>"
     }
 }
 
@@ -256,18 +226,19 @@ struct Inkling2ToolLoopIntegrationTests {
         let log = Inkling2ToolCallLog()
         let session = try await makeSession(thinking: thinking, log: log)
 
-        let passes = try await Inkling2Pass.collect(
+        let passes = try await CollectedGeneration.collectPasses(
             session.streamDetails(to: Inkling2BankFixture.question))
         for (index, pass) in passes.enumerated() {
             Inkling2ResultLog.report(
-                "INKLING2 TOOLS", "chat[\(label)] pass \(index): \(pass.summary)")
+                "INKLING2 TOOLS", "chat[\(label)] pass \(index): \(pass.passSummary)")
             Inkling2ResultLog.report(
                 "INKLING2 TOOLS", "chat[\(label)] pass \(index) reasoning: \(pass.reasoning)")
         }
-        let followUp = try await Inkling2Pass.collect(
+        let followUp = try await CollectedGeneration.collectPasses(
             session.streamDetails(to: Inkling2BankFixture.followUp))
         for pass in followUp {
-            Inkling2ResultLog.report("INKLING2 TOOLS", "chat[\(label)] follow-up: \(pass.summary)")
+            Inkling2ResultLog.report(
+                "INKLING2 TOOLS", "chat[\(label)] follow-up: \(pass.passSummary)")
         }
         Inkling2ResultLog.report("INKLING2 TOOLS", "chat[\(label)] dispatched \(log.calls)")
 
