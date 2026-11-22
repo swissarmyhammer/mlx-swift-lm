@@ -82,8 +82,8 @@ private let warmUpTokens = 16
 /// The tokens the chat turns may generate.
 private let chatTokens = 384
 
-/// The largest gap of the two best logits at which MTP may write the second best token past the
-/// sliding window, as the fork judges MTP against plain decoding.
+/// The largest gap below the best logit at which MTP may write another token past the sliding
+/// window, as the fork judges MTP against plain decoding.
 ///
 /// Past the window plain decoding reads each sliding layer's keys from a wrapped ring, and a
 /// verify pass reads them in temporal order, so the two sum the attention in another order; a
@@ -221,7 +221,9 @@ private func findDivergence(
 }
 
 /// Expects `run` to speculate throughout and to emit `plain`, the tokens of plain greedy
-/// decoding after `input`, or to part from it only at a near tie within `nearTieGap`.
+/// decoding after `input`, or to part from it only at a near tie within `nearTieGap`: where an
+/// uncached forward pass over the shared tokens rates MTP's token within the gap of its best,
+/// which may be a tie of more than the two best tokens.
 ///
 /// - Parameters:
 ///   - run: the MTP decode.
@@ -241,11 +243,35 @@ private func expectMatchesPlain(
     let divergence = await findDivergence(target, input: input, mtp: run.tokens, plain: plain)
     let description = "\(label): \(divergence.map(String.init) ?? "")"
     if let nearTieGap {
-        #expect(divergence?.isNearTie(within: nearTieGap) ?? true, "\(description)")
+        guard let divergence else { return nil }
+        let below = mtpTokenGap(divergence, target, input: input, plain: plain)
+        #expect(
+            below.map { $0 <= nearTieGap } ?? false,
+            "\(description), MTP's token \(below.map { String($0) } ?? "none") below the best")
     } else {
         #expect(divergence == nil, "\(description)")
     }
     return divergence
+}
+
+/// How far below the best logit an uncached forward pass over `input` and the tokens MTP and
+/// plain decoding share rates the token MTP wrote where the two part, or `nil` when MTP wrote
+/// none there.
+///
+/// - Parameters:
+///   - divergence: where MTP parts from plain decoding.
+///   - target: the target, which runs the forward pass.
+///   - input: the prompt of both decodes.
+///   - plain: the tokens of plain greedy decoding.
+/// - Returns: the best logit less the logit of MTP's token.
+private func mtpTokenGap(
+    _ divergence: MTPDivergence, _ target: any LanguageModel, input: LMInput, plain: [Int]
+) -> Float? {
+    guard let token = divergence.mtpToken else { return nil }
+    let context = input.text.tokens.reshaped(-1).asArray(Int.self) + plain.prefix(divergence.step)
+    let logits = target(MLXArray(context.map(Int32.init))[.newAxis, 0...], cache: nil)[0, -1]
+        .asType(.float32)
+    return logits.max().item(Float.self) - logits[token].item(Float.self)
 }
 
 /// One formatted number.
