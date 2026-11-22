@@ -64,7 +64,10 @@ public enum GuidedGenerationLoop {
     ///   - stringTokens: The tokens that move the JSON string state, with the
     ///     string-closing tokens (``JSONStringTokens/stringClosingTokenIDs``)
     ///     the hard zone prefers inside an open string (from
-    ///     `JSONStringTokens.compute`). `.empty` turns the preference off.
+    ///     `JSONStringTokens.compute`). Nil computes them from the tokenizer of
+    ///     `context` when the generation has a hard zone and a `closingBias`;
+    ///     a caller that caches them per tokenizer passes them. `.empty` turns
+    ///     the preference off.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
     ///   - logitProcessor: Optional processor, such as
@@ -101,7 +104,7 @@ public enum GuidedGenerationLoop {
         closingBias: MLXArray? = nil,
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
-        stringTokens: JSONStringTokens = .empty,
+        stringTokens: JSONStringTokens? = nil,
         diagnosticLog: Bool = false,
         logitProcessor: (any LogitProcessor)? = nil,
         logitSampler: (any LogitSampler)? = nil,
@@ -154,7 +157,7 @@ public enum GuidedGenerationLoop {
         closingBias: MLXArray? = nil,
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
-        stringTokens: JSONStringTokens = .empty,
+        stringTokens: JSONStringTokens? = nil,
         diagnosticLog: Bool = false,
         logitProcessor: (any LogitProcessor)? = nil,
         logitSampler: (any LogitSampler)? = nil,
@@ -185,7 +188,10 @@ public enum GuidedGenerationLoop {
             unknownTokenID: context.tokenizer.unknownTokenId,
             completionReserve: completionReserve, hardReserve: hardReserve,
             closingBias: closingBias, whitespaceBias: whitespaceBias,
-            whitespaceTokenIDs: whitespaceTokenIDs, stringTokens: stringTokens)
+            whitespaceTokenIDs: whitespaceTokenIDs,
+            stringTokens: stringTokens
+                ?? (hardReserve > 0 && closingBias != nil
+                    ? JSONStringTokens.compute(tokenizer: context.tokenizer) : .empty))
 
         return try withoutActuallyEscaping(emit) { emit in
             var decoder = try GuidedDecoder(

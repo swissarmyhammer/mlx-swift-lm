@@ -24,23 +24,14 @@ public enum WhitespaceTokenBias {
     /// Returns an MLXArray of shape [vocabSize] with -200.0 for whitespace-only
     /// tokens and 0.0 for all others, plus the set of whitespace token IDs.
     public static func compute(tokenizer: any Tokenizer) -> (bias: MLXArray, tokenIDs: Set<Int>) {
-        // Discover vocab size by scanning token IDs
-        var vocabSize = 0
-        while tokenizer.convertIdToToken(vocabSize) != nil {
-            vocabSize += 1
-            if vocabSize > 500_000 { break }
-        }
+        let tokens = TokenizerVocabulary.tokens(of: tokenizer)
 
-        var biases = [Float](repeating: 0.0, count: vocabSize)
+        var biases = [Float](repeating: 0.0, count: tokens.count)
         var whitespaceIDs = Set<Int>()
 
-        for id in 0 ..< vocabSize {
-            if let token = tokenizer.convertIdToToken(id),
-                isWhitespaceOnly(token)
-            {
-                biases[id] = biasMagnitude
-                whitespaceIDs.insert(id)
-            }
+        for (id, token) in tokens.enumerated() where isWhitespaceOnly(token) {
+            biases[id] = biasMagnitude
+            whitespaceIDs.insert(id)
         }
 
         return (MLXArray(biases), whitespaceIDs)

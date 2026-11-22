@@ -4,20 +4,17 @@ import MLXLMCommon
 
 /// Whether the committed output of a guided generation stands inside an open JSON string, and
 /// whether a backslash escapes the next character of that string.
-public struct JSONStringState: Equatable, Sendable {
+struct JSONStringState: Equatable, Sendable {
 
     /// Whether a string is open: an opening `"` came, and its closing `"` did not.
-    public private(set) var isOpen = false
+    private(set) var isOpen = false
 
     /// Whether the last character of the open string is an escaping backslash, thus the next
     /// character is part of the escape and a `"` there does not close the string.
-    public private(set) var isEscaped = false
-
-    /// The state before any output: no string open.
-    public init() {}
+    private(set) var isEscaped = false
 
     /// Whether a `"` at this state closes a string.
-    public var closesWithQuote: Bool { isOpen && !isEscaped }
+    var closesWithQuote: Bool { isOpen && !isEscaped }
 
     /// The state after one character of the output.
     ///
@@ -40,8 +37,8 @@ public struct JSONStringState: Equatable, Sendable {
     }
 }
 
-/// The tokens of a vocabulary that move the string state of JSON output
-/// (``JSONStringState``), and the tokens that close an open string.
+/// The tokens of a vocabulary that move the string state of JSON output, and the tokens that
+/// close an open string.
 ///
 /// The hard zone of a guided generation prefers ``stringClosingTokenIDs`` while a string is open:
 /// inside a string the grammar allows `}`, `]` and the digits as content, and a model that keeps
@@ -49,18 +46,21 @@ public struct JSONStringState: Equatable, Sendable {
 /// preference there.
 public struct JSONStringTokens: Sendable {
 
-    /// What one character of a token is to a JSON string.
+    /// What one byte of a token is to a JSON string.
     enum Mark: Sendable {
         /// `"`: opens or closes a string, or ends an escape.
         case quote
         /// `\`: starts or ends an escape inside a string.
         case backslash
-        /// Any other character: ends an escape inside a string.
+        /// Any other byte: ends an escape inside a string.
         case other
     }
 
-    /// The vocabulary size past which the scan stops, as ``ClosingTokenBias`` stops.
-    private static let maximumVocabularySize = 500_000
+    /// The byte of `"`.
+    private static let quoteByte = UInt8(ascii: "\"")
+
+    /// The byte of `\`.
+    private static let backslashByte = UInt8(ascii: "\\")
 
     /// The text of the token that closes a string.
     private static let quote = "\""
@@ -71,18 +71,19 @@ public struct JSONStringTokens: Sendable {
     /// No string tokens: the string state never opens, and the hard zone prefers no token.
     public static let empty = JSONStringTokens(stringClosingTokenIDs: [], marks: [:])
 
-    /// The tokens whose text is exactly `"`, which close an open string.
+    /// The tokens that close an open string: the token whose text is exactly `"`, and the
+    /// byte-fallback token of that byte (`<0x22>`).
     public let stringClosingTokenIDs: Set<Int>
 
-    /// The marks of each token whose text holds a `"` or a `\`, in order. Every other token
-    /// reads as one ``Mark/other`` character.
+    /// The marks of each token whose bytes hold a `"` or a `\`, in order, with each run of other
+    /// bytes read as one ``Mark/other``. Every other token reads as one ``Mark/other``.
     let marks: [Int: [Mark]]
 
     /// Creates the string tokens from their parts.
     ///
     /// - Parameters:
     ///   - stringClosingTokenIDs: The tokens that close an open string.
-    ///   - marks: The marks of each token whose text holds a `"` or a `\`.
+    ///   - marks: The marks of each token whose bytes hold a `"` or a `\`.
     init(stringClosingTokenIDs: Set<Int>, marks: [Int: [Mark]]) {
         self.stringClosingTokenIDs = stringClosingTokenIDs
         self.marks = marks
@@ -90,45 +91,69 @@ public struct JSONStringTokens: Sendable {
 
     /// The string tokens of `tokenizer`'s vocabulary.
     ///
+    /// Each token text is read as UTF-8 bytes, not as characters: a `"` that a combining mark
+    /// follows is one character, but its quote byte still moves the state.
+    ///
     /// - Parameter tokenizer: The tokenizer whose token texts are read.
     /// - Returns: The string tokens.
     public static func compute(tokenizer: any Tokenizer) -> JSONStringTokens {
         var closing: Set<Int> = []
         var marks: [Int: [Mark]] = [:]
-        var id = 0
-        while id < maximumVocabularySize, let token = tokenizer.convertIdToToken(id) {
-            if token == quote || byteFallbackMarks[token] == .quote {
-                closing.insert(id)
-            }
+        for (id, token) in TokenizerVocabulary.tokens(of: tokenizer).enumerated() {
             if let mark = byteFallbackMarks[token] {
                 marks[id] = [mark]
-            } else if token.contains(quote) || token.contains("\\") {
-                marks[id] = token.map { character in
-                    switch character {
-                    case "\"": .quote
-                    case "\\": .backslash
-                    default: .other
-                    }
-                }
+                if mark == .quote { closing.insert(id) }
+                continue
             }
-            id += 1
+            if token == quote { closing.insert(id) }
+            if let tokenMarks = Self.marks(of: token) { marks[id] = tokenMarks }
         }
         return JSONStringTokens(stringClosingTokenIDs: closing, marks: marks)
     }
 
-    /// The state after `tokens`, from `state`.
-    ///
-    /// - Parameters:
-    ///   - tokens: The committed tokens, in order.
-    ///   - state: The state before them.
-    /// - Returns: The state after them.
-    func state(after tokens: some Sequence<Int>, from state: JSONStringState) -> JSONStringState {
-        var state = state
-        for token in tokens {
-            for mark in marks[token] ?? [.other] {
-                state.read(mark)
+    /// The marks of the bytes of `token`, or nil when it holds no `"` and no `\`.
+    private static func marks(of token: String) -> [Mark]? {
+        var marks: [Mark] = []
+        var holdsMark = false
+        for byte in token.utf8 {
+            switch byte {
+            case quoteByte:
+                marks.append(.quote)
+                holdsMark = true
+            case backslashByte:
+                marks.append(.backslash)
+                holdsMark = true
+            default:
+                if marks.last != .other { marks.append(.other) }
             }
         }
+        return holdsMark ? marks : nil
+    }
+
+    /// The state after a committed `token` and the tokens the grammar fast-forwarded after it.
+    ///
+    /// - Parameters:
+    ///   - token: The committed token.
+    ///   - forced: The tokens the grammar fast-forwarded after it.
+    ///   - state: The state before `token`.
+    /// - Returns: The state after the forced tokens.
+    func state(after token: Int, forced: [Int32], from state: JSONStringState) -> JSONStringState {
+        var state = state
+        read(token, into: &state)
+        for forcedToken in forced {
+            read(Int(forcedToken), into: &state)
+        }
         return state
+    }
+
+    /// Moves `state` over the marks of `token`.
+    private func read(_ token: Int, into state: inout JSONStringState) {
+        guard let tokenMarks = marks[token] else {
+            state.read(.other)
+            return
+        }
+        for mark in tokenMarks {
+            state.read(mark)
+        }
     }
 }

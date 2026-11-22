@@ -104,13 +104,11 @@ final class GuidedDraftChain {
         }
         do {
             let commit = try rules.constraint.commitToken(Int32(draftedToken))
-            let whitespace = rules.whitespace(after: draftedToken, from: position.whitespace)
-            let stringState = rules.stringState(
-                after: draftedToken, forced: commit.tokens, from: position.stringState)
+            let after = rules.after(token: draftedToken, forced: commit.tokens, from: position)
             drafts.append(
                 GuidedDraft(
                     token: draftedToken, position: position, commit: commit,
-                    whitespaceAfter: whitespace, stringStateAfter: stringState))
+                    whitespaceAfter: after.whitespace, stringStateAfter: after.stringState))
             committedDraftCount = drafts.count
             let tokenCount = position.tokenCount + 1 + commit.tokens.count
             guard !commit.isTerminated, commit.tokens.isEmpty, tokenCount < rules.maxTokens else {
@@ -118,7 +116,8 @@ final class GuidedDraftChain {
                 return
             }
             nextPosition = try rules.position(
-                tokenCount: tokenCount, whitespace: whitespace, stringState: stringState)
+                tokenCount: tokenCount, whitespace: after.whitespace,
+                stringState: after.stringState)
         } catch {
             failure = error
             nextPosition = nil

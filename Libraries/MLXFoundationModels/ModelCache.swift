@@ -20,12 +20,16 @@ enum ConstraintKind {
 
 // MARK: - Tokenizer Bias Cache Entry
 
-/// Tokenizer-derived logit biases, cached per model. Both arrays are pure
-/// functions of the tokenizer, so they are identical for a model's lifetime.
-/// `@unchecked Sendable`: every field is `let` and read-only after construction
-/// (the arrays are only *added* to logits in `GuidedGenerationLoop`, never
+/// Tokenizer-derived logit biases and token sets, cached per model. Each field
+/// is a pure function of the tokenizer, so it is identical for a model's
+/// lifetime.
+///
+/// `@unchecked Sendable` covers the two `MLXArray` fields only, which are not
+/// `Sendable`: every field is `let` and read-only after construction (the
+/// arrays are only *added* to logits in `GuidedGenerationLoop`, never
 /// mutated), and the entry is shared across actors via `ModelCache` — the same
 /// pattern as `GrammarTokenizer`/`GrammarConstraint` in `XGrammarBridge.swift`.
+/// The token sets and ``stringTokens`` are `Sendable` values themselves.
 final class TokenizerBias: @unchecked Sendable {
     let closing: MLXArray
     let whitespace: MLXArray

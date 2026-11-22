@@ -86,7 +86,8 @@ struct GuidedDecisionRules {
     /// The bias that favors closing tokens, or `nil` for no budget zones.
     let closingBias: MLXArray?
 
-    /// The bias of the hard zone: closing tokens only, stop tokens penalized.
+    /// The bias of the hard zone: closing tokens only, stop tokens penalized; nil without a hard
+    /// zone or a closing bias.
     private let hardZoneBias: MLXArray?
 
     /// The bias of the hard zone inside an open string: ``hardZoneBias`` with the string-closing
@@ -132,9 +133,12 @@ struct GuidedDecisionRules {
         self.completionReserve = completionReserve
         self.hardReserve = hardReserve
         self.closingBias = closingBias
-        let hardZoneBias = closingBias.map {
-            Self.hardZoneBias(closingBias: $0, stopTokenIDs: stopTokenIDs)
-        }
+        // The hard-zone biases serve a generation with a hard zone only.
+        let hardZoneBias =
+            hardReserve > 0
+            ? closingBias.map {
+                Self.hardZoneBias(closingBias: $0, stopTokenIDs: stopTokenIDs)
+            } : nil
         self.hardZoneBias = hardZoneBias
         self.hardZoneInStringBias = hardZoneBias.map {
             $0
@@ -222,7 +226,7 @@ struct GuidedDecisionRules {
         guard position.mask.needsApply else { return nil }
         var active: MLXArray?
         if let closingBias {
-            if hardReserve > 0 && position.tokenCount >= maxTokens - hardReserve {
+            if let hardZoneBias, position.tokenCount >= maxTokens - hardReserve {
                 active =
                     position.stringState.closesWithQuote ? hardZoneInStringBias : hardZoneBias
             } else if position.tokenCount >= maxTokens - completionReserve {
@@ -260,31 +264,27 @@ struct GuidedDecisionRules {
         position.mask.needsApply && (token == unknownTokenID || stopTokenIDs.contains(token))
     }
 
-    /// The whitespace run after the sampled `token`. Fast-forwarded tokens do not count: the
-    /// grammar forced them.
+    /// The whitespace run and the string state after a committed `token` and the tokens the
+    /// grammar fast-forwarded after it.
     ///
-    /// - Parameters:
-    ///   - token: The sampled token.
-    ///   - run: The run before `token`.
-    /// - Returns: The run after `token`.
-    func whitespace(after token: Int, from run: WhitespaceRunTracker) -> WhitespaceRunTracker {
-        guard whitespaceBias != nil else { return run }
-        var run = run
-        _ = run.record(tokenID: token)
-        return run
-    }
-
-    /// The string state after a committed `token` and the tokens the grammar fast-forwarded
-    /// after it: every committed token moves the state, forced or not.
+    /// The whitespace run counts the sampled `token` only: the grammar forced the rest. The
+    /// string state reads every committed token, forced or not.
     ///
     /// - Parameters:
     ///   - token: The committed token.
     ///   - forced: The tokens the grammar fast-forwarded after it.
-    ///   - state: The state before `token`.
-    /// - Returns: The state after the forced tokens.
-    func stringState(after token: Int, forced: [Int32], from state: JSONStringState)
-        -> JSONStringState
-    {
-        stringTokens.state(after: [token] + forced.map { Int($0) }, from: state)
+    ///   - position: The position `token` was decided at.
+    /// - Returns: The whitespace run and the string state after the forced tokens.
+    func after(token: Int, forced: [Int32], from position: GuidedPosition) -> (
+        whitespace: WhitespaceRunTracker, stringState: JSONStringState
+    ) {
+        var whitespace = position.whitespace
+        if whitespaceBias != nil {
+            _ = whitespace.record(tokenID: token)
+        }
+        return (
+            whitespace,
+            stringTokens.state(after: token, forced: forced, from: position.stringState)
+        )
     }
 }

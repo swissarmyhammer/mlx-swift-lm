@@ -147,7 +147,6 @@ struct GuidedDecoder {
                 "the sampler chose token \(token), which the grammar does not allow")
         }
         logitProcessor?.didSample(token: MLXArray([Int32(token)]))
-        let whitespaceAfter = rules.whitespace(after: token, from: position.whitespace)
         guard !rules.endsGeneration(token, at: position) else {
             logStop("EOS/unk tokenId=\(token) at token \(tokenCount)")
             grammarStopped = true
@@ -155,10 +154,10 @@ struct GuidedDecoder {
         }
         diagnosticSink?.recordDecisionMargin(topTwoMargin(of: logits))
         let commit = try rules.constraint.commitToken(Int32(token))
+        let after = rules.after(token: token, forced: commit.tokens, from: position)
         return emit(
-            token, commit: commit, whitespaceAfter: whitespaceAfter,
-            stringStateAfter: rules.stringState(
-                after: token, forced: commit.tokens, from: position.stringState))
+            token, commit: commit, whitespaceAfter: after.whitespace,
+            stringStateAfter: after.stringState)
     }
 
     /// The gap between the two best logits of the last row of `logits` under the mask and the

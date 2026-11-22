@@ -373,7 +373,6 @@ extension ModelLoadingSuite.GuidedGenerationTests {
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
                 whitespaceTokenIDs: whitespaceTokenIDs,
-                stringTokens: JSONStringTokens.compute(tokenizer: context.tokenizer),
                 diagnosticLog: diagnosticLog
             ) { text in
                 collected += text
@@ -545,8 +544,7 @@ extension ModelLoadingSuite.GuidedGenerationTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs,
-                stringTokens: JSONStringTokens.compute(tokenizer: context.tokenizer)
+                whitespaceTokenIDs: whitespaceTokenIDs
             ) { text in
                 collected += text
                 return true
