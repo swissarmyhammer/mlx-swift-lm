@@ -39,13 +39,23 @@ let inkling2Mini4Bit = ModelConfiguration(
 /// The bytes of one GiB.
 private let bytesPerGiB = 1_073_741_824.0
 
-/// The checkpoint, loaded at most once per test process, on the first
-/// ``container()`` call. The tool-loop suites share it.
+/// A checkpoint, loaded at most once per test process, on the first
+/// ``container()`` call. The tool-loop suites share ``shared``, the 4bit checkpoint.
 actor Inkling2MiniCheckpoint {
-    static let shared = Inkling2MiniCheckpoint()
+    static let shared = Inkling2MiniCheckpoint(configuration: inkling2Mini4Bit)
+
+    /// The checkpoint this instance loads.
+    private let configuration: ModelConfiguration
 
     /// The load the first ``container()`` call started.
     private var loading: Task<ModelContainer, Error>?
+
+    /// An instance that loads `configuration`.
+    ///
+    /// - Parameter configuration: the checkpoint and its revision.
+    init(configuration: ModelConfiguration) {
+        self.configuration = configuration
+    }
 
     /// The loaded checkpoint: the first call starts the download and the load,
     /// and every call shares it.
@@ -53,10 +63,11 @@ actor Inkling2MiniCheckpoint {
         if let loading {
             return try await loading.value
         }
+        let configuration = configuration
         let load = Task {
             try await VLMModelFactory.shared.loadContainer(
                 from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                configuration: inkling2Mini4Bit)
+                configuration: configuration)
         }
         loading = load
         return try await load.value

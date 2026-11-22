@@ -49,7 +49,7 @@ enum Inkling2OMLXLayout {
         MLXArray]
     {
         var result = [String: MLXArray](minimumCapacity: weights.count)
-        var messageQueries = [Int: MLXArray]()
+        var messageQueries: [Int: MLXArray] = [:]
         for (key, value) in weights {
             if isOMLXVision(key) {
                 result[visionKey(key)] = value
@@ -93,7 +93,7 @@ enum Inkling2OMLXLayout {
     static func remap(_ quantization: BaseConfiguration.PerLayerQuantization)
         -> BaseConfiguration.PerLayerQuantization
     {
-        var perLayer = [String: BaseConfiguration.QuantizationOption]()
+        var perLayer: [String: BaseConfiguration.QuantizationOption] = [:]
         for (path, option) in quantization.perLayerQuantization {
             guard path.hasPrefix(textPrefix) || path == "lm_head" else {
                 perLayer[path] = option
@@ -117,13 +117,17 @@ enum Inkling2OMLXLayout {
             || key.hasPrefix("vision_tower.proj_out.")
     }
 
+    /// The prefix of the layer tensors under the text scope.
+    private static let layersPrefix = "layers."
+
     /// The layer and the rest of a `layers.N.rest` name, or `nil` for another name.
     private static func layerKey(_ name: String) -> (Int, String)? {
-        let parts = name.split(separator: ".", maxSplits: 2).map(String.init)
-        guard parts.count == 3, parts[0] == "layers", let layer = Int(parts[1]) else {
+        guard name.hasPrefix(layersPrefix) else { return nil }
+        let tail = name.dropFirst(layersPrefix.count)
+        guard let dot = tail.firstIndex(of: "."), let layer = Int(tail[..<dot]) else {
             return nil
         }
-        return (layer, parts[2])
+        return (layer, String(tail[tail.index(after: dot)...]))
     }
 
     /// The renames of the vision tower: the backbone's layers, norms and layer scales, and the
@@ -188,6 +192,9 @@ enum Inkling2OMLXLayout {
         "mlp_conv": "post_mlp_convolution.conv1d.weight",
     ]
 
+    /// The scope of the routed experts inside a layer.
+    private static let expertsScope = "mlp.experts."
+
     /// The renames of the modules inside a layer whose tensors keep their suffixes.
     private static let moduleRenames: [String: String] = [
         "attn.o_proj": "self_attn.o_proj",
@@ -237,42 +244,70 @@ enum Inkling2OMLXLayout {
         return (String(rest[..<dot]), String(rest[rest.index(after: dot)...]))
     }
 
-    /// The parts of a fused projection of `layer` in the order of its rows, with their row
-    /// counts, or `nil` when `module` is not a fused projection.
+    /// The row count of a part of a fused projection, which the layer's attention gives.
+    private enum PartRows {
+        /// The queries, or the gate: one row per query head and head dimension.
+        case queries
+        /// The keys, or the values: one row per key-value head and head dimension.
+        case keysOrValues
+        /// The relative states: one row per query head and relative dimension.
+        case relative
+        /// The sinks: one row per query head.
+        case heads
+        /// The taps of a dynamic convolution: one row per key-value head and tap.
+        case taps
+    }
+
+    /// The parts of each fused projection in the order of its rows, under the layer's
+    /// `self_attn.` scope.
     ///
     /// A sliding layer fuses every projection of the attention input into `in_proj`; a full
     /// layer fuses the query side into `q_proj`, and each of `k_proj` and `v_proj` with the
     /// weight projection of its dynamic convolution.
+    private static let fusedProjections: [String: [(String, PartRows)]] = {
+        var table: [String: [(String, PartRows)]] = [
+            "attn.in_proj": [
+                ("q_proj", .queries), ("k_proj", .keysOrValues), ("v_proj", .keysOrValues),
+                ("r_proj", .relative), ("gate_proj", .queries), ("sink_proj", .heads),
+            ],
+            "attn.q_proj": [
+                ("q_proj", .queries), ("r_proj", .relative), ("gate_proj", .queries),
+                ("sink_proj", .heads),
+            ],
+        ]
+        for side in ["k", "v"] {
+            table["attn.\(side)_proj"] = [
+                ("\(side)_proj", .keysOrValues), ("\(side)_sconv.weight_proj", .taps),
+            ]
+        }
+        return table
+    }()
+
+    /// The parts of a fused projection of `layer` with their row counts, or `nil` when `module`
+    /// is not a fused projection.
     private static func fusedParts(
         _ module: String, layer: Int, text: Inkling2TextConfiguration
     ) -> [(String, Int)]? {
+        guard let parts = fusedProjections[module] else { return nil }
         let sliding = text.isSliding(layer)
         let heads = sliding ? text.slidingAttentionHeads : text.attentionHeads
         let kvHeads = sliding ? text.slidingKVHeads : text.kvHeads
         let headDim = sliding ? text.slidingHeadDim : text.headDim
-        let (queryDim, kvDim) = (heads * headDim, kvHeads * headDim)
-        let relativeDim = heads * text.relativeDim
-        let taps = kvHeads * text.convolutionKernelSize
-        switch module {
-        case "attn.in_proj":
-            return [
-                ("self_attn.q_proj", queryDim), ("self_attn.k_proj", kvDim),
-                ("self_attn.v_proj", kvDim), ("self_attn.r_proj", relativeDim),
-                ("self_attn.gate_proj", queryDim), ("self_attn.sink_proj", heads),
-            ]
-        case "attn.q_proj":
-            return [
-                ("self_attn.q_proj", queryDim), ("self_attn.r_proj", relativeDim),
-                ("self_attn.gate_proj", queryDim), ("self_attn.sink_proj", heads),
-            ]
-        case "attn.k_proj":
-            return [("self_attn.k_proj", kvDim), ("self_attn.k_sconv.weight_proj", taps)]
-        case "attn.v_proj":
-            return [("self_attn.v_proj", kvDim), ("self_attn.v_sconv.weight_proj", taps)]
-        default:
-            return nil
+        return parts.map { name, rows in
+            let count =
+                switch rows {
+                case .queries: heads * headDim
+                case .keysOrValues: kvHeads * headDim
+                case .relative: heads * text.relativeDim
+                case .heads: heads
+                case .taps: kvHeads * text.convolutionKernelSize
+                }
+            return ("self_attn.\(name)", count)
         }
     }
+
+    /// The axes of one controller's down projection in oMLX, `[2, D, rank]`.
+    private static let (halfAxis, widthAxis, rankAxis) = (0, 1, 2)
 
     /// The down projections of the loop controllers, `[4, 2, D, rank]` in oMLX, as the
     /// `[rank, 2 * D]` weight of each message gate. oMLX widens them to float32 from the
@@ -281,8 +316,9 @@ enum Inkling2OMLXLayout {
         messageGates.enumerated().map { index, gate in
             let down = value[index]
             let rank = down.dim(-1)
-            let weight = down.transposed(2, 0, 1)
-                .reshaped(rank, controllerInputHalves * down.dim(1))
+            // [2, D, rank] -> [rank, 2, D]: each row of the weight reads both halves in turn.
+            let weight = down.transposed(rankAxis, halfAxis, widthAxis)
+                .reshaped(rank, controllerInputHalves * down.dim(widthAxis))
             return ("\(gate)_message_gate.down_proj.weight", weight.asType(.bfloat16))
         }
     }
@@ -300,9 +336,12 @@ enum Inkling2OMLXLayout {
         }
     }
 
+    /// The axes of a query that oMLX stores as one row: `[1, D]`.
+    private static let rowAxes = 2
+
     /// A query that oMLX stores as one row `[1, D]`, as the port's `[D]`.
     private static func singleRow(_ value: MLXArray) -> MLXArray {
-        value.ndim == 2 && value.dim(0) == 1 ? value.reshaped(-1) : value
+        value.ndim == rowAxes && value.dim(0) == 1 ? value.reshaped(-1) : value
     }
 
     /// The module paths of the port that an oMLX quantization path covers.
@@ -312,16 +351,10 @@ enum Inkling2OMLXLayout {
         if name == "embed" { return ["language_model.embed_tokens"] }
         guard let (layer, module) = layerKey(name) else { return [] }
         let prefix = "language_model.layers.\(layer)."
-        if module == "attn.o_proj" { return [prefix + "self_attn.o_proj"] }
-        let parts: [String]
-        switch module {
-        case "attn.in_proj":
-            parts = ["q_proj", "k_proj", "v_proj", "r_proj", "gate_proj", "sink_proj"]
-        case "attn.q_proj": parts = ["q_proj", "r_proj", "gate_proj", "sink_proj"]
-        case "attn.k_proj": parts = ["k_proj", "k_sconv.weight_proj"]
-        case "attn.v_proj": parts = ["v_proj", "v_sconv.weight_proj"]
-        default: return []
+        // The experts take their format from the shapes of their tensors.
+        if let port = moduleRenames[module], !port.hasPrefix(expertsScope) {
+            return [prefix + port]
         }
-        return parts.map { prefix + "self_attn." + $0 }
+        return (fusedProjections[module] ?? []).map { prefix + "self_attn." + $0.0 }
     }
 }

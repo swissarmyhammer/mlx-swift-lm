@@ -135,25 +135,9 @@ private actor Inkling2MTPPairLoader {
     }
 }
 
-/// Loads the oQ4e target on the first call and shares it.
-private actor Inkling2OQ4eTargetLoader {
-    static let shared = Inkling2OQ4eTargetLoader()
-
-    private var loading: Task<ModelContainer, Error>?
-
-    func container() async throws -> ModelContainer {
-        if let loading {
-            return try await loading.value
-        }
-        let load = Task {
-            try await VLMModelFactory.shared.loadContainer(
-                from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-                configuration: inkling2MiniOQ4eTarget)
-        }
-        loading = load
-        return try await load.value
-    }
-}
+/// The oQ4e target, loaded on the first call and shared.
+private let inkling2MiniOQ4eCheckpoint = Inkling2MiniCheckpoint(
+    configuration: inkling2MiniOQ4eTarget)
 
 /// The bytes of the parameters of `model`, in GiB.
 private func parameterGiB(_ model: any LanguageModel) -> Double {
@@ -225,6 +209,26 @@ private func findDivergence(
     }
 }
 
+/// Expects `run` to speculate throughout and to emit `plain`, the tokens of plain greedy
+/// decoding after `input`.
+///
+/// - Parameters:
+///   - run: the MTP decode.
+///   - target: the target, which finds where the two part.
+///   - input: the prompt of both decodes.
+///   - plain: the tokens of plain greedy decoding.
+///   - label: the label of the expectations.
+/// - Returns: where MTP first parts from plain decoding, or `nil` when the two agree.
+@discardableResult
+private func expectMatchesPlain(
+    _ run: DecodeRun, _ target: any LanguageModel, input: LMInput, plain: [Int], label: String
+) async -> MTPDivergence? {
+    #expect(run.passthroughReason == nil, "\(label): \(run.passthroughReason ?? "")")
+    let divergence = await findDivergence(target, input: input, mtp: run.tokens, plain: plain)
+    #expect(divergence == nil, "\(label): \(divergence.map(String.init) ?? "")")
+    return divergence
+}
+
 /// One formatted number.
 private func formatted(_ value: Double, _ format: String = "%.1f") -> String {
     String(format: format, value)
@@ -257,16 +261,14 @@ struct Inkling2MTPIntegrationTests {
                 let mtp = try mtpRun(
                     context.model, drafter: drafter, input: input, tokens: parityTokens,
                     blockSize: defaultBlockSize)
-                let divergence = await findDivergence(
-                    context.model, input: input, mtp: mtp.tokens, plain: plain.tokens)
+                let divergence = await expectMatchesPlain(
+                    mtp, context.model, input: input, plain: plain.tokens, label: prompt)
                 Inkling2ResultLog.report(
                     "INKLING2-MTP",
                     "parity: \(mtp.accepted)/\(mtp.proposed) drafts accepted over \(mtp.rounds) "
                         + "rounds, "
                         + "\(divergence.map(String.init) ?? "equal over \(plain.tokens.count)")")
-                #expect(mtp.passthroughReason == nil, "\(mtp.passthroughReason ?? "")")
                 #expect(mtp.accepted > 0)
-                #expect(mtp.tokens == plain.tokens, "\(divergence.map(String.init) ?? "")")
             }
         }
     }
@@ -423,12 +425,9 @@ struct Inkling2MTPIntegrationTests {
                             + "\(formatted(Double(accepted + rounds) / Double(rounds), "%.2f")) "
                             + "tokens per round")
                     for run in runs {
-                        #expect(run.passthroughReason == nil, "\(run.passthroughReason ?? "")")
-                        let divergence = await findDivergence(
-                            model, input: input, mtp: run.tokens, plain: plainRuns[0].tokens)
-                        #expect(
-                            divergence == nil,
-                            "\(label) block \(blockSize): \(divergence.map(String.init) ?? "")")
+                        await expectMatchesPlain(
+                            run, model, input: input, plain: plainRuns[0].tokens,
+                            label: "\(label) block \(blockSize)")
                     }
                 }
             }
@@ -443,7 +442,7 @@ struct Inkling2MTPIntegrationTests {
     func oQ4eTargetBesideThe4BitTarget() async throws {
         let pair = try await Inkling2MTPPairLoader.shared.pair()
         let targets = [
-            ("4bit", pair.target), ("oQ4e", try await Inkling2OQ4eTargetLoader.shared.container()),
+            ("4bit", pair.target), ("oQ4e", try await inkling2MiniOQ4eCheckpoint.container()),
         ]
         for (name, target) in targets {
             try await pair.drafter.perform { drafterContext in
@@ -504,14 +503,9 @@ struct Inkling2MTPIntegrationTests {
                                     + "(\(formatted(rate / plainRate, "%.2f"))x), acceptance "
                                     + "\(accepted)/\(proposed)")
                             for run in runs {
-                                #expect(
-                                    run.passthroughReason == nil, "\(run.passthroughReason ?? "")")
-                                let divergence = await findDivergence(
-                                    model, input: input, mtp: run.tokens, plain: plain[0].tokens)
-                                #expect(
-                                    divergence == nil,
-                                    "\(name) \(label) block \(blockSize): "
-                                        + "\(divergence.map(String.init) ?? "")")
+                                await expectMatchesPlain(
+                                    run, model, input: input, plain: plain[0].tokens,
+                                    label: "\(name) \(label) block \(blockSize)")
                             }
                         }
                     }

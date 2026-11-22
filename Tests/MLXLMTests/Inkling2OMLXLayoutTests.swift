@@ -23,7 +23,7 @@ struct Inkling2OMLXLayoutTests {
     private static func omlxTensors(
         of parameters: [String: MLXArray], text: Inkling2TextConfiguration
     ) -> [String: MLXArray] {
-        var out = [String: MLXArray]()
+        var out: [String: MLXArray] = [:]
         let layerRenames: [String: String] = [
             "input_layernorm.weight": "attn_norm.weight",
             "post_attention_layernorm.weight": "mlp_norm.weight",
