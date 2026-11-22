@@ -43,8 +43,10 @@ struct GuidedTarget {
     private(set) var state: LMOutput.State?
 
     /// The target layers whose hidden states the drafter reads, which each forward that asks
-    /// for drafter state names, or `nil` for the target's own choice.
-    var drafterTargetLayerIds: [Int]?
+    /// for drafter state names, or `nil` for the target's own choice. Only
+    /// ``draft(with:)`` sets it, when ``GuidedSpeculation/drafter(of:for:)`` selects the
+    /// drafter.
+    private(set) var drafterTargetLayerIds: [Int]?
 
     /// The cache of each layer.
     var cache: [KVCache] { cacheStorage.cache }
@@ -183,6 +185,14 @@ struct GuidedTarget {
         guard rewound > 0 else { return true }
         return MTPSpeculativeTokenIterator.verifiesInPlace(
             mainModel: model, mainCache: cache, drafts: rewound)
+    }
+
+    /// Makes each forward that asks for drafter state emit the hidden states that `drafter`
+    /// reads.
+    ///
+    /// - Parameter drafter: The drafter of the generation.
+    mutating func draft(with drafter: any MTPDrafterModel) {
+        drafterTargetLayerIds = drafter.targetLayerIds
     }
 
     /// `state`, asking the target's forward for its drafter state at

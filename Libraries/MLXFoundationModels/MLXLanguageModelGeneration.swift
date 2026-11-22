@@ -271,19 +271,25 @@ extension MLXLanguageModel.Executor {
             channel: channel)
     }
 
-    /// The end of a pass that a framed protocol decoder ends before its generation ends.
+    /// The end of a pass that the executor ends before its generation ends: a framed protocol
+    /// decoder that reads the end of its frame, or a tool-call reasoning phase whose reasoning
+    /// closes.
     ///
     /// The pass stops the generation, then reads the stream to its end and drops the tokens
     /// after the stop: the last event of the stream is the completion of the pass, which carries
     /// its usage and its MTP counts.
+    ///
+    /// The output usage of the pass counts every token the generation produced, the dropped
+    /// tail included: the generation fed those tokens to the caches before the stop reached
+    /// it, so the prompt-cache ledger holds them, and the usage follows the ledger.
     struct ProtocolPassStop {
-        /// Whether the decoder ended the pass.
+        /// Whether the pass has ended.
         private(set) var hasStopped = false
 
         /// Ends the pass and stops its generation.
         ///
         /// - Parameter task: The generation task of the pass.
-        mutating func stop<Success>(_ task: Task<Success, Never>) {
+        mutating func end<Success>(_ task: Task<Success, Never>) {
             hasStopped = true
             task.cancel()
         }
@@ -896,11 +902,11 @@ extension MLXLanguageModel.Executor {
                 preparedState: preparedState,
                 handOff: handOff)
         } consume: { stream, task in
-            var stop = ProtocolPassStop()
+            var passStop = ProtocolPassStop()
             for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
-                case .token where stop.hasStopped:
+                case .token where passStop.hasStopped:
                     continue
                 case .token(let token):
                     if var decoder = protocolDecoder {
@@ -921,7 +927,7 @@ extension MLXLanguageModel.Executor {
                             try Task.checkCancellation()
                         }
                         if !decoderContinues || !shouldContinue {
-                            stop.stop(task)
+                            passStop.end(task)
                         }
                     } else {
                         if router.isInsideReasoning {
@@ -1408,11 +1414,11 @@ extension MLXLanguageModel.Executor {
                 preparedState: preparedState,
                 handOff: handOff)
         } consume: { stream, task in
-            var stop = ProtocolPassStop()
+            var passStop = ProtocolPassStop()
             for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
-                case .token where stop.hasStopped:
+                case .token where passStop.hasStopped:
                     continue
                 case .token(let token):
                     if var decoder = protocolDecoder {
@@ -1432,7 +1438,7 @@ extension MLXLanguageModel.Executor {
                             throw RejectedToolCallError(rejection)
                         }
                         if !decoderContinues || !decodedEvents.shouldContinue {
-                            stop.stop(task)
+                            passStop.end(task)
                         }
                     } else {
                         // One `.token` == one real token, so this is a true
@@ -1716,14 +1722,16 @@ extension MLXLanguageModel.Executor {
                 input: input, parameters: parameters, context: context,
                 speculation: speculation)
         }
-        var closed = false
+        var passStop = ProtocolPassStop()
         do {
             for await generation in stream {
                 try Task.checkCancellation()
                 if case .info(let info) = generation {
                     Self.observeCompletion(info)
                 }
-                guard !closed, case .token(let token) = generation else { continue }
+                guard !passStop.hasStopped, case .token(let token) = generation else {
+                    continue
+                }
                 for segment in collector.ingest(token) {
                     await Self.send(
                         segment, responseEntryID: responseEntryID,
@@ -1731,10 +1739,7 @@ extension MLXLanguageModel.Executor {
                 }
                 if collector.shouldStopAfterReasoning {
                     GuidedGenerationDiagnosticSink.current?.recordToolReasoningClose()
-                    closed = true
-                    // Stop the generation, and read the stream to its end, which
-                    // reports the completion of this phase.
-                    task.cancel()
+                    passStop.end(task)
                 }
             }
         } catch {
@@ -1755,7 +1760,7 @@ extension MLXLanguageModel.Executor {
                 segment, responseEntryID: responseEntryID,
                 reasoningEntryID: reasoningEntryID, channel: channel)
         }
-        return (collector.reasoningTokenIDs, closed)
+        return (collector.reasoningTokenIDs, passStop.hasStopped)
     }
 
     /// Parses a required-mode tool-calling envelope JSON object and emits

@@ -1815,8 +1815,11 @@ func speculativeResidualLogProbabilities(
 extension MTPSpeculativeTokenIterator: MTPStatsCollecting {
     public var proposedDraftTokens: Int { proposedCount }
     public var acceptedDraftTokens: Int { acceptedCount }
+    /// The kind of the passthrough of a stream that proposed no draft token, or nil. A stream
+    /// that drafted before its tail decoded plainly did speculate: ``passthroughReason`` alone
+    /// states why its tail decoded plainly.
     public var passthroughFallbackReason: SpeculativeDecodingFallbackReason? {
-        speculationMode.fallback
+        proposedCount == 0 ? speculationMode.fallback : nil
     }
 }
 

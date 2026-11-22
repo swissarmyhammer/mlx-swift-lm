@@ -790,16 +790,4 @@ extension ModelLoadingSuite.GuidedGenerationBenchmarkTests {
     }
 }
 
-// MARK: - Duration convenience
-
-extension Duration {
-    /// The attoseconds in one second.
-    fileprivate static let attosecondsPerSecond = 1e18
-
-    /// Total seconds as a Double, combining the seconds and attoseconds components.
-    fileprivate var seconds: Double {
-        Double(components.seconds) + Double(components.attoseconds) / Self.attosecondsPerSecond
-    }
-}
-
 #endif

@@ -42,6 +42,18 @@ var fixturesBundle: Bundle { Bundle(for: FixturesBundleToken.self) }
 // SmallTokenizer — all of which live outside the gate — for tests that
 // exercise xgrammar / MLXLMCommon directly.
 
+// MARK: - Duration convenience
+
+extension Duration {
+    /// The attoseconds in one second.
+    private static let attosecondsPerSecond = 1e18
+
+    /// Total seconds as a Double, combining the seconds and attoseconds components.
+    var seconds: Double {
+        Double(components.seconds) + Double(components.attoseconds) / Self.attosecondsPerSecond
+    }
+}
+
 #if FoundationModelsIntegration && canImport(FoundationModels, _version: 2)
 
 /// Constructs an `MLXLanguageModel` using the production test downloader /

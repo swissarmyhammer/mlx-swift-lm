@@ -75,12 +75,15 @@ struct GuidedSpeculation {
     /// verify in place, is logged once and recorded on the diagnostic sink with its stated
     /// reason.
     ///
+    /// A selected drafter is set on `target`, so that each of its forwards that asks for
+    /// drafter state emits the hidden states the drafter reads.
+    ///
     /// - Parameters:
     ///   - speculation: The speculation of the generation, or `nil`.
     ///   - target: The target and its new cache.
     /// - Returns: The drafter, or `nil` for plain decoding.
     static func drafter(
-        of speculation: MTPSpeculation?, for target: GuidedTarget
+        of speculation: MTPSpeculation?, for target: inout GuidedTarget
     ) -> (any GuidedMTPDrafter)? {
         guard let speculation else { return nil }
         if let fallback = MTPDrafterFallback.incompatibility(
@@ -105,6 +108,7 @@ struct GuidedSpeculation {
                     statedReason: noInPlaceVerifyReason(of: target.model)))
             return nil
         }
+        target.draft(with: drafter)
         return drafter
     }
 
