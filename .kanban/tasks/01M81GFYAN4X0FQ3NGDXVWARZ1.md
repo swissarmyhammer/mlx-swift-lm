@@ -1,8 +1,8 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8a80'
+position_column: done
+position_ordinal: ffffdb80
 title: 'MTPDrafterRegistry: document the checkpoint constants and justify @unchecked Sendable'
 ---
 Found by the ^6e0mtqt review, on code that change did not touch (Libraries/MLXLMCommon/MTPDrafterModelFactory.swift, `MTPDrafterRegistry`):

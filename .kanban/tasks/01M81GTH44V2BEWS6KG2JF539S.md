@@ -1,8 +1,8 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '8b80'
+position_column: done
+position_ordinal: ffffdc80
 title: 'ResolvedModelConfiguration: document its public properties'
 ---
 Found by the ^4z5df0d review, on properties that change did not touch (Libraries/MLXLMCommon/Downloader.swift, `ResolvedModelConfiguration`):
