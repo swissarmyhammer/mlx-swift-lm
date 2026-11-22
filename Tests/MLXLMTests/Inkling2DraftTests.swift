@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import IntegrationTestHelpers
 import MLX
 import MLXLMTestSupport
 import MLXNN
@@ -298,19 +299,10 @@ struct Inkling2DraftTargetTests {
         let target = try Inkling2ModelTests.makeModel(bfloat16: true, json: tinyDraftJSON)
         let tokens = prompt(promptLength + tinyBlock)
 
-        let stepped = try target.newCache(parameters: nil)
-        _ = target(tokens[0..., ..<promptLength], cache: stepped)
-        let steps = (promptLength ..< (promptLength + tinyBlock)).map { position in
-            let step = target(tokens[0..., position ..< (position + 1)], cache: stepped)
-            eval(step)
-            return step
-        }
+        let difference = try verifyDifferenceFromDecodeSteps(
+            target, prefix: [tokens[0..., ..<promptLength]], verify: tokens[0..., promptLength...])
 
-        let verified = try target.newCache(parameters: nil)
-        _ = target(tokens[0..., ..<promptLength], cache: verified)
-        let verify = target(tokens[0..., promptLength...], cache: verified)
-
-        #expect(maxAbsoluteDifference(verify, concatenated(steps, axis: 1)) == 0)
+        #expect(difference == 0)
     }
 
     @Test("A pass through the decode kernels leaves an ArraysCache states of their own")

@@ -2,6 +2,7 @@
 
 import CoreImage
 import Foundation
+import IntegrationTestHelpers
 import MLX
 import MLXLMTestSupport
 import MLXNN

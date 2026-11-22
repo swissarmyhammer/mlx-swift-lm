@@ -254,6 +254,8 @@ let package = Package(
                 "MLXLMTestSupport",
                 "MLXScriptedLM",
                 "BenchmarkHelpers",
+                // The stepped-versus-verify comparison this bundle shares with IntegrationTesting.
+                "IntegrationTestHelpers",
             ],
             path: "Tests/MLXLMTests",
             exclude: [

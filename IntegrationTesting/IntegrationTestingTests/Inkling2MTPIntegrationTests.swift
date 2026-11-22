@@ -333,18 +333,8 @@ struct Inkling2MTPIntegrationTests {
                 (0 ..< width).map { Int32(verifyTokenBase + verifyTokenStride * $0) }
             ).reshaped(1, -1)
 
-            let stepped = try model.newCache(parameters: nil)
-            eval(model(prompt, cache: stepped))
-            let steps = (0 ..< width).map { index in
-                let step = model(tokens[0..., index ..< (index + 1)], cache: stepped)
-                eval(step)
-                return step
-            }
-            let verified = try model.newCache(parameters: nil)
-            eval(model(prompt, cache: verified))
-            let verify = model(tokens, cache: verified)
-
-            let difference = abs(verify - concatenated(steps, axis: 1)).max().item(Float.self)
+            let difference = try verifyDifferenceFromDecodeSteps(
+                model, prefix: [prompt], verify: tokens)
             Inkling2ResultLog.report(
                 "INKLING2-MTP",
                 "verify L=\(width) after \(prompt.dim(1)) tokens vs decode steps: max |logit "
