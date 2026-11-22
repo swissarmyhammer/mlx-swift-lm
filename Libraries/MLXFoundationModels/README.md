@@ -90,7 +90,11 @@ Consider `includeSchemaInPrompt: false` when:
 
 ### Where the grammar starts
 
-The grammar of a schema pass starts at the end of the prompt, thus the prompt must end where the answer starts. Most chat templates write a generation prompt that ends there. The Inkling 2 template writes none: the model writes the header of its answer frame, `<|message_model|><|content_text|>`, after the prompt. Its reasoning protocol declares that header as its `answerOpening`, and a schema pass of such a model renders the prompt with thinking off and appends the header before the grammar starts. Without the header, the grammar forbids the tokens the model was trained to write first, and Inkling 2 Mini filled every string of the schema with `"}"`.
+The grammar of a schema pass starts at the end of the prompt, thus the prompt must end where the answer starts. Most chat templates write a generation prompt that ends there. The Inkling 2 template writes none: the model writes the header of its answer frame, `<|message_model|><|content_text|>`, after the prompt. Its reasoning protocol declares that header as its `answerOpening`, and a schema pass of such a model renders the prompt with thinking off and appends the header before the grammar starts. Without the header, the grammar forbids the tokens the model was trained to write first.
+
+### The closing zones
+
+Near the end of its token budget a guided pass closes the output: the soft zone favors the closing tokens (`"`, `}`, `]` and digits), and the hard zone allows nothing else. Each zone scales with the shortest valid output of the schema, and the budget caps it: the hard zone takes at most a quarter of the budget and the soft zone at most a half, unless the shortest valid output alone needs more. Before the caps, a schema whose shortest output took 32 tokens on Inkling 2 Mini set a hard zone of 256 tokens (32 × 8) over a budget of 256, and every string of the output closed at once or filled with `"}"`. At the default budget of 4096 tokens the caps change nothing for a schema whose shortest output takes fewer than 128 tokens.
 
 ## Multi-token prediction (MTP)
 

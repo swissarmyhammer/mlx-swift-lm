@@ -1008,6 +1008,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// the point where the guided loop forces structural close.
         static let hardReserveStructuralMultiplier = 8
 
+        /// Divisor on the token budget that caps the hard reserve: the hard
+        /// zone takes at most this fraction (one quarter) of the budget,
+        /// unless the shortest valid output alone needs more.
+        static let hardReserveBudgetDivisor = 4
+
+        /// Divisor on the token budget that caps the completion reserve: the
+        /// soft zone takes at most this fraction (one half) of the budget,
+        /// unless the hard zone alone takes more.
+        static let completionReserveBudgetCeilingDivisor = 2
+
         /// Names the session a request belongs to, for the prompt cache that
         /// session carries between its turns.
         ///

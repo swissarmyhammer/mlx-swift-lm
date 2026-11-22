@@ -1082,17 +1082,44 @@ extension MLXLanguageModel.Executor {
         let bias = await MLXLanguageModel.makeTokenizerBias(
             modelID: modelID,
             tokenizer: context.tokenizer)
-        let structuralReserve = CompletionReserve.estimate(
-            schemaJSON: reserveSchemaJSON,
-            tokenizer: context.tokenizer)
+        let reserves = closingReserves(
+            structuralReserve: CompletionReserve.estimate(
+                schemaJSON: reserveSchemaJSON,
+                tokenizer: context.tokenizer),
+            maxTokens: maxTokens)
         return GuidedGrammar(
             grammarTokenizer: grammarTokenizer,
             constraint: constraint,
             bias: bias,
-            completionReserve: Swift.max(
+            completionReserve: reserves.completion,
+            hardReserve: reserves.hard)
+    }
+
+    /// The closing reserves of a guided pass: the soft zone, which favors the closing tokens
+    /// (`"`, `}`, `]` and digits), and the hard zone, which allows nothing else.
+    ///
+    /// Each reserve scales with the shortest valid output, and is capped by the budget, thus the
+    /// start of the output always decodes free of the closing bias. Without the caps, a schema
+    /// whose shortest output takes 32 tokens put the hard zone over the whole budget of 256
+    /// (32 × 8): every string closed at once or filled with `}` and `]`. A cap never cuts a
+    /// reserve below the shortest valid output, which the pass needs to close.
+    ///
+    /// - Parameters:
+    ///   - structuralReserve: The tokens of the shortest valid output (``CompletionReserve``)
+    ///   - maxTokens: The token budget of the pass
+    /// - Returns: The tokens before the budget at which the soft and the hard zone start.
+    static func closingReserves(structuralReserve: Int, maxTokens: Int) -> (
+        completion: Int, hard: Int
+    ) {
+        let hard = Swift.min(
+            structuralReserve * hardReserveStructuralMultiplier,
+            Swift.max(structuralReserve, maxTokens / hardReserveBudgetDivisor))
+        let completion = Swift.min(
+            Swift.max(
                 structuralReserve * completionReserveStructuralMultiplier,
                 maxTokens / completionReserveBudgetDivisor),
-            hardReserve: structuralReserve * hardReserveStructuralMultiplier)
+            maxTokens / completionReserveBudgetCeilingDivisor)
+        return (Swift.max(completion, hard), hard)
     }
 
     /// Runs one guided pass inside the guided-generation section.
