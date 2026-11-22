@@ -113,7 +113,9 @@ public struct SpeculativeDecodingConfig: Sendable {
 
     package enum Strategy: Sendable {
         case draftModel(DraftModelSource)
-        case mtp(MTPDrafterSource, blockSize: Int, minimumDraftProbability: Float)
+        /// An MTP drafter; a `nil` block size takes the drafter's preferred block
+        /// (``mtpBlockSize(_:for:)``).
+        case mtp(MTPDrafterSource, blockSize: Int?, minimumDraftProbability: Float)
     }
 
     /// The default block size of an MTP configuration: the tokens of each round, its drafts and
@@ -122,6 +124,10 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// that decode no prompt slower than one draft for each round. A block of five decodes math
     /// and code faster still, but prose about 1% slower than one draft, in each of two
     /// quiet-load sweeps.
+    ///
+    /// A configuration that sets no block size takes the drafter's
+    /// ``MTPDrafterModel/preferredBlockSize`` first, and this default only for a drafter with no
+    /// preference (``mtpBlockSize(_:for:)``).
     public static let defaultMTPBlockSize = 4
 
     /// The default confidence floor of an MTP configuration: a chained round drafts while the
@@ -140,6 +146,17 @@ public struct SpeculativeDecodingConfig: Sendable {
 
     /// The probabilities a confidence floor can take.
     private static let minimumDraftProbabilityRange: ClosedRange<Float> = 0 ... 1
+
+    /// The block of an MTP generation: `requested` when the caller set one, else the drafter's
+    /// ``MTPDrafterModel/preferredBlockSize``, else ``defaultMTPBlockSize``.
+    ///
+    /// - Parameters:
+    ///   - requested: the block the caller set, or `nil`.
+    ///   - drafter: the drafter of the generation.
+    /// - Returns: the tokens of each round.
+    public static func mtpBlockSize(_ requested: Int?, for drafter: any MTPDrafterModel) -> Int {
+        requested ?? drafter.preferredBlockSize ?? defaultMTPBlockSize
+    }
 
     /// The smallest MTP block: one draft and the bonus token.
     private static let minimumMTPBlockSize = 2
@@ -199,7 +216,9 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///
     /// The draft-model initializers default to 5. For MTP configurations this
     /// is `blockSize - 1`, because the verification block also includes the
-    /// target model's current token.
+    /// target model's current token. An MTP configuration that sets no block size
+    /// counts the drafts of ``defaultMTPBlockSize``: its drafter, which may prefer
+    /// another block, has not loaded yet.
     public let numDraftTokens: Int
 
     /// Optional memory policy used to decide whether auxiliary-model speculation should run.
@@ -251,8 +270,9 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///
     /// - Parameters:
     ///   - mtpDrafter: drafter that proposes up to `blockSize - 1` tokens per verification cycle
-    ///   - blockSize: total number of tokens in each verification block. A drafter caps it at its
-    ///     ``MTPDrafterModel/maximumBlockSize``.
+    ///   - blockSize: total number of tokens in each verification block, or `nil` for the
+    ///     drafter's ``MTPDrafterModel/preferredBlockSize``, else ``defaultMTPBlockSize``. A
+    ///     drafter caps it at its ``MTPDrafterModel/maximumBlockSize``.
     ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
     ///     (Qwen MTP) stops a round's chain early, as llama.cpp's `--spec-draft-p-min`; 0 drafts
     ///     the whole block every round.
@@ -265,7 +285,7 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         mtpDrafter: MTPDrafterContainer,
-        blockSize: Int = defaultMTPBlockSize,
+        blockSize: Int? = nil,
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
@@ -285,8 +305,9 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///
     /// - Parameters:
     ///   - mtpDrafterBytes: estimated resident parameter bytes of the drafter
-    ///   - blockSize: total number of tokens in each verification block. A drafter caps it at its
-    ///     ``MTPDrafterModel/maximumBlockSize``.
+    ///   - blockSize: total number of tokens in each verification block, or `nil` for the
+    ///     drafter's ``MTPDrafterModel/preferredBlockSize``, else ``defaultMTPBlockSize``. A
+    ///     drafter caps it at its ``MTPDrafterModel/maximumBlockSize``.
     ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
     ///     (Qwen MTP) stops a round's chain early; 0 drafts the whole block every round.
     ///   - memoryPolicy: optional memory policy that each turn checks before it speculates: on
@@ -299,7 +320,7 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         mtpDrafterBytes: Int,
-        blockSize: Int = defaultMTPBlockSize,
+        blockSize: Int? = nil,
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil,
         loadMTPDrafter: @escaping @Sendable () async throws -> MTPDrafterContainer
@@ -331,7 +352,8 @@ public struct SpeculativeDecodingConfig: Sendable {
     ///     tokenizer of its target, so the load reads no tokenizer
     ///   - registration: the factory that loads the drafter, and the registration of its drafter
     ///     model types that runs before the load
-    ///   - blockSize: total number of tokens in each verification block
+    ///   - blockSize: total number of tokens in each verification block, or `nil` for the
+    ///     drafter's ``MTPDrafterModel/preferredBlockSize``, else ``defaultMTPBlockSize``
     ///   - minimumDraftProbability: the drafter top-1 probability below which a chaining drafter
     ///     stops a round's chain early; 0 drafts the whole block every round.
     ///   - memoryPolicy: optional memory policy that each turn checks before it speculates
@@ -345,7 +367,7 @@ public struct SpeculativeDecodingConfig: Sendable {
         from downloader: any Downloader,
         using tokenizerLoader: any TokenizerLoader,
         registration: MTPDrafterRegistration = MTPDrafterRegistration(),
-        blockSize: Int = defaultMTPBlockSize,
+        blockSize: Int? = nil,
         minimumDraftProbability: Float = defaultMTPMinimumDraftProbability,
         memoryPolicy: SpeculativeDecodingMemoryPolicy? = nil
     ) throws {
@@ -362,15 +384,17 @@ public struct SpeculativeDecodingConfig: Sendable {
     /// Initialize speculative decoding with the MTP drafter of `source`, after checking the
     /// block size and the confidence floor.
     private init(
-        mtpDrafterSource source: MTPDrafterSource, blockSize: Int,
+        mtpDrafterSource source: MTPDrafterSource, blockSize: Int?,
         minimumDraftProbability: Float, memoryPolicy: SpeculativeDecodingMemoryPolicy?
     ) throws {
-        try Self.validate(mtpBlockSize: blockSize)
+        if let blockSize {
+            try Self.validate(mtpBlockSize: blockSize)
+        }
         try Self.validate(minimumDraftProbability: minimumDraftProbability)
 
         self.strategy = .mtp(
             source, blockSize: blockSize, minimumDraftProbability: minimumDraftProbability)
-        self.numDraftTokens = blockSize - 1
+        self.numDraftTokens = (blockSize ?? Self.defaultMTPBlockSize) - 1
         self.memoryPolicy = memoryPolicy
     }
 

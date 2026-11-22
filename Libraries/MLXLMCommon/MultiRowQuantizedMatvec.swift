@@ -8,8 +8,9 @@
 // kernel of a plain decode of one row. The matmuls of a Qwen3.8 step on the
 // M5 Ultra then cost 1.6 times a plain step for 3 rows, and 3.4 times for 6
 // rows. This kernel gives each lane the input numbers that `qmv_fast` gives
-// it (MLX `quantized.h` and `fp_quantized.h`) and adds them in the same
-// order, so each output row has the same bits as the plain decode of that
+// it (MLX `quantized.h` and `fp_quantized.h`), or the generic `qmv` for an
+// input width that fills whole blocks of `qmv` but not of `qmv_fast` (the
+// 2304 of Inkling 2), and adds them in the same order, so each output row has the same bits as the plain decode of that
 // row, in the input range `MultiRowQuantizedMatvec` states. It decodes the
 // weights of each block one time and reuses them for every row, and the SIMD
 // groups of a threadgroup share one load of the inputs of each block through
@@ -90,9 +91,52 @@ public enum MultiRowQuantizedMatvec {
     /// The input numbers of one `float4` in threadgroup memory.
     private static let floatsPerVector = 4
 
-    /// The packed words one lane reads from one weight row in each block, as
-    /// in `qmv_fast` for 4 and 8 bits.
-    private static let packsPerLane = 2
+    /// The matvec of MLX whose lanes, input numbers and order of sums a
+    /// layer's kernel reproduces. MLX picks one by the input width: `qmv_fast`
+    /// when the width fills whole blocks of two packed words for each lane,
+    /// else the generic `qmv`, which reads one packed word for each lane in a
+    /// block (and closes an input width of whole blocks of its own with a
+    /// last block of the same sums, `qdot_safe` over every number of each
+    /// lane).
+    enum MatvecLayout: CaseIterable {
+        /// `qmv_fast`, and `fp_qmv_fast` for mxfp4.
+        case fast
+        /// The generic `qmv`, and `fp_qmv` for mxfp4: Inkling 2 runs it for
+        /// its 2304-wide inputs, which fill whole blocks of 256 but not of 512.
+        case generic
+
+        /// The packed words one lane reads from one weight row in each block.
+        var packsPerLane: Int {
+            switch self {
+            case .fast: 2
+            case .generic: 1
+            }
+        }
+
+        /// The suffix of the kernel names of this layout.
+        var kernelSuffix: String {
+            switch self {
+            case .fast: "fast"
+            case .generic: "generic"
+            }
+        }
+
+        /// The layout MLX's single-row matvec takes for an input width of
+        /// `width` at `bits` bits, or `nil` when it fills whole blocks of
+        /// neither, which takes the bounds-checked tail of `qmv`.
+        static func of(width: Int, bits: Int) -> MatvecLayout? {
+            allCases.first { width > 0 && width % $0.blockWidth(bits: bits) == 0 }
+        }
+
+        /// The input numbers of one block of one SIMD group at `bits` bits.
+        func blockWidth(bits: Int) -> Int {
+            (packBits / bits) * packsPerLane * metalSimdWidth
+        }
+    }
+
+    /// The most packed words one lane reads from one weight row in each
+    /// block, those of `qmv_fast` for 4 and 8 bits.
+    private static let mostPacksPerLane = MatvecLayout.fast.packsPerLane
 
     /// The bits of one packed word of the weights.
     private static let packBits = 32
@@ -106,7 +150,7 @@ public enum MultiRowQuantizedMatvec {
     /// the inputs holds this many for each lane, stage and row: 24 KiB for
     /// ``mostRowsPerThreadgroup`` rows, under the 32 KiB of a threadgroup.
     private static let mostInputVectorsPerLane =
-        (packBits / narrowAffineBits) * packsPerLane / floatsPerVector
+        (packBits / narrowAffineBits) * mostPacksPerLane / floatsPerVector
 
     /// The wide affine bit width: `qdot` reads one weight from each byte.
     private static let wideAffineBits = 8
@@ -138,9 +182,12 @@ public enum MultiRowQuantizedMatvec {
     /// The input dtypes the kernel reads.
     private static let inputTypes: Set<DType> = [.bfloat16, .float16]
 
-    /// The Metal header: the vector load and the dot products of `qmv_fast`
-    /// and `fp_qmv_fast` with their order of operations, and the kernel body
-    /// of both formats.
+    /// The Metal header of one matvec layout: the vector load and the dot
+    /// products of `qmv_fast` and `fp_qmv_fast`, or of the generic `qmv` and
+    /// `fp_qmv`, with their order of operations, and the kernel body of both
+    /// formats. The generic matvecs close an input width of whole blocks with
+    /// `qdot_safe` over every number of each lane, which runs the sums of
+    /// `qdot`, thus the kernel runs every block alike in both layouts.
     ///
     /// `qdot` of MLX multiplies each input number by the masked integer of
     /// its weight (`ws[i] & 0x00f0` for the second number of a 4-bit pack,
@@ -170,12 +217,16 @@ public enum MultiRowQuantizedMatvec {
     /// barrier and the dot products then hide. The SIMD sum closes each row as
     /// in `qmv_fast`.
     ///
+    /// `PACKS` is the packed words of one lane in one weight row of a block,
+    /// that of the `layout` the header serves; the threadgroup memory of the
+    /// inputs keeps the size of the widest layout.
+    ///
     /// MLX writes the kernel signature directly after the header, thus the
     /// header ends in a line break.
-    private static let header =
+    private static func header(_ layout: MatvecLayout) -> String {
         metalSimdWidthDeclaration + """
             constexpr constant int RESULTS = \(resultsPerSimdGroup);
-            constexpr constant int PACKS = \(packsPerLane);
+            constexpr constant int PACKS = \(layout.packsPerLane);
             constexpr constant int PACK_BITS = \(packBits);
             constexpr constant int BYTES_PER_PACK = PACK_BITS / 8;
             constexpr constant int STAGES = \(inputStages);
@@ -577,6 +628,7 @@ public enum MultiRowQuantizedMatvec {
             }
 
             """
+    }
 
     /// The start of the kernel bodies: the rows of this threadgroup and the
     /// threadgroup memory of their inputs. The row groups of one output tile
@@ -611,27 +663,41 @@ public enum MultiRowQuantizedMatvec {
             project_rows<T, Mxfp4Format<T, GROUP_SIZE, SIMD_GROUPS>, ROWS, SIMD_GROUPS>({scales},
             """ + projectRowsArguments
 
-    private static let affineKernel = MLXFast.metalKernel(
-        name: "multi_row_affine_qmv",
-        inputNames: ["x", "w", "scales", "biases"],
-        outputNames: ["y"],
-        source: affineSource,
-        header: header)
+    /// The kernel of affine weights in each matvec layout.
+    private static let affineKernels = Dictionary(
+        uniqueKeysWithValues: MatvecLayout.allCases.map { layout in
+            (
+                layout,
+                MLXFast.metalKernel(
+                    name: "multi_row_affine_qmv_\(layout.kernelSuffix)",
+                    inputNames: ["x", "w", "scales", "biases"],
+                    outputNames: ["y"],
+                    source: affineSource,
+                    header: header(layout))
+            )
+        })
 
-    private static let mxfp4Kernel = MLXFast.metalKernel(
-        name: "multi_row_mxfp4_qmv",
-        inputNames: ["x", "w", "scales"],
-        outputNames: ["y"],
-        source: mxfp4Source,
-        header: header)
+    /// The kernel of mxfp4 weights in each matvec layout.
+    private static let mxfp4Kernels = Dictionary(
+        uniqueKeysWithValues: MatvecLayout.allCases.map { layout in
+            (
+                layout,
+                MLXFast.metalKernel(
+                    name: "multi_row_mxfp4_qmv_\(layout.kernelSuffix)",
+                    inputNames: ["x", "w", "scales"],
+                    outputNames: ["y"],
+                    source: mxfp4Source,
+                    header: header(layout))
+            )
+        })
 
     /// The projection of `x` by `layer`, with each output row bit-identical
     /// to the projection of that row alone in the input range of the type
     /// comment.
     ///
     /// The kernel runs when ``canRun(_:_:)`` holds: 3 to 8 rows through a
-    /// stock `QuantizedLinear` whose single-row matvec is the `qmv_fast` of
-    /// MLX. Every other call, one or two rows among them, runs `layer(x)`.
+    /// stock `QuantizedLinear` whose single-row matvec is the `qmv_fast` or
+    /// the generic `qmv` of MLX over whole blocks. Every other call, one or two rows among them, runs `layer(x)`.
     ///
     /// - Parameters:
     ///   - x: The input, shape `(..., K)`.
@@ -689,9 +755,9 @@ public enum MultiRowQuantizedMatvec {
     ///
     /// It runs on the GPU for 3 to 8 rows of float16 or bfloat16, through a
     /// stock `QuantizedLinear` with no global scale, of affine 4 or 8 bits in
-    /// groups of 32, 64 or 128, or of mxfp4, when MLX runs `qmv_fast` for one
-    /// row: the outputs fill whole tiles of 8 and the input width fills whole
-    /// blocks of the kernel.
+    /// groups of 32, 64 or 128, or of mxfp4, when MLX runs `qmv_fast` or the
+    /// generic `qmv` for one row: the outputs fill whole tiles of 8 and the
+    /// input width fills whole blocks of that matvec (``MatvecLayout``).
     ///
     /// - Parameters:
     ///   - x: The input, shape `(..., K)`.
@@ -727,13 +793,11 @@ public enum MultiRowQuantizedMatvec {
     }
 
     /// Tells if the weights, the scales and the biases of `layer` have the
-    /// layout of a `(N, width)` projection that the single-row `qmv_fast` of
-    /// MLX runs: the outputs fill whole tiles of 8 and the input fills whole
-    /// blocks of one SIMD group.
+    /// layout of a `(N, width)` projection that the single-row `qmv_fast` or
+    /// `qmv` of MLX runs: the outputs fill whole tiles of 8 and the input
+    /// fills whole blocks of one SIMD group of that matvec.
     private static func fitsTiles(_ layer: QuantizedLinear, width: Int, inputType: DType) -> Bool {
         let outputs = layer.weight.dim(0)
-        let valuesPerLane = (packBits / layer.bits) * packsPerLane
-        let blockWidth = valuesPerLane * metalSimdWidth
         let groups = width / layer.groupSize
         let scaleType: DType = layer.mode == .affine ? inputType : .uint8
         return layer.weight.ndim == weightAxes && layer.weight.dtype == .uint32
@@ -742,7 +806,7 @@ public enum MultiRowQuantizedMatvec {
             && (layer.biases.map { $0.shape == [outputs, groups] && $0.dtype == inputType }
                 ?? true)
             && outputs > 0 && outputs % narrowestTileRows == 0
-            && width > 0 && width % blockWidth == 0
+            && MatvecLayout.of(width: width, bits: layer.bits) != nil
     }
 
     /// The SIMD groups of a threadgroup over an output width of `outputs`:
@@ -779,16 +843,20 @@ public enum MultiRowQuantizedMatvec {
             ("T", x.dtype), ("GROUP_SIZE", layer.groupSize), ("ROWS", rowsPerGroup),
             ("SIMD_GROUPS", simdGroups),
         ]
+        guard let layout = MatvecLayout.of(width: x.dim(1), bits: layer.bits) else {
+            preconditionFailure("canRun admits only an input width of whole blocks")
+        }
         let inputs: [MLXArray]
-        let kernel: MLXFast.MLXFastKernel
+        let kernel: MLXFast.MLXFastKernel?
         if let biases = layer.biases, layer.mode == .affine {
             template.append(("BITS", layer.bits))
             inputs = [x, layer.weight, layer.scales, biases]
-            kernel = affineKernel
+            kernel = affineKernels[layout]
         } else {
             inputs = [x, layer.weight, layer.scales]
-            kernel = mxfp4Kernel
+            kernel = mxfp4Kernels[layout]
         }
+        guard let kernel else { preconditionFailure("Every layout has a kernel") }
         return kernel(
             inputs, template: template, grid: grid, threadGroup: threadGroup,
             outputShapes: [[rows, outputs]], outputDTypes: [x.dtype])[0]

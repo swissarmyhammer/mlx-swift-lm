@@ -47,6 +47,11 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// `nil` means the caller may choose any block size.
     var maximumBlockSize: Int? { get }
 
+    /// The total verification block the drafter decodes fastest with, which a generation takes
+    /// when its caller sets no block size. `nil` leaves such a generation to
+    /// ``SpeculativeDecodingConfig/defaultMTPBlockSize``.
+    var preferredBlockSize: Int? { get }
+
     /// Whether this drafter consumes target-emitted shared K/V. Qwen owns a
     /// private full-attention cache and therefore only needs target hidden
     /// states; Gemma-style assistants consume the shared target K/V directly.
@@ -122,6 +127,7 @@ extension MTPDrafterModel {
     }
 
     public var maximumBlockSize: Int? { nil }
+    public var preferredBlockSize: Int? { nil }
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }

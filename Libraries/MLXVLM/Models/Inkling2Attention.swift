@@ -285,9 +285,17 @@ final class Inkling2Attention: Module {
     }
 
     /// The projections of the attention inputs, fused into as few matmuls as the inputs allow.
-    private func project(queryInput: MLXArray, keyInput: MLXArray, valueInput: MLXArray)
-        -> Projections
-    {
+    ///
+    /// - Parameters:
+    ///   - queryInput: the input of the query, relative, gate and sink projections.
+    ///   - keyInput: the input of the key projection.
+    ///   - valueInput: the input of the value projection.
+    ///   - apply: runs one projection over its input.
+    /// - Returns: the projections.
+    private func project(
+        queryInput: MLXArray, keyInput: MLXArray, valueInput: MLXArray,
+        apply: (Linear, MLXArray) -> MLXArray = { $0($1) }
+    ) -> Projections {
         let queryDim = heads * headDim
         let relativeDim = relativeProj.weight.dim(0)
         let kvDim = kvHeads * headDim
@@ -303,37 +311,41 @@ final class Inkling2Attention: Module {
         var result: Projections
         if isSliding, sharedInput, let fused = fusedQuery.fused {
             let (queries, relative, gate, sinks, keys, values) = unpacked(
-                split(fused(queryInput), [queryDim, relativeDim, queryDim, heads, kvDim, kvDim]))
+                split(
+                    apply(fused, queryInput),
+                    [queryDim, relativeDim, queryDim, heads, kvDim, kvDim]))
             return Projections(
                 queries: queries, relative: relative, gate: gate, sinks: sinks, keys: keys,
                 values: values)
         } else if let fused = isSliding ? queryRows.value : fusedQuery.fused {
             let (queries, relative, gate, sinks) = unpacked(
-                split(fused(queryInput), [queryDim, relativeDim, queryDim, heads]))
+                split(apply(fused, queryInput), [queryDim, relativeDim, queryDim, heads]))
             result = Projections(
                 queries: queries, relative: relative, gate: gate, sinks: sinks,
-                keys: keyProj(keyInput), values: valueProj(valueInput))
+                keys: apply(keyProj, keyInput), values: apply(valueProj, valueInput))
         } else {
             result = Projections(
-                queries: queryProj(queryInput), relative: relativeProj(queryInput),
-                gate: gateProj(queryInput), sinks: sinkProj(queryInput),
-                keys: keyProj(keyInput), values: valueProj(valueInput))
+                queries: apply(queryProj, queryInput), relative: apply(relativeProj, queryInput),
+                gate: apply(gateProj, queryInput), sinks: apply(sinkProj, queryInput),
+                keys: apply(keyProj, keyInput), values: apply(valueProj, valueInput))
         }
 
         if let convolution = dynamicKeyConvolution {
             if let fused = fusedKey.fused {
-                let parts = split(fused(keyInput), [kvDim, convolution.weightProj.weight.dim(0)])
+                let parts = split(
+                    apply(fused, keyInput), [kvDim, convolution.weightProj.weight.dim(0)])
                 (result.keys, result.keyTaps) = (parts[0], parts[1])
             } else {
-                result.keyTaps = convolution.weightProj(keyInput)
+                result.keyTaps = apply(convolution.weightProj, keyInput)
             }
         }
         if let convolution = dynamicValueConvolution {
             if let fused = fusedValue.fused {
-                let parts = split(fused(valueInput), [kvDim, convolution.weightProj.weight.dim(0)])
+                let parts = split(
+                    apply(fused, valueInput), [kvDim, convolution.weightProj.weight.dim(0)])
                 (result.values, result.valueTaps) = (parts[0], parts[1])
             } else {
-                result.valueTaps = convolution.weightProj(valueInput)
+                result.valueTaps = apply(convolution.weightProj, valueInput)
             }
         }
         return result
@@ -478,15 +490,13 @@ final class Inkling2Attention: Module {
     ) -> (MLXArray, MLXArray, MLXArray) {
         let rows = queryInput.dim(0)
         let offset = cache.offset
-        var (queryInput, keyInput, valueInput) = (queryInput, keyInput, valueInput)
-        if sequential {
-            // The inputs stay one array when they were one, which the fused projection reads.
-            let query = rowwiseMatvecInput(queryInput)
-            keyInput = keyInput === queryInput ? query : rowwiseMatvecInput(keyInput)
-            valueInput = valueInput === queryInput ? query : rowwiseMatvecInput(valueInput)
-            queryInput = query
-        }
-        let p = project(queryInput: queryInput, keyInput: keyInput, valueInput: valueInput)
+        // The rows of one sequence take the bits of decode steps.
+        let p =
+            sequential
+            ? project(
+                queryInput: queryInput, keyInput: keyInput, valueInput: valueInput,
+                apply: { rowwiseProjection($1, by: $0) })
+            : project(queryInput: queryInput, keyInput: keyInput, valueInput: valueInput)
         var states = states
         var windows: (MLXArray, MLXArray)?
         if sequential {
@@ -548,7 +558,7 @@ final class Inkling2Attention: Module {
             causalRows: windows == nil ? 0 : rows)
         let attended = attention.reshaped(rows, 1, -1)
         if let windows {
-            return (outputProj(rowwiseMatvecInput(attended)), windows.0, windows.1)
+            return (rowwiseProjection(attended, by: outputProj), windows.0, windows.1)
         }
         return (
             outputProj(attended), out[Inkling2PrologueOutput.nextKeyState],

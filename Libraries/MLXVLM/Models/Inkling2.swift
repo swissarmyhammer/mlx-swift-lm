@@ -313,7 +313,8 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         let rowwise = rows > 1 && rows <= Self.speculativeVerifyPositions
         var logits =
             (rowwise
-            ? lmHead(rowwiseMatvecInput(hidden)).reshaped(Array(hidden.shape.dropLast()) + [-1])
+            ? rowwiseProjection(hidden.reshaped(rows, 1, -1), by: lmHead)
+                .reshaped(Array(hidden.shape.dropLast()) + [-1])
             : lmHead(hidden)).asType(.float32)
         if text.finalLogitSoftcap > 0 {
             logits = tanh(logits / text.finalLogitSoftcap) * text.finalLogitSoftcap

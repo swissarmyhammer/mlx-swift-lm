@@ -277,8 +277,10 @@ let session = ChatSession(
 ### Block size and confidence floor
 
 Each round holds up to `blockSize` tokens: up to `blockSize - 1` drafts and the
-model's own token. The default ``SpeculativeDecodingConfig/defaultMTPBlockSize``
-is 4. The Qwen head chains its drafts, and
+model's own token. A configuration that sets no block size takes the drafter's
+``MTPDrafterModel/preferredBlockSize`` (3 for the Inkling 2 Mini head), and
+``SpeculativeDecodingConfig/defaultMTPBlockSize`` (4) for a drafter with no
+preference, such as the Qwen head. The Qwen head chains its drafts, and
 ``SpeculativeDecodingConfig/defaultMTPMinimumDraftProbability`` (0.75) stops the
 chain at the first draft whose top-1 probability falls below that floor. A round
 whose first draft (the seed) falls below the floor drafts that one token alone.

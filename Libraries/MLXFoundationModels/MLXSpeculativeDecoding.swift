@@ -48,9 +48,11 @@ public struct MLXSpeculativeDecoding: Sendable {
     /// The drafter checkpoint.
     public let drafterConfiguration: ModelConfiguration
 
-    /// The tokens of each round: up to `blockSize - 1` drafts and the bonus token. The drafter
-    /// caps it at its ``MTPDrafterModel/maximumBlockSize``.
-    public let blockSize: Int
+    /// The tokens of each round: up to `blockSize - 1` drafts and the bonus token, or `nil` for
+    /// the drafter's ``MTPDrafterModel/preferredBlockSize``, else
+    /// ``SpeculativeDecodingConfig/defaultMTPBlockSize``. The drafter caps it at its
+    /// ``MTPDrafterModel/maximumBlockSize``.
+    public let blockSize: Int?
 
     /// The drafter top-1 probability below which a chaining drafter (Qwen MTP) stops a round's
     /// chain early; 0 drafts the whole block every round.
@@ -76,7 +78,7 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///
     /// - Parameters:
     ///   - drafterConfiguration: the drafter checkpoint, as a model id or a local directory.
-    ///   - blockSize: the tokens of each round.
+    ///   - blockSize: the tokens of each round, or `nil` for the drafter's preferred block.
     ///   - minimumDraftProbability: the confidence floor of a chaining drafter, from 0 to 1.
     ///   - drafterBytes: the estimated resident parameter bytes of the drafter, which
     ///     `memoryPolicy` weighs before the drafter loads, or `nil`. A negative estimate counts
@@ -89,7 +91,7 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         drafterConfiguration: ModelConfiguration,
-        blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
+        blockSize: Int? = nil,
         minimumDraftProbability: Float =
             SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
         drafterBytes: Int? = nil,
@@ -122,7 +124,7 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///     tokenizer of its target, so the load reads no tokenizer.
     ///   - registration: the factory that loads the drafter, and the registration of its
     ///     drafter model types that runs before the load.
-    ///   - blockSize: the tokens of each round.
+    ///   - blockSize: the tokens of each round, or `nil` for the drafter's preferred block.
     ///   - minimumDraftProbability: the confidence floor of a chaining drafter, from 0 to 1.
     ///   - drafterBytes: the estimated resident parameter bytes of the drafter, which
     ///     `memoryPolicy` weighs before the drafter loads, or `nil`. A negative estimate counts
@@ -135,7 +137,7 @@ public struct MLXSpeculativeDecoding: Sendable {
         from downloader: any Downloader,
         using tokenizerLoader: any TokenizerLoader,
         registration: MTPDrafterRegistration,
-        blockSize: Int = SpeculativeDecodingConfig.defaultMTPBlockSize,
+        blockSize: Int? = nil,
         minimumDraftProbability: Float =
             SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
         drafterBytes: Int? = nil,
@@ -154,11 +156,13 @@ public struct MLXSpeculativeDecoding: Sendable {
     /// Creates MTP speculative decoding whose target picks the loader of its drafter, after
     /// checking the block size and the confidence floor.
     private init(
-        drafterConfiguration: ModelConfiguration, blockSize: Int, minimumDraftProbability: Float,
+        drafterConfiguration: ModelConfiguration, blockSize: Int?, minimumDraftProbability: Float,
         drafterBytes: Int?, memoryPolicy: SpeculativeDecodingMemoryPolicy?,
         pickDrafterLoader: @escaping @Sendable (any LanguageModel) -> DrafterLoader
     ) throws {
-        try SpeculativeDecodingConfig.validate(mtpBlockSize: blockSize)
+        if let blockSize {
+            try SpeculativeDecodingConfig.validate(mtpBlockSize: blockSize)
+        }
         try SpeculativeDecodingConfig.validate(minimumDraftProbability: minimumDraftProbability)
         self.drafterConfiguration = drafterConfiguration
         self.blockSize = blockSize

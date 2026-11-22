@@ -414,8 +414,9 @@ struct Inkling2MTPIntegrationTests {
         }
     }
 
-    /// Each follow-up turn of a `ChatSession` with MTP on serves part of its prompt from the
-    /// cache of the turns before it, keeps speculating, and answers as a plain session does.
+    /// Each follow-up turn of a `ChatSession` with MTP on, at the drafter's preferred block,
+    /// serves part of its prompt from the cache of the turns before it, keeps speculating, and
+    /// answers as a plain session does.
     @Test
     func chatSessionReusesThePromptCacheWithMTP() async throws {
         let pair = try await Inkling2MTPPairLoader.shared.pair()
@@ -426,8 +427,8 @@ struct Inkling2MTPIntegrationTests {
         ]
         let instructions = "You are a concise assistant. Answer in one or two sentences."
         let parameters = GenerateParameters(maxTokens: chatTokens, temperature: 0)
-        let speculative = try SpeculativeDecodingConfig(
-            mtpDrafter: pair.drafter, blockSize: defaultBlockSize)
+        // No block size, as a router sets none: the session takes the drafter's preferred block.
+        let speculative = try SpeculativeDecodingConfig(mtpDrafter: pair.drafter)
         let mtpSession = ChatSession(
             pair.target, instructions: instructions, speculativeDecoding: speculative,
             generateParameters: parameters)

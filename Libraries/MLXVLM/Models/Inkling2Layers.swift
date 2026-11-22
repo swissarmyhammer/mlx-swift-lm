@@ -5,6 +5,7 @@
 
 import Foundation
 import MLX
+import MLXLMCommon
 import MLXNN
 
 // MARK: - Shared constants
@@ -166,6 +167,24 @@ private func staticConvolutionStep(kernelSize: Int) -> @Sendable ([MLXArray]) ->
 func rowwiseMatvecInput(_ x: MLXArray) -> MLXArray {
     let rows = x.reshaped(-1, 1, x.dim(-1))
     return concatenated([rows, rows], axis: 1)[0..., ..<1, 0...]
+}
+
+/// The projection of the rows of a speculative verify pass by `layer`, each row with the bits of
+/// a decode step over that row alone.
+///
+/// The rows run through ``MultiRowQuantizedMatvec`` when it reads `layer` for this many rows,
+/// which reads the weights one time for every row; else each row takes its own matvec through
+/// ``rowwiseMatvecInput(_:)``, which reads the weights again for each row.
+///
+/// - Parameters:
+///   - x: the rows, `[L, 1, D]`.
+///   - layer: the projection.
+/// - Returns: the projection of each row, `[L, 1, N]`.
+func rowwiseProjection(_ x: MLXArray, by layer: Linear) -> MLXArray {
+    guard MultiRowQuantizedMatvec.canRun(x, layer) else {
+        return layer(rowwiseMatvecInput(x))
+    }
+    return MultiRowQuantizedMatvec.quantizedMatmulRows(x, layer)
 }
 
 /// The convolution state before each token of a sequence of decode rows, as one decode step

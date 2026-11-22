@@ -733,8 +733,10 @@ func generateTaskRecordingTokens<Handler: TokenLoopHandler>(
 ///     `cache` gave back, or `nil` to start the drafter at the cached position.
 ///   - blockSize: total tokens per round (up to `blockSize - 1` drafted plus the
 ///     bonus from the previous verify). Mirrors mlx-vlm's
-///     `draft_block_size`. Default 4 matches mlx-vlm's example configs. A drafter
-///     caps it at its ``MTPDrafterModel/maximumBlockSize``.
+///     `draft_block_size`. `nil` takes the drafter's
+///     ``MTPDrafterModel/preferredBlockSize``, else
+///     ``SpeculativeDecodingConfig/defaultMTPBlockSize`` (4, as mlx-vlm's example
+///     configs). A drafter caps it at its ``MTPDrafterModel/maximumBlockSize``.
 ///   - minimumDraftProbability: the drafter top-1 probability below which a
 ///     chaining drafter (Qwen MTP) stops a round's chain early, as llama.cpp's
 ///     `--spec-draft-p-min`; 0 drafts the whole block every round.
@@ -751,7 +753,7 @@ public func generate(
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
-    blockSize: Int = 4,
+    blockSize: Int? = nil,
     minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,
@@ -789,7 +791,7 @@ public func generateTask(
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
-    blockSize: Int = 4,
+    blockSize: Int? = nil,
     minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil,

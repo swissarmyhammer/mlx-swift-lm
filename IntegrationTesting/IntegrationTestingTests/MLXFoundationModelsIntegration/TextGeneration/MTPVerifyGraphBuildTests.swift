@@ -86,15 +86,18 @@ struct MTPVerifyGraphBuildTests {
         await releaseAllGPUMemory()
         let loaded = try await Qwen38FourBitMTPModel.loadWithDrafter(path: .router)
         let tokenizer = await loaded.container.tokenizer
-        let blockSize = loaded.speculation.blockSize
         let historyTokens = (0 ..< Self.maximumHistoryRoundCount).flatMap {
             tokenizer.encode(text: SWEBenchTranscript.exchangeText($0), addSpecialTokens: false)
         }
         for contextTokenCount in Self.contextTokenCounts {
             let context = Array(historyTokens.prefix(contextTokenCount))
             try #require(context.count == contextTokenCount, "the history is too short")
-            let costs = try await loaded.perform { modelContext, _ in
-                try Self.measure(modelContext.model, context: context, blockSize: blockSize)
+            let requestedBlockSize = loaded.speculation.blockSize
+            let costs = try await loaded.perform { modelContext, drafter in
+                try Self.measure(
+                    modelContext.model, context: context,
+                    blockSize: SpeculativeDecodingConfig.mtpBlockSize(
+                        requestedBlockSize, for: drafter))
             }
             for cost in costs {
                 Self.log(

@@ -152,7 +152,7 @@ struct MTPRoundCostBreakdownTests {
         await releaseAllGPUMemory()
         let loaded = try await Qwen38FourBitMTPModel.loadWithDrafter(path: path)
         let tokenizer = await loaded.container.tokenizer
-        let blockSize = loaded.speculation.blockSize
+        let requestedBlockSize = loaded.speculation.blockSize
         let historyTokens = (0 ..< Self.maximumHistoryRoundCount).flatMap {
             tokenizer.encode(text: SWEBenchTranscript.exchangeText($0), addSpecialTokens: false)
         }
@@ -162,7 +162,8 @@ struct MTPRoundCostBreakdownTests {
             let cost = try await loaded.perform { modelContext, drafter in
                 try Self.measureRound(
                     target: modelContext.model, drafter: drafter, context: context,
-                    blockSize: blockSize)
+                    blockSize: SpeculativeDecodingConfig.mtpBlockSize(
+                        requestedBlockSize, for: drafter))
             }
             for line in cost.summary {
                 Self.log("\(path) \(line)")

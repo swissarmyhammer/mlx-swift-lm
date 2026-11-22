@@ -356,7 +356,9 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
     ///   - mtpContinuation: The drafter continuation the generation that left `mainCache`
     ///     gave back, or `nil` to start the drafter at the cached position.
     ///   - parameters: The generation parameters.
-    ///   - blockSize: The tokens of each round: up to `blockSize - 1` drafts and the bonus.
+    ///   - blockSize: The tokens of each round: up to `blockSize - 1` drafts and the bonus, or
+    ///     `nil` for the drafter's ``MTPDrafterModel/preferredBlockSize``, else
+    ///     ``SpeculativeDecodingConfig/defaultMTPBlockSize``.
     ///   - minimumDraftProbability: The drafter top-1 probability below which a chaining
     ///     drafter stops a round's chain, from 0 (draft every step) to 1.
     ///   - components: Optional behavioral components, e.g. a custom ``LogitProcessor``.
@@ -371,7 +373,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         mainState: LMOutput.State? = nil,
         mtpContinuation: MTPDrafterContinuation? = nil,
         parameters: GenerateParameters,
-        blockSize: Int,
+        blockSize: Int? = nil,
         minimumDraftProbability: Float = 0,
         components: GenerationComponents = .init()
     ) throws {
@@ -409,7 +411,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         mainState: LMOutput.State? = nil,
         mtpContinuation: MTPDrafterContinuation? = nil,
         parameters: GenerateParameters,
-        blockSize: Int,
+        blockSize: Int? = nil,
         minimumDraftProbability: Float = 0,
         components: GenerationComponents = .init()
     ) throws {
@@ -442,10 +444,12 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         mainState: LMOutput.State?,
         mtpContinuation: MTPDrafterContinuation?,
         parameters: GenerateParameters,
-        blockSize: Int,
+        blockSize requestedBlockSize: Int?,
         minimumDraftProbability: Float,
         components: GenerationComponents
     ) throws {
+        let blockSize = SpeculativeDecodingConfig.mtpBlockSize(
+            requestedBlockSize, for: drafter)
         guard !mainModel.capabilities.contains(.blockDiffusion) else {
             throw GenerateError.unsupportedSpeculativeDecoding(
                 String(describing: type(of: mainModel)))

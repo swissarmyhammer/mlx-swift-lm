@@ -163,6 +163,9 @@ struct Inkling2DraftLoadingTests {
         #expect(drafter.requiresPromptPrefill)
         #expect(!drafter.requiresSharedTargetKV)
         #expect(drafter.requiresGreedySampling)
+        // A caller that sets no block size, as a router does, decodes in blocks of three.
+        #expect(drafter.preferredBlockSize == 3)
+        #expect(SpeculativeDecodingConfig.mtpBlockSize(nil, for: drafter) == 3)
     }
 
     @Test("The factory loads mtp.safetensors and skips the target weights beside it")

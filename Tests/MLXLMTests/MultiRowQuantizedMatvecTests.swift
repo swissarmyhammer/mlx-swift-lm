@@ -175,6 +175,45 @@ final class MultiRowQuantizedMatvecTests: XCTestCase {
             seed: Self.everyThreadgroupWidthSeed)
     }
 
+    /// An input width that MLX runs through its generic `qmv` for one row at
+    /// `bits` bits: whole blocks of `qmv` and not of `qmv_fast`. For 4 bits the
+    /// 2304 of Inkling 2 (nine blocks of 256), for 8 bits half of it (nine
+    /// blocks of 128).
+    private static func genericLayoutWidth(bits: Int) -> Int {
+        bits == 4 ? 2304 : 1152
+    }
+
+    func testEveryRowIsBitIdenticalToItsOwnMatvecInTheGenericLayout() {
+        var seed: UInt64 = 300
+        for format in Self.formats {
+            let inputs = Self.genericLayoutWidth(bits: format.bits)
+            XCTAssertEqual(
+                MultiRowQuantizedMatvec.MatvecLayout.of(width: inputs, bits: format.bits),
+                .generic, "\(format) K=\(inputs)")
+            for dtype in Self.dtypes {
+                for outputs in Self.everyTileOutputs {
+                    seed += 1
+                    let layer = makeLayer(
+                        format, inputs: inputs, outputs: outputs, dtype: dtype, seed: seed)
+                    assertEveryRowMatches(
+                        layer, width: inputs, dtype: dtype,
+                        label: "\(format) \(dtype) N=\(outputs) K=\(inputs) generic")
+                }
+            }
+        }
+    }
+
+    func testTheInputWidthPicksTheMatvecLayoutOfMLX() {
+        typealias Layout = MultiRowQuantizedMatvec.MatvecLayout
+        XCTAssertEqual(Layout.of(width: 4096, bits: 4), .fast)
+        XCTAssertEqual(Layout.of(width: 2304, bits: 4), .generic)
+        XCTAssertEqual(Layout.of(width: 2304, bits: 8), .fast)
+        XCTAssertEqual(Layout.of(width: 1152, bits: 8), .generic)
+        XCTAssertNil(Layout.of(width: 1152, bits: 4))
+        XCTAssertNil(Layout.of(width: 320, bits: 4))
+        XCTAssertNil(Layout.of(width: 0, bits: 4))
+    }
+
     func testAnOutputWidthOfWholeWideTilesTakesEightSimdGroups() {
         XCTAssertEqual(MultiRowQuantizedMatvec.simdGroups(outputs: Self.wideTileOutputs), 8)
     }

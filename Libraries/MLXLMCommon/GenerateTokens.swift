@@ -170,7 +170,7 @@ public func generateTokens(
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
-    blockSize: Int = 4,
+    blockSize: Int? = nil,
     minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
@@ -205,7 +205,7 @@ public func generateTokensTask(
     context: ModelContext,
     mtpDrafter: any MTPDrafterModel,
     mtpContinuation: MTPDrafterContinuation? = nil,
-    blockSize: Int = 4,
+    blockSize: Int? = nil,
     minimumDraftProbability: Float = SpeculativeDecodingConfig.defaultMTPMinimumDraftProbability,
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil

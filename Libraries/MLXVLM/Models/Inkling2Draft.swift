@@ -445,6 +445,12 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
 
     /// The block of a round: the bonus token and the proposals.
     public var maximumBlockSize: Int? { configuration.draft.blockSize }
+    /// The block Inkling 2 Mini decodes fastest with on the M5: the bonus token and two drafts.
+    /// A verify row costs the target about a fifth of a decode step in expert reads, thus the
+    /// third draft, which the target accepts less often, costs more than it saves.
+    public var preferredBlockSize: Int? { Self.fastestBlockSize }
+    /// See ``preferredBlockSize``.
+    private static let fastestBlockSize = 3
     /// The drafter reads the target's taps, not its keys and values.
     public var requiresSharedTargetKV: Bool { false }
     /// The drafter's context rings take every prompt position.

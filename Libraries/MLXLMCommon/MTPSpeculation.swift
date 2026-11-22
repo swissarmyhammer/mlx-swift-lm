@@ -22,11 +22,13 @@ package struct MTPSpeculation {
     ///
     /// - Parameters:
     ///   - drafter: the drafter.
-    ///   - blockSize: the tokens of each round.
+    ///   - blockSize: the tokens of each round, or `nil` for the drafter's
+    ///     ``MTPDrafterModel/preferredBlockSize``, else
+    ///     ``SpeculativeDecodingConfig/defaultMTPBlockSize``.
     ///   - minimumDraftProbability: the confidence floor of a chaining drafter.
-    package init(drafter: any MTPDrafterModel, blockSize: Int, minimumDraftProbability: Float) {
+    package init(drafter: any MTPDrafterModel, blockSize: Int?, minimumDraftProbability: Float) {
         self.drafter = drafter
-        self.blockSize = blockSize
+        self.blockSize = SpeculativeDecodingConfig.mtpBlockSize(blockSize, for: drafter)
         self.minimumDraftProbability = minimumDraftProbability
     }
 
