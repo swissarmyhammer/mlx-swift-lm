@@ -89,8 +89,10 @@ private let chatTokens = 384
 /// verify pass reads them in temporal order, so the two sum the attention in another order; a
 /// bfloat16 logit near 30 has a step of 0.125, so the sums can round a near tie apart. Summing
 /// the verify in ring order made it exact but cost the long-context verify about 4% and MTP
-/// about 5% on the M5 (^2r778tc), thus the port keeps the near tie.
-private let nearTieLogitGap: Float = 0.5
+/// about 5% on the M5 (^2r778tc), thus the port keeps the near tie. Six steps: the oQ4e target
+/// (8-bit attention) at the long prompt writes, at block 4, a token 0.52 below the best of a
+/// three-way tie (25.38, 25.09, 24.85) that the ring-order verify decoded as plain decoding did.
+private let nearTieLogitGap: Float = 0.75
 
 // MARK: - Loading
 
