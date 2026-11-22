@@ -351,21 +351,40 @@ struct Inkling2FoundationModelsToolLoopTests {
         Inkling2ResultLog.report(
             "INKLING2 FM TOOLS", "executor[\(label)] follow-up: \(followUp.summary)")
 
-        #expect(log.isTheTwoStepLoop, "[\(label)] calls \(log.calls)")
-        #expect(Inkling2BankFixture.namesTheBalance(answer.text), "[\(label)] \(answer.text)")
         for (number, round) in rounds.enumerated().dropFirst() {
             #expect(
                 round.cachedTokenCount > 0,
                 "[\(label)] round \(number) after a tool result reused no prompt token")
         }
+        let streamed = rounds + [followUp]
+        Self.expectTheLoopAnswered(
+            log: log, answer: answer, followUp: followUp, streamed: streamed, label: label)
+        return streamed.map(\.reasoning).joined()
+    }
+
+    /// Records an issue unless the executor loop called the two tools in order, its answer
+    /// names the balance, the follow-up turn reused the prompt cache and names the customer
+    /// id, and no protocol marker reached the text of a round.
+    ///
+    /// - Parameters:
+    ///   - log: the calls the loop dispatched.
+    ///   - answer: the round that answered the question.
+    ///   - followUp: the round of the follow-up turn.
+    ///   - streamed: the rounds whose text must hold no marker.
+    ///   - label: the label of the issues.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func expectTheLoopAnswered(
+        log: Inkling2ToolCallLog, answer: Inkling2Round, followUp: Inkling2Round,
+        streamed: [Inkling2Round], label: String
+    ) {
+        #expect(log.isTheTwoStepLoop, "[\(label)] calls \(log.calls)")
+        #expect(Inkling2BankFixture.namesTheBalance(answer.text), "[\(label)] \(answer.text)")
         #expect(followUp.cachedTokenCount > 0, "[\(label)] follow-up reused no prompt token")
         #expect(
             followUp.text.contains(Inkling2BankFixture.customerID),
             "[\(label)] follow-up \(followUp.text)")
-        let streamed = rounds + [followUp]
         #expect(
             streamed.allSatisfy { !$0.text.contains("<|") }, "[\(label)] a marker reached the text")
-        return streamed.map(\.reasoning).joined()
     }
 
     /// The number of rounds of the required-mode loop that must call a tool: the customer
@@ -416,9 +435,8 @@ struct Inkling2FoundationModelsToolLoopTests {
             Inkling2ResultLog.report(
                 "INKLING2 FM REQUIRED",
                 "executor[\(label)] round \(number) reasoning: \(round.reasoning)")
-            #expect(round.toolCalls.count == 1, "[\(label)] round \(number) \(round.summary)")
             #expect(round.text.isEmpty, "[\(label)] round \(number) answered in text")
-            guard !round.toolCalls.isEmpty else { break }
+            try #require(round.toolCalls.count == 1, "[\(label)] round \(number) \(round.summary)")
             entries += try Self.entries(after: round, number: number, log: log)
         }
         let answer = try await Self.runRound(
@@ -433,16 +451,10 @@ struct Inkling2FoundationModelsToolLoopTests {
         Inkling2ResultLog.report(
             "INKLING2 FM REQUIRED", "executor[\(label)] follow-up: \(followUp.summary)")
 
-        #expect(log.isTheTwoStepLoop, "[\(label)] calls \(log.calls)")
         #expect(answer.toolCalls.isEmpty, "[\(label)] answer \(answer.summary)")
-        #expect(Inkling2BankFixture.namesTheBalance(answer.text), "[\(label)] \(answer.text)")
-        #expect(followUp.cachedTokenCount > 0, "[\(label)] follow-up reused no prompt token")
-        #expect(
-            followUp.text.contains(Inkling2BankFixture.customerID),
-            "[\(label)] follow-up \(followUp.text)")
-        #expect(
-            [answer, followUp].allSatisfy { !$0.text.contains("<|") },
-            "[\(label)] a marker reached the text")
+        Self.expectTheLoopAnswered(
+            log: log, answer: answer, followUp: followUp, streamed: [answer, followUp],
+            label: label)
     }
 }
 
