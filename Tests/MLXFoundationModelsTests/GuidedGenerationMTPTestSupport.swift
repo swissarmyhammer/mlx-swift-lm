@@ -120,7 +120,7 @@ struct GuidedFixtureGrammar {
             stopTokenIDs: Set([tokenizer.eosTokenId].compactMap { $0 }),
             unknownTokenID: tokenizer.unknownTokenId,
             completionReserve: 0, hardReserve: 0, closingBias: nil, whitespaceBias: nil,
-            whitespaceTokenIDs: [])
+            whitespaceTokenIDs: [], stringTokens: .empty)
     }
 
     /// Drafts each character of `characters` into `chain`, as a drafter's processor sees each
@@ -176,6 +176,7 @@ struct GuidedFixtureRun {
         let closingBias: MLXArray
         let whitespaceBias: MLXArray
         let whitespaceTokenIDs: Set<Int>
+        let stringTokens: JSONStringTokens
 
         /// Compiles `schema` over `tokenizer`, with fast-forward on.
         init(schema: String, tokenizer: any Tokenizer) throws {
@@ -190,6 +191,7 @@ struct GuidedFixtureRun {
             closingBias = ClosingTokenBias.compute(
                 tokenizer: tokenizer, eosTokenId: tokenizer.eosTokenId)
             (whitespaceBias, whitespaceTokenIDs) = WhitespaceTokenBias.compute(tokenizer: tokenizer)
+            stringTokens = JSONStringTokens.compute(tokenizer: tokenizer)
         }
     }
 
@@ -244,7 +246,8 @@ struct GuidedFixtureRun {
                     vocabSize: grammar.vocabSize, completionReserve: completionReserve,
                     hardReserve: hardReserve, closingBias: grammar.closingBias,
                     whitespaceBias: grammar.whitespaceBias,
-                    whitespaceTokenIDs: grammar.whitespaceTokenIDs, prefill: prefill,
+                    whitespaceTokenIDs: grammar.whitespaceTokenIDs,
+                    stringTokens: grammar.stringTokens, prefill: prefill,
                     speculation: speculation, bufferPoolClearing: bufferPoolClearing
                 ) { delta in
                     text += delta

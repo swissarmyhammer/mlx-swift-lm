@@ -329,7 +329,8 @@ extension ModelLoadingSuite.GenerableRoundTripTests {
                 hardReserve: hardReserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs
+                whitespaceTokenIDs: whitespaceTokenIDs,
+                stringTokens: JSONStringTokens.compute(tokenizer: context.tokenizer)
             ) { text in
                 collected += text
                 return true

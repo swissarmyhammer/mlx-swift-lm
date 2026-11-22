@@ -61,6 +61,10 @@ public enum GuidedGenerationLoop {
     ///     disables whitespace suppression.
     ///   - whitespaceTokenIDs: Set of token IDs classified as whitespace-only.
     ///     Used by the run tracker to detect consecutive whitespace runs.
+    ///   - stringTokens: The tokens that move the JSON string state, with the
+    ///     string-closing tokens (``JSONStringTokens/stringClosingTokenIDs``)
+    ///     the hard zone prefers inside an open string (from
+    ///     `JSONStringTokens.compute`). `.empty` turns the preference off.
     ///   - diagnosticLog: When true, flush the grammar constraint's diagnostic
     ///     logs after the run completes. Defaults to false.
     ///   - logitProcessor: Optional processor, such as
@@ -97,6 +101,7 @@ public enum GuidedGenerationLoop {
         closingBias: MLXArray? = nil,
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
+        stringTokens: JSONStringTokens = .empty,
         diagnosticLog: Bool = false,
         logitProcessor: (any LogitProcessor)? = nil,
         logitSampler: (any LogitSampler)? = nil,
@@ -108,7 +113,8 @@ public enum GuidedGenerationLoop {
             vocabSize: vocabSize, kvCache: kvCache, kvBits: kvBits, kvGroupSize: kvGroupSize,
             quantizedKVStart: quantizedKVStart, completionReserve: completionReserve,
             hardReserve: hardReserve, closingBias: closingBias, whitespaceBias: whitespaceBias,
-            whitespaceTokenIDs: whitespaceTokenIDs, diagnosticLog: diagnosticLog,
+            whitespaceTokenIDs: whitespaceTokenIDs, stringTokens: stringTokens,
+            diagnosticLog: diagnosticLog,
             logitProcessor: logitProcessor, logitSampler: logitSampler,
             prefill: prefill, speculation: nil, emit: emit)
     }
@@ -128,7 +134,7 @@ public enum GuidedGenerationLoop {
     /// - Parameters:
     ///   - speculation: The MTP drafter of the generation, or `nil` for plain decoding.
     ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
-    ///   - Other parameters: As ``run(input:context:constraint:maxTokens:vocabSize:kvCache:kvBits:kvGroupSize:quantizedKVStart:completionReserve:hardReserve:closingBias:whitespaceBias:whitespaceTokenIDs:diagnosticLog:prefill:emit:)``
+    ///   - Other parameters: As ``run(input:context:constraint:maxTokens:vocabSize:kvCache:kvBits:kvGroupSize:quantizedKVStart:completionReserve:hardReserve:closingBias:whitespaceBias:whitespaceTokenIDs:stringTokens:diagnosticLog:logitProcessor:logitSampler:prefill:emit:)``
     ///     takes them.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: As the plain overload throws.
@@ -148,6 +154,7 @@ public enum GuidedGenerationLoop {
         closingBias: MLXArray? = nil,
         whitespaceBias: MLXArray? = nil,
         whitespaceTokenIDs: Set<Int> = [],
+        stringTokens: JSONStringTokens = .empty,
         diagnosticLog: Bool = false,
         logitProcessor: (any LogitProcessor)? = nil,
         logitSampler: (any LogitSampler)? = nil,
@@ -178,7 +185,7 @@ public enum GuidedGenerationLoop {
             unknownTokenID: context.tokenizer.unknownTokenId,
             completionReserve: completionReserve, hardReserve: hardReserve,
             closingBias: closingBias, whitespaceBias: whitespaceBias,
-            whitespaceTokenIDs: whitespaceTokenIDs)
+            whitespaceTokenIDs: whitespaceTokenIDs, stringTokens: stringTokens)
 
         return try withoutActuallyEscaping(emit) { emit in
             var decoder = try GuidedDecoder(

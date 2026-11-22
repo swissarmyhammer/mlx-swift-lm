@@ -30,11 +30,17 @@ final class TokenizerBias: @unchecked Sendable {
     let closing: MLXArray
     let whitespace: MLXArray
     let whitespaceTokenIDs: Set<Int>
+    /// The tokens that move the JSON string state, with the tokens that close a string.
+    let stringTokens: JSONStringTokens
 
-    init(closing: MLXArray, whitespace: MLXArray, whitespaceTokenIDs: Set<Int>) {
+    init(
+        closing: MLXArray, whitespace: MLXArray, whitespaceTokenIDs: Set<Int>,
+        stringTokens: JSONStringTokens
+    ) {
         self.closing = closing
         self.whitespace = whitespace
         self.whitespaceTokenIDs = whitespaceTokenIDs
+        self.stringTokens = stringTokens
     }
 }
 
@@ -254,7 +260,8 @@ actor ModelCache {
         let bias = TokenizerBias(
             closing: closing,
             whitespace: whitespace,
-            whitespaceTokenIDs: whitespaceTokenIDs
+            whitespaceTokenIDs: whitespaceTokenIDs,
+            stringTokens: JSONStringTokens.compute(tokenizer: tokenizer)
         )
         tokenizerBiases[modelID] = bias
         return bias

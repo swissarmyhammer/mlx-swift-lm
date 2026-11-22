@@ -163,7 +163,8 @@ extension ModelLoadingSuite.MultiModelGuidedGenerationTests {
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs
+                whitespaceTokenIDs: whitespaceTokenIDs,
+                stringTokens: JSONStringTokens.compute(tokenizer: context.tokenizer)
             ) { text in
                 collected += text
                 return true
@@ -292,7 +293,8 @@ extension ModelLoadingSuite.MultiModelGuidedGenerationTests {
                 completionReserve: reserve,
                 closingBias: closingBias,
                 whitespaceBias: whitespaceBias,
-                whitespaceTokenIDs: whitespaceTokenIDs
+                whitespaceTokenIDs: whitespaceTokenIDs,
+                stringTokens: JSONStringTokens.compute(tokenizer: context.tokenizer)
             ) { text in
                 collected += text
                 tokenCount += 1

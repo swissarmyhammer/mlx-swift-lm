@@ -1118,7 +1118,10 @@ extension MLXLanguageModel.Executor {
     /// whose shortest output takes 32 tokens put the hard zone over the whole budget of 256
     /// (32 × 8): every string closed at once or filled with `}` and `]`. A cap never cuts the
     /// hard zone below ``hardReserveStructuralFloorMultiplier`` times the shortest valid output,
-    /// the room the pass needs to close from wherever the hard zone finds it.
+    /// the room the pass needs to close from wherever the hard zone finds it. A budget of that
+    /// floor or less (three times the shortest valid output) thus runs wholly in the hard zone:
+    /// its strings come out short or empty. That is the accepted trade against
+    /// ``GuidedGenerationError/incompleteOutput``, which a smaller hard zone ends in.
     ///
     /// - Parameters:
     ///   - structuralReserve: The tokens of the shortest valid output (``CompletionReserve``)
@@ -1176,6 +1179,7 @@ extension MLXLanguageModel.Executor {
                     closingBias: grammar.bias.closing,
                     whitespaceBias: grammar.bias.whitespace,
                     whitespaceTokenIDs: grammar.bias.whitespaceTokenIDs,
+                    stringTokens: grammar.bias.stringTokens,
                     prefill: .init(stepSize: Self.prefillStepSize),
                     speculation: speculation
                 ) { text in
@@ -1202,11 +1206,44 @@ extension MLXLanguageModel.Executor {
     /// - Throws: `unsupportedCapability(.reasoning)` when the reasoning protocol declares an
     ///   ``ReasoningConfig/answerOpening`` but cannot turn thinking off.
     static func checkSchemaInput(resolved: ModelConfiguration) throws {
-        guard let config = resolved.reasoningConfig, config.answerOpening != nil else { return }
+        _ = try schemaRender(resolved: resolved)
+    }
+
+    /// The thinking-off render of a schema pass, and the reasoning protocol it renders, or nil
+    /// for a model whose protocol declares no ``ReasoningConfig/answerOpening``, which keeps
+    /// the prompt of its template.
+    ///
+    /// - Parameter resolved: The resolver-patched configuration of the call
+    /// - Returns: The render and its protocol, or nil.
+    /// - Throws: `unsupportedCapability(.reasoning)` when thinking cannot go off.
+    private static func schemaRender(resolved: ModelConfiguration) throws -> (
+        render: ThinkingRender, config: ReasoningConfig
+    )? {
+        guard let config = resolved.reasoningConfig, config.answerOpening != nil else {
+            return nil
+        }
+        let render = try thinkingRender(
+            config: config, thinkingEnabled: false,
+            cannotDisableMessage: answerOpeningNeedsThinkingOffMessage)
+        return (render, config)
+    }
+
+    /// The render of `config` with thinking on, off, or unspecified, with the package-internal
+    /// `cannotDisableReasoning` mapped to the framework's `unsupportedCapability(.reasoning)`.
+    ///
+    /// - Parameters:
+    ///   - config: The reasoning protocol of the model
+    ///   - thinkingEnabled: `true` / `false` to force thinking on / off, `nil` for the default
+    ///   - cannotDisableMessage: The description of the error for a model that always reasons
+    /// - Returns: The render.
+    /// - Throws: `unsupportedCapability(.reasoning)` when thinking cannot go off.
+    static func thinkingRender(
+        config: ReasoningConfig, thinkingEnabled: Bool?, cannotDisableMessage: String
+    ) throws -> ThinkingRender {
         do {
-            _ = try ThinkingRender(config: config, thinkingEnabled: false)
+            return try ThinkingRender(config: config, thinkingEnabled: thinkingEnabled)
         } catch ReasoningError.cannotDisableReasoning {
-            throw unsupportedCapability(.reasoning, answerOpeningNeedsThinkingOffMessage)
+            throw unsupportedCapability(.reasoning, cannotDisableMessage)
         }
     }
 
@@ -1230,14 +1267,11 @@ extension MLXLanguageModel.Executor {
         messages: [Chat.Message], input: LMInput, resolved: ModelConfiguration,
         context: ModelContext
     ) async throws -> LMInput {
-        guard let config = resolved.reasoningConfig, config.answerOpening != nil else {
-            return input
-        }
-        let prompt = try await preparedInput(
-            messages: messages, config: config, thinkingEnabled: false, context: context,
-            cannotDisableMessage: answerOpeningNeedsThinkingOffMessage)
+        guard let schema = try schemaRender(resolved: resolved) else { return input }
+        let prompt = try await schema.render.prepare(
+            messages: messages, tools: nil, context: context)
         return ThinkingRender.openingAnswer(
-            of: prompt.input, config: config, tokenizer: context.tokenizer)
+            of: prompt, config: schema.config, tokenizer: context.tokenizer)
     }
 
     /// Runs schema output: guided generation constrained to the JSON schema of the request.
@@ -1639,12 +1673,9 @@ extension MLXLanguageModel.Executor {
         context: ModelContext,
         cannotDisableMessage: String
     ) async throws -> (render: ThinkingRender, input: LMInput) {
-        let render: ThinkingRender
-        do {
-            render = try ThinkingRender(config: config, thinkingEnabled: thinkingEnabled)
-        } catch ReasoningError.cannotDisableReasoning {
-            throw unsupportedCapability(.reasoning, cannotDisableMessage)
-        }
+        let render = try thinkingRender(
+            config: config, thinkingEnabled: thinkingEnabled,
+            cannotDisableMessage: cannotDisableMessage)
         return (
             render, try await render.prepare(messages: messages, tools: nil, context: context)
         )

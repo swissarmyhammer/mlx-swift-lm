@@ -222,6 +222,7 @@ extension ModelLoadingSuite.HardReserveStressTests {
                     closingBias: closingBias,
                     whitespaceBias: whitespaceBias,
                     whitespaceTokenIDs: whitespaceTokenIDs,
+                    stringTokens: JSONStringTokens.compute(tokenizer: context.tokenizer),
                     diagnosticLog: false
                 ) { text in
                     collected += text

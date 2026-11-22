@@ -20,6 +20,9 @@ struct GuidedDraft {
     /// The whitespace run after the draft.
     let whitespaceAfter: WhitespaceRunTracker
 
+    /// The string state after the draft and the tokens the matcher fast-forwarded after it.
+    let stringStateAfter: JSONStringState
+
     /// The tokens the matcher accepted for this draft: the draft and its fast-forwarded tokens.
     /// A rollback of the draft rolls back this many.
     var acceptanceCount: Int { 1 + commit.tokens.count }
@@ -102,17 +105,20 @@ final class GuidedDraftChain {
         do {
             let commit = try rules.constraint.commitToken(Int32(draftedToken))
             let whitespace = rules.whitespace(after: draftedToken, from: position.whitespace)
+            let stringState = rules.stringState(
+                after: draftedToken, forced: commit.tokens, from: position.stringState)
             drafts.append(
                 GuidedDraft(
                     token: draftedToken, position: position, commit: commit,
-                    whitespaceAfter: whitespace))
+                    whitespaceAfter: whitespace, stringStateAfter: stringState))
             committedDraftCount = drafts.count
             let tokenCount = position.tokenCount + 1 + commit.tokens.count
             guard !commit.isTerminated, commit.tokens.isEmpty, tokenCount < rules.maxTokens else {
                 nextPosition = nil
                 return
             }
-            nextPosition = try rules.position(tokenCount: tokenCount, whitespace: whitespace)
+            nextPosition = try rules.position(
+                tokenCount: tokenCount, whitespace: whitespace, stringState: stringState)
         } catch {
             failure = error
             nextPosition = nil

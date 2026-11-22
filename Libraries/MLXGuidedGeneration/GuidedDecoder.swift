@@ -48,6 +48,9 @@ struct GuidedDecoder {
     /// The whitespace run after the last decision.
     private var whitespace: WhitespaceRunTracker
 
+    /// The string state after the last decision and the tokens the grammar forced after it.
+    private var stringState: JSONStringState
+
     /// Decodes the emitted tokens into text.
     private var detokenizer: any StreamingDetokenizer
 
@@ -106,6 +109,7 @@ struct GuidedDecoder {
         self.rules = rules
         self.position = try rules.startPosition()
         self.whitespace = position.whitespace
+        self.stringState = position.stringState
         self.detokenizer = tokenizer.makeStreamingDetokenizer()
         self.emit = emit
         self.bufferPoolClearing = bufferPoolClearing
@@ -151,7 +155,10 @@ struct GuidedDecoder {
         }
         diagnosticSink?.recordDecisionMargin(topTwoMargin(of: logits))
         let commit = try rules.constraint.commitToken(Int32(token))
-        return emit(token, commit: commit, whitespaceAfter: whitespaceAfter)
+        return emit(
+            token, commit: commit, whitespaceAfter: whitespaceAfter,
+            stringStateAfter: rules.stringState(
+                after: token, forced: commit.tokens, from: position.stringState))
     }
 
     /// The gap between the two best logits of the last row of `logits` under the mask and the
@@ -167,7 +174,9 @@ struct GuidedDecoder {
     /// - Returns: The tokens to feed the target for the draft, or `nil` when the generation stops.
     mutating func accept(_ draft: GuidedDraft) -> [Int32]? {
         note(draft.position)
-        return emit(draft.token, commit: draft.commit, whitespaceAfter: draft.whitespaceAfter)
+        return emit(
+            draft.token, commit: draft.commit, whitespaceAfter: draft.whitespaceAfter,
+            stringStateAfter: draft.stringStateAfter)
     }
 
     /// Stops the generation when the grammar already terminated at ``position``, which is then
@@ -188,7 +197,10 @@ struct GuidedDecoder {
     ///   it already, or `nil` to compute it from the matcher.
     /// - Throws: The error of the matcher.
     mutating func advance(reusing computed: GuidedPosition? = nil) throws {
-        position = try computed ?? rules.position(tokenCount: tokenCount, whitespace: whitespace)
+        position =
+            try computed
+            ?? rules.position(
+                tokenCount: tokenCount, whitespace: whitespace, stringState: stringState)
     }
 
     /// Moves back to `recorded`, the position of a rejected draft, after the matcher rolled back
@@ -199,11 +211,14 @@ struct GuidedDecoder {
     /// - Throws: The error of the matcher.
     mutating func restore(to recorded: GuidedPosition) throws {
         whitespace = recorded.whitespace
+        stringState = recorded.stringState
         let mask = try rules.constraint.computeMask()
         position =
             recorded.hasMask(mask)
             ? recorded
-            : try rules.position(tokenCount: recorded.tokenCount, whitespace: recorded.whitespace)
+            : try rules.position(
+                tokenCount: recorded.tokenCount, whitespace: recorded.whitespace,
+                stringState: recorded.stringState)
     }
 
     /// Tells the caller's processor that the generation emitted its last token.
@@ -242,9 +257,11 @@ struct GuidedDecoder {
     ///
     /// A commit that terminates the grammar stops before its fast-forwarded tokens.
     private mutating func emit(
-        _ token: Int, commit: CommitResult, whitespaceAfter: WhitespaceRunTracker
+        _ token: Int, commit: CommitResult, whitespaceAfter: WhitespaceRunTracker,
+        stringStateAfter: JSONStringState
     ) -> [Int32]? {
         whitespace = whitespaceAfter
+        stringState = stringStateAfter
         diagnosticSink?.recordSampledToken(token)
         guard append(token) else { return nil }
         logProgress()

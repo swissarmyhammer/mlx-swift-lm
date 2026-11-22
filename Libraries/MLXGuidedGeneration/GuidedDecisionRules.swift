@@ -3,7 +3,8 @@
 import MLX
 
 /// The grammar state one guided decision reads: the matcher's mask there, its additive array, the
-/// tokens the generation counted before it, and the run of whitespace tokens before it.
+/// tokens the generation counted before it, the run of whitespace tokens before it, and whether
+/// the output before it stands inside an open JSON string.
 ///
 /// Plain decoding computes one position after each decision. An MTP round computes the positions
 /// of its drafts ahead of the target, and its verify reads the same positions.
@@ -20,6 +21,10 @@ struct GuidedPosition {
 
     /// The run of whitespace tokens the generation sampled before this position.
     let whitespace: WhitespaceRunTracker
+
+    /// The string state of the output before this position, its sampled and fast-forwarded
+    /// tokens alike.
+    let stringState: JSONStringState
 
     /// Whether `mask` is the mask of this position.
     ///
@@ -42,13 +47,16 @@ struct GuidedDecisionRules {
     /// non-closing token, and the stop-token penalty on every stop token.
     private static let suppressingBias: Float32 = -10000
 
-    /// The bias the hard zone adds to the string-closing quote
-    /// (``ClosingTokenBias/stringClosingBias``) over the other closing tokens. Inside a string the
-    /// grammar allows `}`, `]` and the digits as content, and a model that prefers them there
-    /// writes `666…` or `}266}266…` to the end of the budget without closing the string. Measured
-    /// on Gemma with `HardReserveStressTests`: without the preference, budgets of 4, 6 and 8 times
-    /// the shortest valid output ended in incomplete output at each hard-reserve floor from 2 to
-    /// 6 times the shortest output; with it, every pass at 6 times and more completed.
+    /// The bias the hard zone adds to the string-closing tokens
+    /// (``JSONStringTokens/stringClosingTokenIDs``) while a string is open
+    /// (``JSONStringState/closesWithQuote``). Inside a string the grammar allows `}`, `]` and the
+    /// digits as content, and a model that prefers them there writes `666…` or `}266}266…` to the
+    /// end of the budget without closing the string. Outside a string a `"` opens one, thus it
+    /// gets no preference there: after `[` or `{`, `]` and `}` keep their tier. Measured on Gemma
+    /// with `HardReserveStressTests` before the floor of the hard reserve rose to three times the
+    /// shortest valid output: without the preference, budgets of 4 and 8 times that output ended
+    /// in incomplete output at floors of 1 and 2 times it; with it, every pass at 8 and 16 times
+    /// completed.
     static let hardZoneStringClosingBias: Float32 = 100
 
     /// The grammar constraint, whose matcher every decision advances.
@@ -81,6 +89,13 @@ struct GuidedDecisionRules {
     /// The bias of the hard zone: closing tokens only, stop tokens penalized.
     private let hardZoneBias: MLXArray?
 
+    /// The bias of the hard zone inside an open string: ``hardZoneBias`` with the string-closing
+    /// tokens preferred.
+    private let hardZoneInStringBias: MLXArray?
+
+    /// The tokens that move the string state, and the tokens that close a string.
+    let stringTokens: JSONStringTokens
+
     /// The bias against whitespace tokens once a whitespace run grows, or `nil` for none.
     let whitespaceBias: MLXArray?
 
@@ -101,10 +116,12 @@ struct GuidedDecisionRules {
     ///   - closingBias: The bias that favors closing tokens, or `nil`.
     ///   - whitespaceBias: The bias against whitespace tokens, or `nil`.
     ///   - whitespaceTokenIDs: The tokens the whitespace run counts.
+    ///   - stringTokens: The tokens that move the string state, and those that close a string.
     init(
         constraint: GrammarConstraint, maxTokens: Int, vocabSize: Int, logitDim: Int,
         stopTokenIDs: Set<Int>, unknownTokenID: Int?, completionReserve: Int, hardReserve: Int,
-        closingBias: MLXArray?, whitespaceBias: MLXArray?, whitespaceTokenIDs: Set<Int>
+        closingBias: MLXArray?, whitespaceBias: MLXArray?, whitespaceTokenIDs: Set<Int>,
+        stringTokens: JSONStringTokens
     ) {
         self.constraint = constraint
         self.maxTokens = maxTokens
@@ -115,28 +132,47 @@ struct GuidedDecisionRules {
         self.completionReserve = completionReserve
         self.hardReserve = hardReserve
         self.closingBias = closingBias
-        self.hardZoneBias = closingBias.map {
+        let hardZoneBias = closingBias.map {
             Self.hardZoneBias(closingBias: $0, stopTokenIDs: stopTokenIDs)
         }
+        self.hardZoneBias = hardZoneBias
+        self.hardZoneInStringBias = hardZoneBias.map {
+            $0
+                + Self.stringClosingPreference(
+                    length: $0.shape[0], stringClosingTokenIDs: stringTokens.stringClosingTokenIDs)
+        }
+        self.stringTokens = stringTokens
         self.whitespaceBias = whitespaceBias
         self.whitespaceTokenIDs = whitespaceTokenIDs
     }
 
-    /// The hard-zone bias of `closingBias`: every non-closing token suppressed, every stop
+    /// The hard-zone bias of `closingBias`: every non-closing token suppressed, and every stop
     /// token penalized, because the grammar may allow a stop at an intermediate valid state
-    /// before every required field is present, and the string-closing quote preferred
-    /// (``hardZoneStringClosingBias``), thus an open string closes.
-    static func hardZoneBias(closingBias: MLXArray, stopTokenIDs: Set<Int>) -> MLXArray {
+    /// before every required field is present.
+    private static func hardZoneBias(closingBias: MLXArray, stopTokenIDs: Set<Int>) -> MLXArray {
         let biasLength = closingBias.shape[0]
         var penalty = [Float32](repeating: 0, count: biasLength)
         for stopToken in stopTokenIDs where stopToken >= 0 && stopToken < biasLength {
             penalty[stopToken] = suppressingBias
         }
-        let closing = which(closingBias .> 0, Float32(0), suppressingBias)
-        let stringClosing = which(
-            closingBias .== ClosingTokenBias.stringClosingBias, hardZoneStringClosingBias,
-            Float32(0))
-        return closing + stringClosing + MLXArray(penalty)
+        return which(closingBias .> 0, Float32(0), suppressingBias) + MLXArray(penalty)
+    }
+
+    /// The preference the hard zone adds inside an open string: ``hardZoneStringClosingBias`` on
+    /// each string-closing token, 0 elsewhere.
+    ///
+    /// - Parameters:
+    ///   - length: The length of the bias.
+    ///   - stringClosingTokenIDs: The tokens that close a string.
+    /// - Returns: The preference.
+    private static func stringClosingPreference(length: Int, stringClosingTokenIDs: Set<Int>)
+        -> MLXArray
+    {
+        var preference = [Float32](repeating: 0, count: length)
+        for token in stringClosingTokenIDs where token >= 0 && token < length {
+            preference[token] = hardZoneStringClosingBias
+        }
+        return MLXArray(preference)
     }
 
     /// The position of the first decision: the matcher's mask before any token.
@@ -145,7 +181,8 @@ struct GuidedDecisionRules {
     /// - Throws: The error of the matcher.
     func startPosition() throws -> GuidedPosition {
         try position(
-            tokenCount: 0, whitespace: WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs))
+            tokenCount: 0, whitespace: WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs),
+            stringState: JSONStringState())
     }
 
     /// The position the matcher stands at now.
@@ -153,15 +190,18 @@ struct GuidedDecisionRules {
     /// - Parameters:
     ///   - tokenCount: The tokens the generation counted before the position.
     ///   - whitespace: The whitespace run before the position.
+    ///   - stringState: The string state of the output before the position.
     /// - Returns: The position.
     /// - Throws: The error of the matcher.
-    func position(tokenCount: Int, whitespace: WhitespaceRunTracker) throws -> GuidedPosition {
+    func position(
+        tokenCount: Int, whitespace: WhitespaceRunTracker, stringState: JSONStringState
+    ) throws -> GuidedPosition {
         let mask = try constraint.computeMask()
         return GuidedPosition(
             mask: mask,
             maskArray: GuidedGenerationLoop.buildMaskArray(
                 for: mask, vocabSize: vocabSize, logitDim: logitDim),
-            tokenCount: tokenCount, whitespace: whitespace)
+            tokenCount: tokenCount, whitespace: whitespace, stringState: stringState)
     }
 
     /// The bias of a decision at `position`, by the zone of the budget it falls in.
@@ -169,7 +209,8 @@ struct GuidedDecisionRules {
     /// The normal zone has no bias: the grammar mask already gates a stop on structural
     /// validity. The soft zone (``completionReserve`` tokens left) favors closing tokens, with no
     /// stop penalty, so the generation may stop wherever the grammar allows it. The hard zone
-    /// (``hardReserve`` tokens left) suppresses every non-closing token and every stop token.
+    /// (``hardReserve`` tokens left) suppresses every non-closing token and every stop token, and
+    /// inside an open string prefers the tokens that close it (``hardZoneStringClosingBias``).
     /// The whitespace bias joins once the whitespace run grows.
     ///
     /// No bias applies where the grammar forces every token (`needsApply == false`): a bias
@@ -182,7 +223,8 @@ struct GuidedDecisionRules {
         var active: MLXArray?
         if let closingBias {
             if hardReserve > 0 && position.tokenCount >= maxTokens - hardReserve {
-                active = hardZoneBias
+                active =
+                    position.stringState.closesWithQuote ? hardZoneInStringBias : hardZoneBias
             } else if position.tokenCount >= maxTokens - completionReserve {
                 active = closingBias
             }
@@ -230,5 +272,19 @@ struct GuidedDecisionRules {
         var run = run
         _ = run.record(tokenID: token)
         return run
+    }
+
+    /// The string state after a committed `token` and the tokens the grammar fast-forwarded
+    /// after it: every committed token moves the state, forced or not.
+    ///
+    /// - Parameters:
+    ///   - token: The committed token.
+    ///   - forced: The tokens the grammar fast-forwarded after it.
+    ///   - state: The state before `token`.
+    /// - Returns: The state after the forced tokens.
+    func stringState(after token: Int, forced: [Int32], from state: JSONStringState)
+        -> JSONStringState
+    {
+        stringTokens.state(after: [token] + forced.map { Int($0) }, from: state)
     }
 }

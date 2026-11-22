@@ -1023,10 +1023,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// ``CompletionReserve`` estimates (the model writes ` :` and ` ,` as
         /// tokens of their own), thus the floor carries a margin. Measured on
         /// Gemma with `HardReserveStressTests`, four schema tiers at budgets
-        /// of 4, 5, 6 and 8 times the shortest output: floors of 1 and 2
-        /// ended in incomplete output at 4 times, a floor of 3 completed every
-        /// pass, and a floor of 4 put the hard zone over the whole budget of 4
-        /// times, which filled every string with `""`.
+        /// of 4, 8 and 16 times the shortest output: a floor of 1 ended in
+        /// incomplete output at 4 times, a floor of 2 completed every pass of
+        /// one run, and a floor of 3 completed every pass with one more
+        /// shortest output of margin. The trade: a budget of 3 times the
+        /// shortest output or less runs wholly in the hard zone, and writes
+        /// its strings short or empty, rather than ending in incomplete output.
         static let hardReserveStructuralFloorMultiplier = 3
 
         /// Divisor on the token budget that caps the completion reserve: the

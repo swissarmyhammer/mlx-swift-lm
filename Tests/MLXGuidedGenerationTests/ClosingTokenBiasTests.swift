@@ -40,7 +40,7 @@ private struct ListTokenizer: MLXLMCommon.Tokenizer {
 @Suite
 struct ClosingTokenBiasTests {
 
-    @Test("Tier-2 closing characters get +100 bias, the quote one more")
+    @Test("Tier-2 closing characters get +100 bias")
     func tier2CharactersGetHundredBias() {
         let tok = ListTokenizer(tokens: [
             "\"",  // 0
@@ -54,12 +54,12 @@ struct ClosingTokenBiasTests {
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: nil)
         let values = bias.asArray(Float.self)
 
-        #expect(values[0] == 101.0)  // " (the string-closing quote)
-        #expect(values[1] == 100.0)  // }
-        #expect(values[2] == 100.0)  // ]
-        #expect(values[3] == 100.0)  // 0
-        #expect(values[4] == 100.0)  // 5
-        #expect(values[5] == 100.0)  // 9
+        #expect(values[0] == ClosingTokenBias.tier2Bias)  // "
+        #expect(values[1] == ClosingTokenBias.tier2Bias)  // }
+        #expect(values[2] == ClosingTokenBias.tier2Bias)  // ]
+        #expect(values[3] == ClosingTokenBias.tier2Bias)  // 0
+        #expect(values[4] == ClosingTokenBias.tier2Bias)  // 5
+        #expect(values[5] == ClosingTokenBias.tier2Bias)  // 9
         #expect(values[6] == 0.0)  // abc
     }
 
@@ -73,8 +73,8 @@ struct ClosingTokenBiasTests {
         let bias = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 1)
         let values = bias.asArray(Float.self)
 
-        #expect(values[0] == 100.0)  // tier 2 only
-        #expect(values[1] == 200.0)  // EOS
+        #expect(values[0] == ClosingTokenBias.tier2Bias)  // tier 2 only
+        #expect(values[1] == ClosingTokenBias.tier1Bias)  // EOS
         #expect(values[2] == 0.0)
     }
 
@@ -88,7 +88,7 @@ struct ClosingTokenBiasTests {
         let values = bias.asArray(Float.self)
 
         // EOS bias overrides tier-2
-        #expect(values[0] == 200.0)
+        #expect(values[0] == ClosingTokenBias.tier1Bias)
         #expect(values[1] == 0.0)
     }
 
@@ -116,29 +116,6 @@ struct ClosingTokenBiasTests {
         #expect(bias.shape == [5])
     }
 
-    @Test("The hard zone prefers the quote, which closes a string, over the other closing tokens")
-    func hardZonePrefersTheStringClosingQuote() {
-        let tok = ListTokenizer(tokens: [
-            "\"",  // 0 - closes a string
-            "}",  // 1 - string content inside a string
-            "]",  // 2 - string content inside a string
-            "6",  // 3 - string content inside a string
-            "abc",  // 4 - not closing
-            "<EOS>",  // 5 - stop
-        ])
-        let closing = ClosingTokenBias.compute(tokenizer: tok, eosTokenId: 5)
-        let values = GuidedDecisionRules.hardZoneBias(closingBias: closing, stopTokenIDs: [5])
-            .asArray(Float.self)
-
-        let preference = Float(GuidedDecisionRules.hardZoneStringClosingBias)
-        #expect(values[0] == preference)
-        #expect(values[1] == 0)
-        #expect(values[2] == 0)
-        #expect(values[3] == 0)
-        #expect(values[4] < 0)
-        #expect(values[5] < 0)
-    }
-
     @Test("Out-of-range EOS id is ignored")
     func outOfRangeEOSIgnored() {
         let tok = ListTokenizer(tokens: ["a", "}"])
@@ -146,6 +123,6 @@ struct ClosingTokenBiasTests {
         let values = bias.asArray(Float.self)
 
         #expect(values[0] == 0.0)
-        #expect(values[1] == 100.0)  // tier 2 still applies
+        #expect(values[1] == ClosingTokenBias.tier2Bias)  // tier 2 still applies
     }
 }

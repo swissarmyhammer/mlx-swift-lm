@@ -81,20 +81,21 @@ struct InklingExecutorSchemaPromptTests {
     ///   - capabilities: the capabilities the model declares.
     ///   - enabledTools: the tools of the call; with a tool the call runs allowed tool mode.
     ///   - rounds: the tokens each pass of the call writes, in the order of the passes.
+    ///   - recorder: the recorder of the prompt of each pass.
     /// - Returns: the prompt tokens of each pass, in order, and the text the call streamed.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func schemaCall(
         reasoningConfig: ReasoningConfig?,
         capabilities: [LanguageModelCapabilities.Capability] = [.guidedGeneration],
         enabledTools: [Transcript.ToolDefinition] = [],
-        rounds: [[Int]]? = nil
+        rounds: [[Int]]? = nil,
+        recorder: ScriptedPromptRecorder = ScriptedPromptRecorder()
     ) async throws -> (prompts: [[Int]], response: String) {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
         let configuration = ModelConfiguration(
             id: "probe/inkling-schema-prompt-\(UUID().uuidString)", toolCallFormat: .inkling,
             reasoningConfig: reasoningConfig)
-        let recorder = ScriptedPromptRecorder()
         let model = MLXLanguageModel(
             configuration: configuration, capabilities: capabilities,
             weightsLocation: { _ in weights },
@@ -197,13 +198,19 @@ struct InklingExecutorSchemaPromptTests {
         #expect(call.response == Self.answer)
     }
 
-    @Test("an answer opening on a model that always reasons is an unsupported capability")
+    @Test(
+        "an answer opening on a model that always reasons is an unsupported capability",
+        arguments: [false, true])
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    func anAnswerOpeningThatCannotTurnThinkingOffThrows() async throws {
+    func anAnswerOpeningThatCannotTurnThinkingOffThrows(withTools: Bool) async throws {
+        let recorder = ScriptedPromptRecorder()
         do {
             _ = try await Self.schemaCall(
                 reasoningConfig: Self.alwaysOnWithAnswerOpening,
-                capabilities: [.guidedGeneration, .reasoning])
+                capabilities: withTools
+                    ? [.guidedGeneration, .reasoning, .toolCalling]
+                    : [.guidedGeneration, .reasoning],
+                enabledTools: withTools ? [Self.tool] : [], recorder: recorder)
             Issue.record("Expected unsupportedCapability(.reasoning), but respond returned")
         } catch let error as LanguageModelError {
             guard case .unsupportedCapability(let unsupported) = error else {
@@ -215,6 +222,8 @@ struct InklingExecutorSchemaPromptTests {
                 unsupported.debugDescription
                     == MLXLanguageModel.Executor.answerOpeningNeedsThinkingOffMessage)
         }
+        // The gate throws before any pass, thus no prompt reached the model.
+        #expect(recorder.prompts.isEmpty, "prompts \(recorder.prompts)")
     }
 }
 

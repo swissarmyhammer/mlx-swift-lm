@@ -7,7 +7,9 @@ import Testing
 @testable import MLXFoundationModels
 
 /// The closing reserves of a guided pass: each scales with the shortest valid output, and the
-/// budget caps it, thus the start of the output decodes free of the closing bias.
+/// budget caps it, thus the start of the output decodes free of the closing bias. The cap stops
+/// at a floor of three times the shortest valid output: a budget of that floor or less runs
+/// wholly in the hard zone, the accepted trade against incomplete output.
 ///
 /// The numbers come from the Inkling 2 Mini city call of `Inkling2GuidedGenerationTests`: the
 /// call allowed 256 tokens, and the test takes 32 tokens as the shortest output of its schema,
