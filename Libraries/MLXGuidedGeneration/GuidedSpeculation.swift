@@ -5,7 +5,8 @@ import MLXLMCommon
 
 /// A drafter guided generation speculates with: a stateful drafter that drafts through a logit
 /// processor, so each draft step takes the grammar mask and biases, and that resumes from the
-/// prompt chunks the prefill feeds it. The Qwen 3.5 MTP heads are such drafters.
+/// prompt chunks the prefill feeds it. The Qwen 3.5 MTP heads and the Inkling 2 DSpark head are
+/// such drafters.
 typealias GuidedMTPDrafter = ResumableMTPDrafterModel & StatefulMTPDistributionDrafterModel
 
 /// MTP speculation of one guided generation.
@@ -23,9 +24,9 @@ typealias GuidedMTPDrafter = ResumableMTPDrafterModel & StatefulMTPDistributionD
 /// ``GuidedGenerationLoop/modelFeed(sampled:fastForward:)``. A draft whose commit forces tokens
 /// ends its chain, and the draft with its forced tokens joins the verify of its round. A decision
 /// of the target that forces tokens feeds itself and them in verify-shaped forwards of their own.
-/// Both run on the targets that verify in place only (the Qwen 3.5 hybrids), where a verify
-/// forward of several tokens on a populated cache gives each row the one-token logits; every
-/// other target decodes plainly.
+/// Both run on the targets that verify in place only (the Qwen 3.5 and Inkling 2 hybrids),
+/// where a verify forward of several tokens on a populated cache gives each row the one-token
+/// logits; every other target decodes plainly.
 struct GuidedSpeculation {
 
     /// The drafter.

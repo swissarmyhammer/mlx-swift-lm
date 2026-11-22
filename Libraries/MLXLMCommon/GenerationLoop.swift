@@ -560,6 +560,7 @@ private func runTokenLoop<Handler: TokenLoopHandler, Collector: GeneratedTokenCo
         passthroughReason: mtpStats?.passthroughReason ?? speculationFallback?.statedReason,
         speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry,
         speculativeDecodingFallbackReason: speculationFallback?.reason
+            ?? mtpStats?.passthroughFallbackReason
     )
     _ = emit(handler.infoEvent(info))
 

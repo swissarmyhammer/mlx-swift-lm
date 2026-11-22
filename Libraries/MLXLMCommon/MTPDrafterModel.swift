@@ -933,4 +933,14 @@ public protocol MTPStatsCollecting {
     /// sticky passthrough engaged or a stateful continuation had to be
     /// discarded, with the first failure reason captured by the iterator.
     var passthroughReason: String? { get }
+
+    /// The kind of the fallback when sticky passthrough engaged, which
+    /// ``GenerateCompletionInfo/speculativeDecodingFallbackReason`` reports, or
+    /// nil when the stream never decoded plainly.
+    var passthroughFallbackReason: SpeculativeDecodingFallbackReason? { get }
+}
+
+extension MTPStatsCollecting {
+    /// Nil: the stream reports no kind for its passthrough.
+    public var passthroughFallbackReason: SpeculativeDecodingFallbackReason? { nil }
 }

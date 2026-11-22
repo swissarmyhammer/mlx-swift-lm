@@ -678,8 +678,8 @@ enum ScriptedExecutorPass {
         private let collected = Mutex(ScriptedPassResult())
 
         /// Adds the reused prompt tokens of `event` when it is a usage event,
-        /// its text when it is response text or reasoning text, and its tool
-        /// name when it is a tool call.
+        /// its text when it is response text or reasoning text, its tool name
+        /// when it is a tool call, and counts it when it is a completion.
         ///
         /// - Parameter event: one event the executor streamed.
         func record(_ event: MLXLanguageModel.Executor.GenerationEvent) {
@@ -695,7 +695,9 @@ enum ScriptedExecutorPass {
                 collected.withLock { $0.reasoningText += text }
             case .toolCall(_, let name, _):
                 collected.withLock { $0.toolCallNames.append(name) }
-            case .updateMetadata, .completion:
+            case .completion:
+                collected.withLock { $0.completionCount += 1 }
+            case .updateMetadata:
                 break
             }
         }
@@ -724,6 +726,9 @@ struct ScriptedPassResult: Sendable {
     /// The tool name of each tool call of the pass, in the order the pass
     /// streamed the calls.
     var toolCallNames: [String] = []
+
+    /// The generations of the pass that reported their completion.
+    var completionCount = 0
 }
 
 #endif  // FoundationModelsIntegration && canImport(FoundationModels)

@@ -138,7 +138,11 @@ but not a pinned prefix.
 ### Inkling 2 MTP
 
 The DSpark head an Inkling 2 checkpoint ships in `mtp.safetensors` drafts up to seven
-tokens per round for greedy decoding. `MTPDrafterRegistration.inkling2` registers it, and
+tokens per round. It speculates for greedy and sampled decoding, as the Qwen 3.5 heads do: a
+sampled stream verifies the argmax drafts by sample-and-match, and the drafter reports each
+proposal's distribution for `MTPSampledVerification.rejectionSampling`. Guided generation
+speculates with it too, each draft under the grammar mask. `MTPDrafterRegistration.inkling2`
+registers it, and
 `MTPDrafterRegistry.inkling2_mini_oq4e_mtp` names the checkpoint that ships the Mini head;
 the drafter loads `mtp.safetensors` alone and leaves the target weights beside it:
 

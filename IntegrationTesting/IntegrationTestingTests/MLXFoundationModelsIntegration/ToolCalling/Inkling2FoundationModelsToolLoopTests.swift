@@ -32,7 +32,7 @@ import os
 /// The argument of the customer tool.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
-private struct FindCustomerArguments {
+struct FindCustomerArguments {
     @Guide(description: "The full name of the customer")
     var name: String
 }
@@ -40,14 +40,14 @@ private struct FindCustomerArguments {
 /// The argument of the balance tool.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 @Generable
-private struct GetBalanceArguments {
+struct GetBalanceArguments {
     @Guide(description: "The customer id, for example C-1000")
     var customerId: String
 }
 
 /// The customer tool of a `LanguageModelSession`.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private struct FindCustomerTool: FoundationModels.Tool {
+struct FindCustomerTool: FoundationModels.Tool {
     let name = Inkling2BankFixture.findCustomerTool
     let description = Inkling2BankFixture.findCustomerDescription
     let log: Inkling2ToolCallLog
@@ -59,7 +59,7 @@ private struct FindCustomerTool: FoundationModels.Tool {
 
 /// The balance tool of a `LanguageModelSession`.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-private struct GetBalanceTool: FoundationModels.Tool {
+struct GetBalanceTool: FoundationModels.Tool {
     let name = Inkling2BankFixture.getBalanceTool
     let description = Inkling2BankFixture.getBalanceDescription
     let log: Inkling2ToolCallLog

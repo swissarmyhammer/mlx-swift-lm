@@ -64,14 +64,16 @@ struct InklingExecutorToolLoopTests {
     ///   - rounds: the tokens each pass writes, in the order of the passes.
     ///   - capabilities: the capabilities the model declares.
     ///   - weights: the directory that makes the model available.
+    ///   - stopStrings: the stop strings of the model, or `nil` for none.
     /// - Returns: the model.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func makeModel(
-        rounds: [[Int]], capabilities: [LanguageModelCapabilities.Capability], weights: URL
+        rounds: [[Int]], capabilities: [LanguageModelCapabilities.Capability], weights: URL,
+        stopStrings: Set<String>? = nil
     ) -> MLXLanguageModel {
         let configuration = ModelConfiguration(
-            id: "probe/inkling-tool-loop-\(UUID().uuidString)", toolCallFormat: .inkling,
-            reasoningConfig: InklingReasoningProtocol.inkling2)
+            id: "probe/inkling-tool-loop-\(UUID().uuidString)", stopStrings: stopStrings,
+            toolCallFormat: .inkling, reasoningConfig: InklingReasoningProtocol.inkling2)
         return MLXLanguageModel(
             configuration: configuration, capabilities: capabilities,
             weightsLocation: { _ in weights },
@@ -210,6 +212,37 @@ struct InklingExecutorToolLoopTests {
 
         let render = try #require(round.entry?.renderTokens)
         #expect(render.contains(Self.tokenizer.token(Self.loop.reasoning)))
+    }
+
+    @Test("each pass of a tool round reports the completion of its generation")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func eachPassReportsItsCompletion() async throws {
+        let round = try await Self.runToolRound()
+
+        #expect(round.calling.completionCount == 1)
+        #expect(round.answering.completionCount == 1)
+    }
+
+    @Test("a pass that a stop string ends reports the completion and the usage of its generation")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aPassThatAStopStringEndsReportsItsCompletion() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let stopString = "sunny"
+        let model = Self.makeModel(
+            rounds: [Self.loop.answeringTurn], capabilities: [.toolCalling], weights: weights,
+            stopStrings: [stopString])
+        let store = PromptCacheTestStore.withoutWrites(folderNamed: "InklingExecutorToolLoop")
+        let request = Self.request(
+            Self.firstEntries(sessionID: "inkling-stop-string-\(UUID().uuidString)"),
+            reasoningLevel: nil)
+
+        let pass = try await ScriptedExecutorPass.respond(
+            to: request, model: model, inside: store)
+
+        #expect(!pass.responseText.contains(stopString))
+        #expect(pass.completionCount == 1)
+        #expect(pass.promptTokenCount > 0)
     }
 
     @Test("a model that does not declare reasoning renders the effort none")

@@ -49,12 +49,6 @@ private let tinyDraftJSON = """
 // swiftlint:disable:next no_magic_numbers the taps tinyDraftJSON names, which the tests compare with what the target and the drafter read
 private let tinyTaps = [1, 3, 5, 8]
 
-/// The random seed of the tiny drafter's weights.
-private let tinyDrafterSeed: UInt64 = 11
-
-/// The scale of the tiny drafter's random normal weights.
-private let tinyDrafterWeightScale: Float = 0.3
-
 /// The step between the tokens of a test prompt, and the first token: a prompt walks the tiny
 /// vocabulary rather than repeating one token.
 private let promptTokenStride = 7
@@ -89,16 +83,7 @@ private func tinyTarget() throws -> Inkling2 {
 
 /// A tiny drafter with random weights.
 private func tinyDrafter() throws -> Inkling2DraftModel {
-    let drafter = Inkling2DraftModel(try tinyDraftConfiguration())
-    MLXRandom.seed(tinyDrafterSeed)
-    let parameters = Dictionary(
-        uniqueKeysWithValues: drafter.parameters().flattened().map { key, value in
-            (key, MLXRandom.normal(value.shape) * tinyDrafterWeightScale)
-        })
-    try drafter.update(
-        parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
-    eval(drafter)
-    return drafter
+    try Inkling2TinyModels.drafter(json: tinyDraftJSON)
 }
 
 /// A prompt of `count` tokens of the tiny vocabulary.
@@ -162,7 +147,7 @@ struct Inkling2DraftLoadingTests {
         #expect(drafter.hiddenSize == tinyTaps.count * tinyHidden)
         #expect(drafter.requiresPromptPrefill)
         #expect(!drafter.requiresSharedTargetKV)
-        #expect(drafter.requiresGreedySampling)
+        #expect(!drafter.requiresGreedySampling)
     }
 
     @Test("The factory loads mtp.safetensors and skips the target weights beside it")
@@ -452,6 +437,69 @@ struct Inkling2DraftingTests {
         #expect(state.isAligned)
     }
 
+    @Test(
+        "A sampled stream speculates with either verification",
+        arguments: MTPSampledVerification.allCases)
+    func sampledStreamSpeculates(verification: MTPSampledVerification) throws {
+        let target = try tinyTarget()
+        let drafter = try tinyDrafter()
+        var parameters = GenerateParameters(maxTokens: 20, temperature: 0.6)
+        parameters.seed = 3
+        parameters.mtpSampledVerification = verification
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: prompt(9).reshaped(-1)), mainModel: target, drafter: drafter,
+            parameters: parameters, blockSize: tinyBlock)
+        var output: [Int] = []
+        while let token = iterator.next() { output.append(token) }
+
+        #expect(output.count == 20)
+        #expect(output.allSatisfy { $0 < tinyVocabulary })
+        #expect(iterator.passthroughReason == nil)
+        #expect(iterator.passthroughFallbackReason == nil)
+        #expect(iterator.proposedCount > 0)
+    }
+
+    @Test("A block with its logits drafts the tokens of the token-only block", arguments: [2, 4])
+    func blockWithLogitsMatchesTokenOnlyBlock(blockSize: Int) throws {
+        let target = try tinyTarget()
+        let drafter = try tinyDrafter()
+        var state = try primed(drafter, target: target, count: 9)
+        let tokens = drafter.draftBlock(
+            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
+            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: blockSize,
+            state: &state, sampler: ArgMaxSampler())
+        let output = drafter.draftBlockWithLogits(
+            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
+            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: blockSize,
+            state: &state, processor: nil, sampler: ArgMaxSampler())
+
+        #expect(output.tokens.asArray(Int32.self) == tokens.asArray(Int32.self))
+        #expect(output.processedLogits.shape == [1, blockSize - 1, tinyVocabulary])
+        #expect(
+            argMax(output.processedLogits, axis: -1).asArray(Int32.self)
+                == tokens.asArray(Int32.self))
+        #expect(state.nextPosition == 9)
+        #expect(state.isAligned)
+    }
+
+    @Test("A processor shapes each draft step and learns each draft before the next")
+    func processorShapesEachStep() throws {
+        let target = try tinyTarget()
+        let drafter = try tinyDrafter()
+        var state = try primed(drafter, target: target, count: 9)
+        let forced: [Int32] = [7, 11, 13]
+        let log = ForcingProcessor.Log()
+        let output = drafter.draftBlockWithLogits(
+            target: target, lastToken: MLXArray([Int32(5)]), lastHidden: MLXArray.zeros([1, 1, 1]),
+            sharedKV: [:], positionDeltas: nil, queryOffset: 9, blockSize: tinyBlock,
+            state: &state, processor: ForcingProcessor(forced: forced, log: log),
+            sampler: ArgMaxSampler())
+
+        #expect(output.tokens.asArray(Int32.self) == forced)
+        #expect(log.sampled == forced)
+        #expect(argMax(output.processedLogits, axis: -1).asArray(Int32.self) == forced)
+    }
+
     @Test("Finalizing after a partial accept rewinds the drafter rings past their window")
     func finalizeRewindsRings() throws {
         let target = try tinyTarget()
@@ -496,5 +544,34 @@ struct Inkling2DraftingTests {
         #expect(output == expected)
         #expect(iterator.passthroughReason == nil)
         #expect(iterator.proposedCount > 0)
+    }
+}
+
+/// A processor that lets one token through at each step, the next of ``forced`` after the drafts
+/// it learned, as a grammar mask lets the tokens of its position through.
+private struct ForcingProcessor: LogitProcessor {
+
+    /// The drafts the processor learned. A class, because the drafter copies the processor.
+    final class Log {
+        var sampled: [Int32] = []
+    }
+
+    /// The token each step lets through.
+    let forced: [Int32]
+
+    /// The drafts the processor learned.
+    let log: Log
+
+    mutating func prompt(_ prompt: MLXArray) {}
+
+    /// Every token but the next forced one at negative infinity.
+    func process(logits: MLXArray) -> MLXArray {
+        let allowed = Int(forced[log.sampled.count])
+        let mask = MLXArray((0 ..< logits.dim(-1)).map { $0 == allowed })
+        return MLX.where(mask, logits, MLXArray(-Float.infinity))
+    }
+
+    mutating func didSample(token: MLXArray) {
+        log.sampled.append(token.reshaped(-1).item(Int32.self))
     }
 }

@@ -42,6 +42,10 @@ struct GuidedTarget {
     /// The model state the next forward carries, without the MTP exchange values.
     private(set) var state: LMOutput.State?
 
+    /// The target layers whose hidden states the drafter reads, which each forward that asks
+    /// for drafter state names, or `nil` for the target's own choice.
+    var drafterTargetLayerIds: [Int]?
+
     /// The cache of each layer.
     var cache: [KVCache] { cacheStorage.cache }
 
@@ -78,7 +82,7 @@ struct GuidedTarget {
         let segment: MLXArray?
         switch try model.prepare(
             input, cache: cache,
-            state: drafterFeed.map { LMOutput.State().feeding($0.chunkHandler) },
+            state: drafterFeed.map { emittingState(from: nil).feeding($0.chunkHandler) },
             prefill: parameters)
         {
         case .tokens(let tokens):
@@ -89,7 +93,7 @@ struct GuidedTarget {
             cacheStorage.commitProcessedTokens(inputLength - remainingLength)
             output = model(
                 tokens[text: .newAxis], cache: cache,
-                state: drafterFeed.map { _ in Self.emittingState(from: nil) })
+                state: drafterFeed.map { _ in emittingState(from: nil) })
             cacheStorage.commitProcessedTokens(remainingLength)
             segment = tokens.tokens
         case .logits(let result):
@@ -108,8 +112,8 @@ struct GuidedTarget {
     /// Feeds `tokens` one forward at a time, as plain guided decoding feeds them.
     ///
     /// One-token forwards take the optimized single-query attention kernel. A forward of several
-    /// tokens on a populated cache is proven against them on the Qwen 3.5 targets only, which an
-    /// MTP round verifies in place.
+    /// tokens on a populated cache is proven against them on the Qwen 3.5 and Inkling 2 targets
+    /// only, which an MTP round verifies in place.
     ///
     /// - Parameter tokens: The tokens, at least one.
     /// - Returns: The logits of the last token, unevaluated.
@@ -136,7 +140,7 @@ struct GuidedTarget {
     /// - Parameter tokens: The tokens of the verify.
     /// - Returns: The logits and the drafter state of each token.
     mutating func verify(_ tokens: [Int32]) -> LMOutput {
-        var verifyState = Self.emittingState(from: state)
+        var verifyState = emittingState(from: state)
         verifyState[mtpVerifyKeepsSnapshotsKey] = tokens.count > 1 ? true : nil
         let output = model(
             LMInput.Text(tokens: MLXArray(tokens))[text: .newAxis], cache: cache,
@@ -181,10 +185,12 @@ struct GuidedTarget {
             mainModel: model, mainCache: cache, drafts: rewound)
     }
 
-    /// `state`, asking the target's forward for its drafter state.
-    private static func emittingState(from state: LMOutput.State?) -> LMOutput.State {
+    /// `state`, asking the target's forward for its drafter state at
+    /// ``drafterTargetLayerIds``.
+    private func emittingState(from state: LMOutput.State?) -> LMOutput.State {
         var emitting = state ?? LMOutput.State()
         emitting[mtpEmitFlagKey] = true
+        emitting[mtpTargetLayerIdsKey] = drafterTargetLayerIds
         return emitting
     }
 }

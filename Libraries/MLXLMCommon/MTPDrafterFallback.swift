@@ -47,6 +47,26 @@ package struct MTPDrafterFallback: Sendable, Equatable {
         return fallback
     }
 
+    /// The ``SpeculativeDecodingFallbackReason/unsupportedCache`` fallback of `drafter` on
+    /// `target`, whose cache can neither verify a round in place nor stage one, logged once for
+    /// each drafter and target.
+    ///
+    /// - Parameters:
+    ///   - drafter: The configured MTP drafter.
+    ///   - target: The model the generation decodes with.
+    /// - Returns: The fallback.
+    package static func unsupportedCache(
+        of drafter: any MTPDrafterModel, on target: any LanguageModel
+    ) -> MTPDrafterFallback {
+        let fallback = MTPDrafterFallback(
+            reason: .unsupportedCache,
+            statedReason: "the cache of the target \(type(of: target)) can neither verify nor "
+                + "stage a round of the MTP drafter \(type(of: drafter)), so the generation "
+                + "decodes without speculation")
+        MTPDrafterFallbackLog.shared.report(fallback)
+        return fallback
+    }
+
     /// The words of an incompatibility: the two classes and the error of the drafter's check.
     private static func statedIncompatibility(
         of drafter: any MTPDrafterModel, with target: any LanguageModel

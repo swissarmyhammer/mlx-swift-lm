@@ -878,9 +878,15 @@ extension MLXLanguageModel.Executor {
                 preparedState: preparedState,
                 handOff: handOff)
         } consume: { stream, task in
-            generationLoop: for await generation in stream {
+            // A framed protocol can end the pass before the generation ends. The pass then
+            // stops the generation, and reads the stream to its end, which reports the
+            // completion of the pass with its MTP counts.
+            var decoderStopped = false
+            for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
+                case .token where decoderStopped:
+                    continue
                 case .token(let token):
                     if var decoder = protocolDecoder {
                         if decoder.isInsideReasoning {
@@ -900,8 +906,8 @@ extension MLXLanguageModel.Executor {
                             try Task.checkCancellation()
                         }
                         if !decoderContinues || !shouldContinue {
+                            decoderStopped = true
                             task.cancel()
-                            break generationLoop
                         }
                     } else {
                         if router.isInsideReasoning {
@@ -1388,9 +1394,14 @@ extension MLXLanguageModel.Executor {
                 preparedState: preparedState,
                 handOff: handOff)
         } consume: { stream, task in
-            generationLoop: for await generation in stream {
+            // As on the allowed-tool path: a framed protocol that ends the pass stops the
+            // generation, and the stream is read to its end for the completion of the pass.
+            var decoderStopped = false
+            for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {
+                case .token where decoderStopped:
+                    continue
                 case .token(let token):
                     if var decoder = protocolDecoder {
                         if decoder.isInsideReasoning {
@@ -1409,8 +1420,8 @@ extension MLXLanguageModel.Executor {
                             throw RejectedToolCallError(rejection)
                         }
                         if !decoderContinues || !decodedEvents.shouldContinue {
+                            decoderStopped = true
                             task.cancel()
-                            break generationLoop
                         }
                     } else {
                         // One `.token` == one real token, so this is a true

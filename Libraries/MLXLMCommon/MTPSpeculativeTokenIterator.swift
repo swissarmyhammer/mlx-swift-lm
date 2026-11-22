@@ -33,7 +33,7 @@ enum MTPSpeculationMode: Equatable {
     case speculating
 
     /// The rest of the stream decodes one token at a time. Sticky.
-    case passthrough(reason: String)
+    case passthrough(reason: String, fallback: SpeculativeDecodingFallbackReason)
 
     /// The stream speculated to its end, and its drafter state could not become a continuation.
     case continuationDiscarded(reason: String)
@@ -42,8 +42,13 @@ enum MTPSpeculationMode: Equatable {
     var reason: String? {
         switch self {
         case .speculating: nil
-        case .passthrough(let reason), .continuationDiscarded(let reason): reason
+        case .passthrough(let reason, _), .continuationDiscarded(let reason): reason
         }
+    }
+
+    /// The kind of the fallback of a stream that decodes one token at a time, or `nil`.
+    var fallback: SpeculativeDecodingFallbackReason? {
+        if case .passthrough(_, let fallback) = self { fallback } else { nil }
     }
 
     /// Whether the rest of the stream decodes one token at a time.
@@ -543,7 +548,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
             self.mainCacheStorage.rollback(probe)
         }
         if let standDownReason {
-            switchToPassthrough(reason: standDownReason)
+            switchToPassthrough(reason: standDownReason, fallback: .unsupportedSampling)
         }
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
@@ -1485,13 +1490,23 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
 
     /// Switch to single-token generation for the remainder of the stream.
     /// Sticky — once flipped, `next()` never returns to speculation.
-    private mutating func switchToPassthrough(reason: String) {
+    ///
+    /// - Parameters:
+    ///   - reason: Why, in words.
+    ///   - fallback: The kind of the fallback the completion information reports:
+    ///     ``SpeculativeDecodingFallbackReason/unsupportedSampling`` for a stream whose
+    ///     parameters the drafter cannot speculate with, and
+    ///     ``SpeculativeDecodingFallbackReason/unavailableContinuation`` for a drafter state
+    ///     the stream lost.
+    private mutating func switchToPassthrough(
+        reason: String, fallback: SpeculativeDecodingFallbackReason = .unavailableContinuation
+    ) {
         if !passthroughLoggedOnce {
             // Log one-time only so a quantization-onset round doesn't spam.
             mtpIteratorLogger.info("passthrough mode: \(reason)")
             passthroughLoggedOnce = true
         }
-        speculationMode = .passthrough(reason: reason)
+        speculationMode = .passthrough(reason: reason, fallback: fallback)
         discardSpeculativePromptCacheCheckpoints(mainCache)
         mainState?[mtpEmitFlagKey] = false
         mainState?[mtpVerifyKeepsSnapshotsKey] = nil
@@ -1790,6 +1805,9 @@ func speculativeResidualLogProbabilities(
 extension MTPSpeculativeTokenIterator: MTPStatsCollecting {
     public var proposedDraftTokens: Int { proposedCount }
     public var acceptedDraftTokens: Int { acceptedCount }
+    public var passthroughFallbackReason: SpeculativeDecodingFallbackReason? {
+        speculationMode.fallback
+    }
 }
 
 extension MTPSpeculativeTokenIterator {
