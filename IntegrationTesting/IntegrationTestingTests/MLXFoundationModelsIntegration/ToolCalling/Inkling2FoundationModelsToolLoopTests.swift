@@ -123,7 +123,17 @@ struct Inkling2FoundationModelsToolLoopTests {
     /// Greedy options with the round budget.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static var options: GenerationOptions {
-        GenerationOptions(samplingMode: .greedy, temperature: 0, maximumResponseTokens: maxTokens)
+        options(toolCallingMode: .allowed)
+    }
+
+    /// Greedy options with the round budget and the tool-calling mode `mode`.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func options(toolCallingMode mode: GenerationOptions.ToolCallingMode)
+        -> GenerationOptions
+    {
+        GenerationOptions(
+            samplingMode: .greedy, temperature: 0, maximumResponseTokens: maxTokens,
+            toolCallingMode: mode)
     }
 
     /// The snapshot directory of the pinned checkpoint in the Hugging Face cache.
@@ -211,11 +221,12 @@ struct Inkling2FoundationModelsToolLoopTests {
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func runRound(
         _ entries: [Transcript.Entry], thinking: Bool, model: MLXLanguageModel,
-        executor: MLXLanguageModel.Executor
+        executor: MLXLanguageModel.Executor,
+        toolCallingMode: GenerationOptions.ToolCallingMode = .allowed
     ) async throws -> Inkling2Round {
         let request = makeExecutorRequest(
             transcript: Transcript(entries: entries), enabledTools: toolDefinitions,
-            generationOptions: options,
+            generationOptions: options(toolCallingMode: toolCallingMode),
             contextOptions: ContextOptions(reasoningLevel: thinking ? .moderate : nil))
         var round = Inkling2Round()
         // The stream cancels its producer when it deinitializes, thus it must outlive the
@@ -355,6 +366,83 @@ struct Inkling2FoundationModelsToolLoopTests {
         #expect(
             streamed.allSatisfy { !$0.text.contains("<|") }, "[\(label)] a marker reached the text")
         return streamed.map(\.reasoning).joined()
+    }
+
+    /// The number of rounds of the required-mode loop that must call a tool: the customer
+    /// lookup, then the balance read.
+    private static let requiredRounds = Inkling2ToolCallLog.twoStepCallCount
+
+    /// The loop in required tool mode: the customer lookup and the balance read each run in
+    /// `.required` mode, which must give one call in Inkling 2's own tool frame, then the
+    /// answer and the follow-up turn run in `.allowed` mode. A required round runs the guided
+    /// loop, which carries no prompt cache, thus the answer round starts cold and the follow-up
+    /// turn must reuse the cache of the answer round. Runs with thinking on and with thinking
+    /// off.
+    @Test(arguments: thinkingStates)
+    func requiredModeCallsEachToolOfTheLoop(thinking: Bool) async throws {
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+            try await expectRequiredModeCompletesTheLoop(thinking: thinking)
+        } else {
+            Issue.record(.unsupportedSystem)
+        }
+    }
+
+    /// Runs the loop of ``requiredModeCallsEachToolOfTheLoop(thinking:)``.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func expectRequiredModeCompletesTheLoop(thinking: Bool) async throws {
+        let label = thinking ? "required-thinking" : "required-no-thinking"
+        let model = Self.makeModel(thinking: thinking)
+        let executor = try makeMLXExecutor(for: model)
+        let log = Inkling2ToolCallLog()
+        var entries: [Transcript.Entry] = [
+            .instructions(
+                Transcript.Instructions(
+                    segments: [Self.segment(Inkling2BankFixture.instructions)],
+                    toolDefinitions: Self.toolDefinitions)),
+            Self.prompt(Inkling2BankFixture.question),
+        ]
+
+        for number in 0 ..< Self.requiredRounds {
+            let clock = ContinuousClock()
+            let start = clock.now
+            let round = try await Self.runRound(
+                entries, thinking: thinking, model: model, executor: executor,
+                toolCallingMode: .required)
+            let seconds = (clock.now - start) / .seconds(1)
+            Inkling2ResultLog.report(
+                "INKLING2 FM REQUIRED",
+                "executor[\(label)] round \(number) (\(String(format: "%.2f", seconds)) s): "
+                    + round.summary)
+            Inkling2ResultLog.report(
+                "INKLING2 FM REQUIRED",
+                "executor[\(label)] round \(number) reasoning: \(round.reasoning)")
+            #expect(round.toolCalls.count == 1, "[\(label)] round \(number) \(round.summary)")
+            #expect(round.text.isEmpty, "[\(label)] round \(number) answered in text")
+            guard !round.toolCalls.isEmpty else { break }
+            entries += try Self.entries(after: round, number: number, log: log)
+        }
+        let answer = try await Self.runRound(
+            entries, thinking: thinking, model: model, executor: executor)
+        Inkling2ResultLog.report(
+            "INKLING2 FM REQUIRED", "executor[\(label)] answer: \(answer.summary)")
+        entries.append(
+            .response(Transcript.Response(assetIDs: [], segments: [Self.segment(answer.text)])))
+        entries.append(Self.prompt(Inkling2BankFixture.followUp))
+        let followUp = try await Self.runRound(
+            entries, thinking: thinking, model: model, executor: executor)
+        Inkling2ResultLog.report(
+            "INKLING2 FM REQUIRED", "executor[\(label)] follow-up: \(followUp.summary)")
+
+        #expect(log.isTheTwoStepLoop, "[\(label)] calls \(log.calls)")
+        #expect(answer.toolCalls.isEmpty, "[\(label)] answer \(answer.summary)")
+        #expect(Inkling2BankFixture.namesTheBalance(answer.text), "[\(label)] \(answer.text)")
+        #expect(followUp.cachedTokenCount > 0, "[\(label)] follow-up reused no prompt token")
+        #expect(
+            followUp.text.contains(Inkling2BankFixture.customerID),
+            "[\(label)] follow-up \(followUp.text)")
+        #expect(
+            [answer, followUp].allSatisfy { !$0.text.contains("<|") },
+            "[\(label)] a marker reached the text")
     }
 }
 

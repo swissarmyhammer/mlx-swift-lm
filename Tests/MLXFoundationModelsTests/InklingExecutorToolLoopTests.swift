@@ -64,13 +64,15 @@ struct InklingExecutorToolLoopTests {
     ///   - rounds: the tokens each pass writes, in the order of the passes.
     ///   - capabilities: the capabilities the model declares.
     ///   - weights: the directory that makes the model available.
+    ///   - toolCallFormat: the tool-call format of the model.
     /// - Returns: the model.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func makeModel(
-        rounds: [[Int]], capabilities: [LanguageModelCapabilities.Capability], weights: URL
+        rounds: [[Int]], capabilities: [LanguageModelCapabilities.Capability], weights: URL,
+        toolCallFormat: ToolCallFormat = .inkling
     ) -> MLXLanguageModel {
         let configuration = ModelConfiguration(
-            id: "probe/inkling-tool-loop-\(UUID().uuidString)", toolCallFormat: .inkling,
+            id: "probe/inkling-tool-loop-\(UUID().uuidString)", toolCallFormat: toolCallFormat,
             reasoningConfig: InklingReasoningProtocol.inkling2)
         return MLXLanguageModel(
             configuration: configuration, capabilities: capabilities,
@@ -127,13 +129,17 @@ struct InklingExecutorToolLoopTests {
         ] + outputs
     }
 
-    /// The request of one pass over `entries`, with the weather tool enabled.
+    /// The request of one greedy pass over `entries`, with the weather tool enabled in
+    /// `toolCallingMode`.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func request(
-        _ entries: [Transcript.Entry], reasoningLevel: ContextOptions.ReasoningLevel?
+        _ entries: [Transcript.Entry], reasoningLevel: ContextOptions.ReasoningLevel?,
+        toolCallingMode: GenerationOptions.ToolCallingMode = .allowed
     ) -> LanguageModelExecutorGenerationRequest {
         makeExecutorRequest(
             transcript: Transcript(entries: entries), enabledTools: [weatherTool],
+            generationOptions: GenerationOptions(
+                samplingMode: .greedy, toolCallingMode: toolCallingMode),
             contextOptions: ContextOptions(reasoningLevel: reasoningLevel))
     }
 
@@ -235,6 +241,93 @@ struct InklingExecutorToolLoopTests {
             InklingFrameTokenizer.effortPrefix + InklingReasoningProtocol.thinkingOffEffort)
         #expect(render.contains(effortNone))
         #expect(pass.responseText == Self.loop.answer)
+    }
+
+    // MARK: - Required tool mode
+
+    /// The arguments of the weather call for Rome, as the executor streams them.
+    private static let romeArguments = #"{"\#(InklingWeatherToolLoop.cityArgument)":"Rome"}"#
+
+    /// A required pass of a fresh session of a model that writes `rounds`.
+    ///
+    /// - Parameters:
+    ///   - rounds: the tokens each generation of the pass writes, in order.
+    ///   - capabilities: the capabilities the model declares.
+    ///   - reasoningLevel: the reasoning level of the request.
+    ///   - toolCallFormat: the tool-call format of the model.
+    /// - Returns: what the pass streamed.
+    /// - Throws: the error of the executor.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func respondRequired(
+        rounds: [[Int]], capabilities: [LanguageModelCapabilities.Capability],
+        reasoningLevel: ContextOptions.ReasoningLevel?, toolCallFormat: ToolCallFormat = .inkling
+    ) async throws -> ScriptedPassResult {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let model = makeModel(
+            rounds: rounds, capabilities: capabilities, weights: weights,
+            toolCallFormat: toolCallFormat)
+        let store = PromptCacheTestStore.withoutWrites(folderNamed: "InklingExecutorToolLoop")
+        return try await ScriptedExecutorPass.respond(
+            to: request(
+                firstEntries(sessionID: "inkling-required-\(UUID().uuidString)"),
+                reasoningLevel: reasoningLevel, toolCallingMode: .required),
+            model: model, inside: store)
+    }
+
+    @Test(
+        "a required pass that thinks reasons inside the thinking frame, then calls in the tool frame"
+    )
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aRequiredPassThinksThenCallsInTheToolFrame() async throws {
+        // The turn opens the thinking frame, thus the reasoning phase writes the thinking and
+        // closes the frame; the guided phase writes the tool frame.
+        let thinking =
+            [Self.tokenizer.token(Self.loop.reasoning)]
+            + Self.loop.tokens(.endMessage)
+        let call = Self.loop.callFrame("Rome") + Self.loop.tokens(.endSampling)
+
+        let pass = try await Self.respondRequired(
+            rounds: [thinking, call], capabilities: [.reasoning, .toolCalling],
+            reasoningLevel: .moderate)
+
+        #expect(pass.reasoningText == Self.loop.reasoning)
+        #expect(pass.toolCallNames == [InklingWeatherToolLoop.toolName])
+        #expect(pass.toolCallArguments == [Self.romeArguments])
+        #expect(pass.responseText.isEmpty)
+    }
+
+    @Test("a required pass without reasoning calls in the tool frame")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aRequiredPassWithoutReasoningCallsInTheToolFrame() async throws {
+        let pass = try await Self.respondRequired(
+            rounds: [Self.loop.callFrame("Rome") + Self.loop.tokens(.endSampling)],
+            capabilities: [.toolCalling], reasoningLevel: nil)
+
+        #expect(pass.reasoningText.isEmpty)
+        #expect(pass.toolCallNames == [InklingWeatherToolLoop.toolName])
+        #expect(pass.toolCallArguments == [Self.romeArguments])
+        #expect(pass.responseText.isEmpty)
+    }
+
+    @Test(
+        "a required pass of a frame protocol without a required frame throws before it generates",
+        arguments: [ToolCallFormat.gptOSS, .atem])
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aRequiredPassOfAnUnsupportedFrameProtocolThrows(format: ToolCallFormat) async throws {
+        do {
+            let pass = try await Self.respondRequired(
+                rounds: [Self.loop.callFrame("Rome")], capabilities: [.toolCalling],
+                reasoningLevel: nil, toolCallFormat: format)
+            Issue.record("expected a refusal, the pass called \(pass.toolCallNames)")
+        } catch let error as LanguageModelError {
+            guard case .unsupportedCapability(let unsupported) = error else {
+                Issue.record("unexpected error \(error)")
+                return
+            }
+            #expect(unsupported.capability == .toolCalling)
+            #expect(unsupported.debugDescription.contains(format.rawValue))
+        }
     }
 }
 
