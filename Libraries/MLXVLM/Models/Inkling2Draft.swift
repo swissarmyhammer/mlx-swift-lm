@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
+import os
 
 // The DSpark block drafter that Inkling 2 checkpoints ship in `mtp.safetensors`, after the oMLX
 // reference (`omlx/patches/inkling2/dspark.py` and the batched forward of
@@ -155,6 +156,9 @@ extension Inkling2DraftConfiguration: ModelConfigurationValidating {
 
 // MARK: - Modules
 
+/// The axis of the taps of `[B, L, T, D]` tap rows.
+private let tapAxis = 2
+
 /// The softmax-weighted sum of the target taps of each row, RMS-normalized in float32.
 ///
 /// - Parameters:
@@ -166,13 +170,21 @@ extension Inkling2DraftConfiguration: ModelConfigurationValidating {
 private func mixedTaps(_ taps: MLXArray, weights: MLXArray, normWeight: MLXArray, eps: Float)
     -> MLXArray
 {
-    let (b, l, width) = (taps.dim(0), taps.dim(1), taps.dim(2))
+    let (b, l, width) = (taps.dim(0), taps.dim(1), taps.dim(-1))
     let count = weights.dim(0)
     let rows = taps.reshaped(b, l, count, width / count).asType(.float32)
-    let mixed = (rows * weights.asType(.float32).expandedDimensions(axis: -1)).sum(axis: 2)
+    let mixed = (rows * weights.asType(.float32).expandedDimensions(axis: -1)).sum(axis: tapAxis)
     return MLXFast.rmsNorm(mixed, weight: normWeight.asType(.float32), eps: eps)
         .asType(taps.dtype)
 }
+
+/// The exponent of the attention scale, `headDim^(-1/2)`.
+private let attentionScaleExponent: Float = -0.5
+
+/// The axis of the positions of `[B, H, L, D]` heads, along which the context precedes the block.
+/// It is the axis of the heads of `[B, L, H, D]` rows, so swapping it with axis 1 turns rows into
+/// heads and heads into rows.
+private let headPositionAxis = 2
 
 private final class Inkling2DraftAttention: Module {
     @ModuleInfo(key: "q_proj") var queryProjection: Linear
@@ -194,7 +206,7 @@ private final class Inkling2DraftAttention: Module {
         let (dims, headDim) = (config.hiddenSize, config.headDim)
         heads = config.attentionHeads
         kvHeads = config.kvHeads
-        scale = pow(Float(headDim), -0.5)
+        scale = pow(Float(headDim), attentionScaleExponent)
         rope = RoPE(dimensions: headDim, traditional: false, base: config.ropeTheta)
         _queryProjection.wrappedValue = Linear(dims, heads * headDim, bias: false)
         _keyProjection.wrappedValue = Linear(dims, kvHeads * headDim, bias: false)
@@ -210,7 +222,7 @@ private final class Inkling2DraftAttention: Module {
 
     /// `[B, L, H * D]` as `[B, H, L, D]`.
     private func heads(_ x: MLXArray, count: Int) -> MLXArray {
-        x.reshaped(x.dim(0), x.dim(1), count, -1).transposed(0, 2, 1, 3)
+        x.reshaped(x.dim(0), x.dim(1), count, -1).swappedAxes(1, headPositionAxis)
     }
 
     /// The context keys, rotated to their positions, and values of mixed tap rows.
@@ -239,12 +251,13 @@ private final class Inkling2DraftAttention: Module {
         var keys = rope(keyNorm(heads(keyProjection(x), count: kvHeads)), offset: position)
         var values = heads(valueProjection(x), count: kvHeads)
         if let context {
-            keys = concatenated([context.0.asType(keys.dtype), keys], axis: 2)
-            values = concatenated([context.1.asType(values.dtype), values], axis: 2)
+            keys = concatenated([context.0.asType(keys.dtype), keys], axis: headPositionAxis)
+            values = concatenated(
+                [context.1.asType(values.dtype), values], axis: headPositionAxis)
         }
         let attended = MLXFast.scaledDotProductAttention(
             queries: queries, keys: keys, values: values, scale: scale, mask: .none)
-        return outputProjection(attended.transposed(0, 2, 1, 3).reshaped(b, l, -1))
+        return outputProjection(attended.swappedAxes(1, headPositionAxis).reshaped(b, l, -1))
     }
 }
 
@@ -361,9 +374,9 @@ private final class Inkling2DraftMarkovHead: Module {
 /// a step reads a `[V, rank]` matrix rather than the whole vocabulary projection.
 ///
 /// The fold depends on the target, thus the drafter computes it on the first block it drafts for
-/// a target and keeps it for that target. `lock` guards `projection`, so that streams that share
-/// the drafter compute the fold once.
-private final class Inkling2DraftFold: @unchecked Sendable {
+/// a target and keeps it for that target. One lock holds the fold, so that streams that share the
+/// drafter compute it once.
+private final class Inkling2DraftFold: Sendable {
     /// The fold of one target.
     struct Projection {
         /// The target's vocabulary projection the fold belongs to.
@@ -374,12 +387,12 @@ private final class Inkling2DraftFold: @unchecked Sendable {
         let bias: MLXArray
     }
 
-    private let lock = NSLock()
-    private var projection: Projection?
+    /// The fold of the last target, which only the lock reads and writes.
+    private let projection = OSAllocatedUnfairLock<Projection?>(uncheckedState: nil)
 
     /// The fold for `head`, computed by `make` when the drafter holds none for it.
     func projection(for head: Linear, make: () -> (MLXArray, MLXArray)) -> Projection {
-        lock.withLock {
+        projection.withLockUnchecked { projection in
             if let projection, projection.head === head {
                 return projection
             }
@@ -584,7 +597,7 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
         var state = MLXArray.zeros(
             [anchor.dim(0), markovHead.rank], dtype: draftHidden.dtype)
         var previous = anchor[0..., 0]
-        var tokens = [MLXArray]()
+        var tokens: [MLXArray] = []
         for step in 0 ..< draftHidden.dim(1) {
             let latent: MLXArray
             (state, latent) = markovHead.step(
@@ -628,16 +641,14 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
             let bias =
                 projection.bias.map { $0.asType(.float32) } ?? MLXArray.zeros([weight.dim(0)])
             let dtype = projection.weight.dtype
-            var weights = [MLXArray]()
-            var biases = [MLXArray]()
-            for start in stride(from: 0, to: vocabulary, by: Self.foldRowsPerChunk) {
+            let chunks = stride(from: 0, to: vocabulary, by: Self.foldRowsPerChunk).map { start in
                 let rows = denseRows(
                     of: head, start ..< Swift.min(start + Self.foldRowsPerChunk, vocabulary))
-                weights.append(matmul(rows, weight).asType(dtype))
-                biases.append(matmul(rows, bias).asType(dtype))
-                eval(weights[weights.count - 1], biases[biases.count - 1])
+                let chunk = (matmul(rows, weight).asType(dtype), matmul(rows, bias).asType(dtype))
+                eval(chunk.0, chunk.1)
+                return chunk
             }
-            return (concatenated(weights), concatenated(biases))
+            return (concatenated(chunks.map(\.0)), concatenated(chunks.map(\.1)))
         }
     }
 
@@ -663,13 +674,10 @@ public final class Inkling2DraftModel: Module, ResumableMTPDrafterModel {
 
     /// Throws when ``isCompatible(with:)`` does not hold for `target`.
     public func validateCompatibility(with target: any LanguageModel) throws {
-        guard isCompatible(with: target) else {
-            throw MTPDrafterCompatibilityError.incompatibleTarget(
-                drafter: "Inkling2DraftModel",
-                expected: "an Inkling 2 target with the drafter's hidden size, vocabulary and "
-                    + "layer visits",
-                actual: String(describing: type(of: target)))
-        }
+        try requireCompatibleTarget(
+            target,
+            expected: "an Inkling 2 target with the drafter's hidden size, vocabulary and layer "
+                + "visits")
     }
 
     /// Whether `target` is the Inkling 2 model the drafter was trained on: the same hidden size,
@@ -710,21 +718,10 @@ public enum Inkling2DraftRegistration {
 
     /// Registers the drafter for both Inkling 2 model types with the shared drafter registry.
     public static func register() async {
-        for modelType in modelTypes {
-            await MTPDrafterTypeRegistry.shared.registerModelType(
-                modelType,
-                matches: { data in
-                    let draft = try? JSONDecoder.json5().decode(
-                        Inkling2DraftConfiguration.self, from: data)
-                    return draft?.draft.markovHeadType == Inkling2DraftConfiguration.markovHeadType
-                },
-                creator: { data in
-                    let configuration = try JSONDecoder.json5().decode(
-                        Inkling2DraftConfiguration.self, from: data)
-                    try configuration.validateModelConfiguration()
-                    return Inkling2DraftModel(configuration)
-                })
-        }
+        await MTPDrafterTypeRegistry.shared.registerDrafter(
+            modelTypes: modelTypes, configuration: Inkling2DraftConfiguration.self,
+            matches: { $0.draft.markovHeadType == Inkling2DraftConfiguration.markovHeadType },
+            create: { Inkling2DraftModel($0) })
     }
 }
 

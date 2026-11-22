@@ -130,6 +130,32 @@ private func maxDifference(_ a: MLXArray, _ b: MLXArray) -> Float {
     abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
 }
 
+/// The rows of each router logits call.
+private let routerLogitsRows = 3
+
+/// An input width the router logits kernel reads in whole `float4` vectors, and one it does not.
+private let routerAlignedWidth = 128
+private let routerUnalignedWidth = 6
+
+/// An expert count that fills whole router logits threadgroups, and one that does not.
+private let routerAlignedExperts = 16
+private let routerUnalignedExperts = 5
+
+/// The rows, input width and experts of the router logits shapes: one the kernel reads as it
+/// is, one whose width is not a whole number of `float4` reads, and one whose experts do not
+/// fill whole threadgroups.
+private let routerLogitsShapes = [
+    (routerLogitsRows, routerAlignedWidth, routerAlignedExperts),
+    (routerLogitsRows, routerUnalignedWidth, routerAlignedExperts),
+    (routerLogitsRows, routerAlignedWidth, routerUnalignedExperts),
+]
+
+/// The largest difference of the router logits from a float32 matmul.
+private let routerLogitsTolerance: Float = 1e-4
+
+/// The random seed of the router logits inputs.
+private let routerLogitsSeed: UInt64 = 5
+
 @Suite("Inkling2 kernels")
 struct Inkling2KernelTests {
 
@@ -259,6 +285,17 @@ struct Inkling2KernelTests {
         #expect(
             indices.asType(.int32).asArray(Int32.self) == order.asType(.int32).asArray(Int32.self))
         #expect(maxDifference(weights, expected) < 1e-5)
+    }
+
+    @Test(
+        "Router logits equal the float32 matmul at any width and expert count",
+        arguments: routerLogitsShapes)
+    func routerLogits(rows: Int, width: Int, experts: Int) {
+        MLXRandom.seed(routerLogitsSeed)
+        let x = MLXRandom.normal([rows, width])
+        let weight = MLXRandom.normal([experts, width])
+        let logits = inkling2RouterLogits(x, weight: weight)
+        #expect(maxDifference(logits, matmul(x, weight.transposed())) < routerLogitsTolerance)
     }
 
     @Test(

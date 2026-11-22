@@ -126,6 +126,25 @@ extension MTPDrafterModel {
     public var requiresPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }
     public var targetLayerIds: [Int]? { nil }
+
+    /// Throws ``MTPDrafterCompatibilityError/incompatibleTarget(drafter:expected:actual:)``,
+    /// naming the drafter and the type of `target`, when ``isCompatible(with:)`` does not hold for
+    /// `target`.
+    ///
+    /// A drafter that answers ``isCompatible(with:)`` itself implements
+    /// ``validateCompatibility(with:)`` with this; the default ``isCompatible(with:)`` calls
+    /// ``validateCompatibility(with:)``, so a drafter that keeps the default must not.
+    ///
+    /// - Parameters:
+    ///   - target: The model to draft for.
+    ///   - expected: The target the drafter needs, as the error describes it.
+    public func requireCompatibleTarget(_ target: any LanguageModel, expected: String) throws {
+        guard isCompatible(with: target) else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: String(describing: type(of: self)), expected: expected,
+                actual: String(describing: type(of: target)))
+        }
+    }
 }
 
 /// Target-side capability for rewinding an in-place speculative verify pass.

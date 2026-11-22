@@ -46,7 +46,19 @@ private let tinyDraftJSON = """
     """
 
 /// The feature taps of the tiny drafter.
+// swiftlint:disable:next no_magic_numbers the taps tinyDraftJSON names, which the tests compare with what the target and the drafter read
 private let tinyTaps = [1, 3, 5, 8]
+
+/// The random seed of the tiny drafter's weights.
+private let tinyDrafterSeed: UInt64 = 11
+
+/// The scale of the tiny drafter's random normal weights.
+private let tinyDrafterWeightScale: Float = 0.3
+
+/// The step between the tokens of a test prompt, and the first token: a prompt walks the tiny
+/// vocabulary rather than repeating one token.
+private let promptTokenStride = 7
+private let promptTokenOffset = 3
 
 /// The hidden size of the tiny target and drafter.
 private let tinyHidden = 64
@@ -56,6 +68,9 @@ private let tinyVocabulary = 48
 
 /// The total verify block of the tiny drafter: the anchor and three drafts.
 private let tinyBlock = 4
+
+/// The convolutions of each layer visit of the target, thus the slots of its convolution cache.
+private let convolutionSlots = 4
 
 /// The largest logit difference after a float32 rewind and a replay of the kept tokens.
 private let float32RewindTolerance: Float = 1e-3
@@ -75,11 +90,11 @@ private func tinyTarget() throws -> Inkling2 {
 /// A tiny drafter with random weights.
 private func tinyDrafter() throws -> Inkling2DraftModel {
     let drafter = Inkling2DraftModel(try tinyDraftConfiguration())
-    MLXRandom.seed(11)
-    var parameters = [String: MLXArray]()
-    for (key, value) in drafter.parameters().flattened() {
-        parameters[key] = MLXRandom.normal(value.shape) * 0.3
-    }
+    MLXRandom.seed(tinyDrafterSeed)
+    let parameters = Dictionary(
+        uniqueKeysWithValues: drafter.parameters().flattened().map { key, value in
+            (key, MLXRandom.normal(value.shape) * tinyDrafterWeightScale)
+        })
     try drafter.update(
         parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
     eval(drafter)
@@ -88,7 +103,9 @@ private func tinyDrafter() throws -> Inkling2DraftModel {
 
 /// A prompt of `count` tokens of the tiny vocabulary.
 private func prompt(_ count: Int) -> MLXArray {
-    MLXArray((0 ..< count).map { Int32(($0 * 7 + 3) % tinyVocabulary) }).reshaped(1, -1)
+    MLXArray(
+        (0 ..< count).map { Int32(($0 * promptTokenStride + promptTokenOffset) % tinyVocabulary) }
+    ).reshaped(1, -1)
 }
 
 /// A state that asks the target for the drafter taps.
@@ -179,6 +196,45 @@ struct Inkling2DraftLoadingTests {
     func registry() {
         #expect(MTPDrafterRegistry.shared.contains(id: "mlx-community/Inkling-2-Mini-oQ4e-mtp"))
     }
+
+    @Test("A target the drafter cannot draft for throws the drafter, the expectation and the type")
+    func incompatibleTargetThrows() throws {
+        let drafter = Inkling2DraftModel(try tinyDraftConfiguration())
+        let target = PrefillStepRecordingModel(ownDefaultStepSize: nil)
+        #expect(
+            throws: MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: "Inkling2DraftModel", expected: "a test target",
+                actual: "PrefillStepRecordingModel")
+        ) {
+            try drafter.requireCompatibleTarget(target, expected: "a test target")
+        }
+    }
+
+    @Test("A registered drafter configuration builds the drafter its predicate accepts")
+    func registeredConfigurationBuildsTheDrafter() async throws {
+        let registry = ModelTypeRegistry<any MTPDrafterModel>()
+        await registry.registerDrafter(
+            modelTypes: Inkling2DraftRegistration.modelTypes,
+            configuration: Inkling2DraftConfiguration.self,
+            matches: { $0.draft.markovHeadType == Inkling2DraftConfiguration.markovHeadType },
+            create: { Inkling2DraftModel($0) })
+        let drafter = try await registry.createModel(
+            configuration: Data(tinyDraftJSON.utf8), modelType: "inkling2_loop")
+        #expect(drafter is Inkling2DraftModel)
+    }
+
+    @Test("A registered drafter configuration its predicate rejects builds no drafter")
+    func rejectedConfigurationBuildsNoDrafter() async throws {
+        let registry = ModelTypeRegistry<any MTPDrafterModel>()
+        await registry.registerDrafter(
+            modelTypes: Inkling2DraftRegistration.modelTypes,
+            configuration: Inkling2DraftConfiguration.self, matches: { _ in false },
+            create: { Inkling2DraftModel($0) })
+        await #expect(throws: (any Error).self) {
+            _ = try await registry.createModel(
+                configuration: Data(tinyDraftJSON.utf8), modelType: "inkling2_loop")
+        }
+    }
 }
 
 // MARK: - Target taps and rewind
@@ -256,6 +312,26 @@ struct Inkling2DraftTargetTests {
         let verify = target(tokens[0..., promptLength...], cache: verified)
 
         #expect(maxDifference(verify, concatenated(steps, axis: 1)) == 0)
+    }
+
+    @Test("A pass through the decode kernels leaves an ArraysCache states of their own")
+    func sequentialDecodeCopiesPlainConvolutionStates() throws {
+        let target = try Inkling2ModelTests.makeModel(bfloat16: true, json: tinyDraftJSON)
+        let cache: [KVCache] = try target.newCache(parameters: nil).map { entry in
+            let list = try #require(entry as? CacheList)
+            return CacheList(list.children[0], ArraysCache(size: convolutionSlots))
+        }
+        _ = target(prompt(tinyBlock), cache: cache)
+        eval(target(prompt(tinyBlock), cache: cache))
+
+        let states = cache.compactMap { ($0 as? CacheList)?.children[1] as? ArraysCache }
+            .flatMap { convolution in (0 ..< convolutionSlots).compactMap { convolution[$0] } }
+        #expect(!states.isEmpty)
+        // A view of a longer window steps over the window's rows from one batch row to the next.
+        for state in states {
+            let batchStride = state.asData(access: .noCopy).strides[0]
+            #expect(batchStride <= state.dim(1) * state.dim(-1))
+        }
     }
 
     @Test(

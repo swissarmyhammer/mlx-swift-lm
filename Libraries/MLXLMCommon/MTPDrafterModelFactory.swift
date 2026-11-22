@@ -26,6 +26,40 @@ public enum MTPDrafterTypeRegistry {
     public static let visionLanguage: ModelTypeRegistry<any MTPDrafterModel> = .init()
 }
 
+extension ModelTypeRegistry where T == any MTPDrafterModel {
+    /// Registers a drafter for each of `modelTypes`, read from a `config.json` that decodes as
+    /// `Configuration`.
+    ///
+    /// A `config.json` matches when it decodes and `matches` holds for its configuration. The
+    /// creator decodes it, validates it and builds the drafter from it, so that every drafter
+    /// registered this way reads its configuration the same way.
+    ///
+    /// - Parameters:
+    ///   - modelTypes: The `model_type` values of the checkpoints that ship the drafter.
+    ///   - configuration: The configuration the drafter is built from.
+    ///   - matches: Whether a decoded configuration is one of this drafter.
+    ///   - create: The drafter of a validated configuration.
+    public func registerDrafter<Configuration: Decodable & ModelConfigurationValidating>(
+        modelTypes: [String], configuration: Configuration.Type,
+        matches: @escaping (Configuration) -> Bool,
+        create: @escaping (Configuration) -> any MTPDrafterModel
+    ) {
+        for modelType in modelTypes {
+            registerModelType(
+                modelType,
+                matches: { data in
+                    (try? JSONDecoder.json5().decode(Configuration.self, from: data))
+                        .map(matches) ?? false
+                },
+                creator: { data in
+                    let decoded = try JSONDecoder.json5().decode(Configuration.self, from: data)
+                    try decoded.validateModelConfiguration()
+                    return create(decoded)
+                })
+        }
+    }
+}
+
 /// Registry of model id (e.g. `"mlx-community/gemma-4-31B-it-assistant-bf16"`)
 /// to ``ModelConfiguration``. Drafters don't have prompts, so the
 /// configurations omit `defaultPrompt`.

@@ -87,6 +87,9 @@ public struct Inkling2TextConfiguration: Codable, Sendable {
         case loop = "loop_config"
     }
 
+    /// The taps of the short convolutions, for a `text_config` that leaves them out.
+    private static let defaultConvolutionKernelSize = 4
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
@@ -107,10 +110,12 @@ public struct Inkling2TextConfiguration: Codable, Sendable {
         relativeExtent = try c.decode(Int.self, forKey: .relativeExtent)
         logScalingFloor = try c.decode(Int.self, forKey: .logScalingFloor)
         logScalingAlpha = try c.decode(Float.self, forKey: .logScalingAlpha)
-        rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+        rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? normEpsilon
         qkClipThreshold = try c.decode(Float.self, forKey: .qkClipThreshold)
         relativeClipThreshold = try c.decode(Float.self, forKey: .relativeClipThreshold)
-        convolutionKernelSize = try c.decodeIfPresent(Int.self, forKey: .convolutionKernelSize) ?? 4
+        convolutionKernelSize =
+            try c.decodeIfPresent(Int.self, forKey: .convolutionKernelSize)
+            ?? Self.defaultConvolutionKernelSize
         layersPerBlock = try c.decode(Int.self, forKey: .layersPerBlock)
         experts = try c.decode(Int.self, forKey: .experts)
         expertsPerToken = try c.decode(Int.self, forKey: .expertsPerToken)
@@ -162,19 +167,43 @@ public struct Inkling2VisionConfiguration: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        hiddenSize = try c.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 1024
-        hiddenLayers = try c.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? 23
-        attentionHeads = try c.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? 16
-        patchSize = try c.decodeIfPresent(Int.self, forKey: .patchSize) ?? 20
-        mergeSize = try c.decodeIfPresent(Int.self, forKey: .mergeSize) ?? 2
-        positionGridSize = try c.decodeIfPresent(Int.self, forKey: .positionGridSize) ?? 32
+        let defaults = Self.defaults
+        hiddenSize = try c.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? defaults.hiddenSize
+        hiddenLayers =
+            try c.decodeIfPresent(Int.self, forKey: .hiddenLayers) ?? defaults.hiddenLayers
+        attentionHeads =
+            try c.decodeIfPresent(Int.self, forKey: .attentionHeads) ?? defaults.attentionHeads
+        patchSize = try c.decodeIfPresent(Int.self, forKey: .patchSize) ?? defaults.patchSize
+        mergeSize = try c.decodeIfPresent(Int.self, forKey: .mergeSize) ?? defaults.mergeSize
+        positionGridSize =
+            try c.decodeIfPresent(Int.self, forKey: .positionGridSize)
+            ?? defaults.positionGridSize
         projectionHiddenSize =
-            try c.decodeIfPresent(Int.self, forKey: .projectionHiddenSize) ?? 4096
+            try c.decodeIfPresent(Int.self, forKey: .projectionHiddenSize)
+            ?? defaults.projectionHiddenSize
         projectorBias = try c.decodeIfPresent(Bool.self, forKey: .projectorBias) ?? false
-        mlpRatio = try c.decodeIfPresent(Float.self, forKey: .mlpRatio) ?? 4
-        layerNormEps = try c.decodeIfPresent(Float.self, forKey: .layerNormEps) ?? 1e-5
-        ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10000
+        mlpRatio = try c.decodeIfPresent(Float.self, forKey: .mlpRatio) ?? defaults.mlpRatio
+        layerNormEps =
+            try c.decodeIfPresent(Float.self, forKey: .layerNormEps) ?? defaults.layerNormEps
+        ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? defaults.ropeTheta
     }
+
+    /// The settings of the Inkling 2 vision tower, for a `vision_config` that leaves one out.
+    private struct Defaults {
+        let hiddenSize = 1024
+        let hiddenLayers = 23
+        let attentionHeads = 16
+        let patchSize = 20
+        let mergeSize = 2
+        let positionGridSize = 32
+        let projectionHiddenSize = 4096
+        let mlpRatio: Float = 4
+        let layerNormEps: Float = 1e-5
+        let ropeTheta: Float = 10_000
+    }
+
+    /// The settings of the Inkling 2 vision tower.
+    private static let defaults = Defaults()
 
     var headDim: Int { hiddenSize / attentionHeads }
     var intermediateSize: Int { Int(Float(hiddenSize) * mlpRatio) }
@@ -198,30 +227,112 @@ public struct Inkling2Configuration: Codable, Sendable {
         case mtpConfiguration = "mtp_config"
     }
 
+    /// The image token of the Inkling 2 tokenizer, for a `config.json` that leaves it out.
+    private static let defaultImageTokenId = 200_054
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         modelType = try c.decode(String.self, forKey: .modelType)
         textConfiguration = try c.decode(Inkling2TextConfiguration.self, forKey: .textConfiguration)
         visionConfiguration = try c.decodeIfPresent(
             Inkling2VisionConfiguration.self, forKey: .visionConfiguration)
-        imageTokenId = try c.decodeIfPresent(Int.self, forKey: .imageTokenId) ?? 200054
+        imageTokenId =
+            try c.decodeIfPresent(Int.self, forKey: .imageTokenId) ?? Self.defaultImageTokenId
         mtpConfiguration = try c.decodeIfPresent(
             Inkling2MTPConfiguration.self, forKey: .mtpConfiguration)
     }
 }
 
+// MARK: - Shared constants
+
+/// The epsilon of the RMS norms and of the L2 clips.
+private let normEpsilon: Float = 1e-6
+
+/// The epsilon that keeps the sum of the routed expert weights above zero.
+private let routeWeightEpsilon: Float = 1e-20
+
+/// The axis of the positions of `[B, H, L, D]` heads. It is the axis of the heads of
+/// `[B, L, H, D]` rows, so swapping it with axis 1 turns rows into heads and heads into rows.
+private let headPositionAxis = 2
+
+/// The axis of the rows of a batch of matrices `[..., R, C]`.
+private let matrixRowAxis = -2
+
+/// The messages of each loop core layer, in the order of the message bank: the query, key and
+/// value messages of the attention, then the message of the MLP.
+private enum LayerMessage {
+    static let query = 0
+    static let key = 1
+    static let value = 2
+    static let mlp = 3
+    /// The messages of the attention.
+    static let attentionCount = 3
+    /// The messages of one layer.
+    static let count = 4
+}
+
+/// The slots of the convolution cache of each layer visit.
+private enum ConvolutionSlot {
+    static let key = 0
+    static let value = 1
+    static let attention = 2
+    static let mlp = 3
+    /// The convolutions of one layer visit.
+    static let count = 4
+}
+
+/// The three arrays of `arrays`, in order.
+private func unpacked(_ arrays: [MLXArray]) -> (MLXArray, MLXArray, MLXArray) {
+    var rest = arrays[...]
+    let values = (rest.removeFirst(), rest.removeFirst(), rest.removeFirst())
+    precondition(rest.isEmpty, "more arrays than the tuple holds")
+    return values
+}
+
+/// The four arrays of `arrays`, in order.
+private func unpacked(_ arrays: [MLXArray]) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
+    var rest = arrays[...]
+    let values = (rest.removeFirst(), rest.removeFirst(), rest.removeFirst(), rest.removeFirst())
+    precondition(rest.isEmpty, "more arrays than the tuple holds")
+    return values
+}
+
+/// The five arrays of `arrays`, in order.
+private func unpacked(_ arrays: [MLXArray]) -> (MLXArray, MLXArray, MLXArray, MLXArray, MLXArray) {
+    var rest = arrays[...]
+    let values = (
+        rest.removeFirst(), rest.removeFirst(), rest.removeFirst(), rest.removeFirst(),
+        rest.removeFirst()
+    )
+    precondition(rest.isEmpty, "more arrays than the tuple holds")
+    return values
+}
+
+/// The six arrays of `arrays`, in order.
+private func unpacked(_ arrays: [MLXArray]) -> (
+    MLXArray, MLXArray, MLXArray, MLXArray, MLXArray, MLXArray
+) {
+    var rest = arrays[...]
+    let values = (
+        rest.removeFirst(), rest.removeFirst(), rest.removeFirst(), rest.removeFirst(),
+        rest.removeFirst(), rest.removeFirst()
+    )
+    precondition(rest.isEmpty, "more arrays than the tuple holds")
+    return values
+}
+
 // MARK: - Fused element-wise helpers
 
-private func unweightedRMSNorm(_ x: MLXArray, eps: Float = 1e-6) -> MLXArray {
+private func unweightedRMSNorm(_ x: MLXArray, eps: Float = normEpsilon) -> MLXArray {
     MLXFast.rmsNorm(x, weight: MLXArray.mlxNone, eps: eps)
 }
 
 /// Clips the L2 norm of each head vector of `x * scale` to `threshold`, in float32.
 private let l2Clip: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: true) { args in
-    let (x, scale, threshold) = (args[0], args[1], args[2])
+    let (x, scale, threshold) = unpacked(args)
     let states = x.asType(.float32) * scale
     let norm = sqrt((states * states).sum(axis: -1, keepDims: true))
-    let clipped = states * minimum(threshold / (norm + 1e-6), 1)
+    let clipped = states * minimum(threshold / (norm + normEpsilon), 1)
     return [clipped.asType(x.dtype)]
 }
 
@@ -229,10 +340,10 @@ private let l2Clip: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: tr
 /// rounds to the input dtype, as the reference does.
 private let l2ClipScaled: @Sendable ([MLXArray]) -> [MLXArray] = compile(shapeless: true) {
     args in
-    let (x, scale, threshold, tau) = (args[0], args[1], args[2], args[3])
+    let (x, scale, threshold, tau) = unpacked(args)
     let states = x.asType(.float32) * scale
     let norm = sqrt((states * states).sum(axis: -1, keepDims: true))
-    let clipped = (states * minimum(threshold / (norm + 1e-6), 1)).asType(x.dtype)
+    let clipped = (states * minimum(threshold / (norm + normEpsilon), 1)).asType(x.dtype)
     return [(clipped.asType(.float32) * tau).asType(x.dtype)]
 }
 
@@ -266,7 +377,7 @@ private func softcappedSwiGLU(gateSoftcap: Float, upSoftcap: Float)
 private let weightedExperts: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
     shapeless: true
 ) { outputs, weights in
-    (outputs.asType(.float32) * weights).sum(axis: -2).asType(outputs.dtype)
+    (outputs.asType(.float32) * weights).sum(axis: matrixRowAxis).asType(outputs.dtype)
 }
 
 /// `residual + x` in float32, rounded to `x`'s dtype.
@@ -342,16 +453,26 @@ private func convolutionWindow(
     return concatenated([state, x], axis: 1)
 }
 
+/// The window length, in states, past which ``convolutionState(_:lengths:count:)`` copies the
+/// state out of the window rather than keeping a view of it.
+private let convolutionStateCopyThreshold = 2
+
 /// The last `kernelSize - 1` rows of each row's window, at its length when the batch is ragged.
+///
+/// A state cut from a window more than ``convolutionStateCopyThreshold`` states long is a copy:
+/// a slice of the window would keep the whole window alive, and so would `contiguous` of the
+/// slice, which shares the window's buffer when the batch holds one row.
 private func convolutionState(_ window: MLXArray, lengths: MLXArray?, count: Int) -> MLXArray {
+    let length = window.dim(1)
     if let lengths {
-        let ends = clip(lengths, min: 0, max: window.dim(1) - count)
+        let ends = clip(lengths, min: 0, max: length - count)
         let positions = (ends[0..., .newAxis] + MLXArray(0 ..< count))[.ellipsis, .newAxis]
         return takeAlong(window, positions.asType(.int32), axis: 1)
     }
-    let state = window[0..., (window.dim(1) - count)..., 0...]
-    // A slice of a prefill window would keep the whole window alive.
-    return window.dim(1) > 2 * count ? contiguous(state) : state
+    guard length > convolutionStateCopyThreshold * count else {
+        return window[0..., (length - count)..., 0...]
+    }
+    return take(window, MLXArray(Int32(length - count) ..< Int32(length)), axis: 1)
 }
 
 /// One decode step of the static convolution, from the `[C, K, 1]` weight: the bfloat16
@@ -359,7 +480,7 @@ private func convolutionState(_ window: MLXArray, lengths: MLXArray?, count: Int
 private func staticConvolutionStep(kernelSize: Int) -> @Sendable ([MLXArray]) -> [MLXArray] {
     let divisor = Float(kernelSize + 1).squareRoot()
     return compile { args in
-        let (window, weight, x) = (args[0], args[1], args[2])
+        let (window, weight, x) = unpacked(args)
         let taps = weight.squeezed(axis: -1).transposed().asType(.float32)
         let out = (window.asType(.float32) * taps).sum(axis: 1, keepDims: true).asType(x.dtype)
         return [((out.asType(.float32) + x.asType(.float32)) / divisor).asType(x.dtype)]
@@ -391,7 +512,7 @@ private func chainedConvolutionStates(_ state: MLXArray, inputs: MLXArray)
     let (rows, length) = (inputs.dim(0), state.dim(1))
     let window = concatenated(
         [state, inputs.reshaped(1, rows, -1).asType(state.dtype)], axis: 1)
-    let channels = window.dim(2)
+    let channels = window.dim(-1)
     // Row i is rows i ..< i + length of the window: overlapping views, then one copy.
     let states = contiguous(
         asStrided(window, [rows, length, channels], strides: [channels, channels, 1]))
@@ -477,7 +598,8 @@ private final class Inkling2ShortConvolution: Module {
     /// Whether a prefill chunk runs through ``inkling2RowConvolution``, which needs every row of
     /// the batch to be valid and returns the next state as the window.
     func usesKernel(mask: MLXArray?) -> Bool {
-        kernelSize == 4 && mask == nil && Device.defaultDevice().deviceType == .gpu
+        kernelSize == staticConvolutionTaps && mask == nil
+            && Device.defaultDevice().deviceType == .gpu
     }
 }
 
@@ -506,9 +628,10 @@ private final class Inkling2DynamicShortConvolution: Module {
         _ x: MLXArray, dynamicWeights: MLXArray, state: MLXArray?, mask: MLXArray?,
         keepsWindow: Bool = false
     ) -> (MLXArray, MLXArray) {
-        let (b, l, c) = (x.dim(0), x.dim(1), x.dim(2))
+        let (b, l, c) = (x.dim(0), x.dim(1), x.dim(-1))
         let k = kernelSize
-        if l > 1, k == 4, mask == nil, Device.defaultDevice().deviceType == .gpu {
+        if l > 1, k == staticConvolutionTaps, mask == nil, Device.defaultDevice().deviceType == .gpu
+        {
             let (output, next) = inkling2RowConvolution(
                 x, state: state, weight: staticWeight, outputType: x.dtype,
                 dynamicTaps: dynamicWeights)
@@ -525,7 +648,8 @@ private final class Inkling2DynamicShortConvolution: Module {
             axis: -1
         ).reshaped(b, l, heads, -1, k)
         let out = (windows.asType(.float32) * weights).sum(axis: -1).reshaped(b, l, c)
-        let divisor = Float(2 * k + 1).squareRoot()
+        // The static and the dynamic taps, and the residual.
+        let divisor = Float(k + k + 1).squareRoot()
         return (((out + x.asType(.float32)) / divisor).asType(x.dtype), window)
     }
 }
@@ -556,7 +680,8 @@ private final class Inkling2MessageInput: Module {
     @ParameterInfo var query: MLXArray
 
     init(dimensions: Int, layers: Int) {
-        self._query.wrappedValue = MLXArray.zeros([layers, 4, dimensions], dtype: .float32)
+        self._query.wrappedValue = MLXArray.zeros(
+            [layers, LayerMessage.count, dimensions], dtype: .float32)
         super.init()
     }
 }
@@ -572,9 +697,11 @@ private func inkling2DepthReadout(
             queriesPerGroup: queriesPerGroup)
     }
     let sources = movedAxis(
-        concatenated([blocks, partial.expandedDimensions(axis: 0)]), source: 0, destination: -2)
-    let weights = softmax(matmul(sources, queries.transposed()) * scale, axis: -2, precise: true)
-    return matmul(weights.swappedAxes(-1, -2), sources)
+        concatenated([blocks, partial.expandedDimensions(axis: 0)]), source: 0,
+        destination: matrixRowAxis)
+    let weights = softmax(
+        matmul(sources, queries.transposed()) * scale, axis: matrixRowAxis, precise: true)
+    return matmul(weights.swappedAxes(-1, matrixRowAxis), sources)
 }
 
 /// Merges a loop message into a sublayer input:
@@ -586,7 +713,7 @@ private final class Inkling2MessageGate: Module {
     @ModuleInfo(key: "message_gate_proj") var gainProj: Linear
 
     init(dimensions: Int, rank: Int) {
-        self._downProj.wrappedValue = Linear(2 * dimensions, rank, bias: false)
+        self._downProj.wrappedValue = Linear(messagePairParts * dimensions, rank, bias: false)
         self._forgetProj.wrappedValue = Linear(rank, dimensions, bias: false)
         self._gainProj.wrappedValue = Linear(rank, dimensions, bias: false)
         super.init()
@@ -601,7 +728,7 @@ private final class Inkling2MessageGate: Module {
 
 private let inkling2MessageMerge: @Sendable ([MLXArray]) -> [MLXArray] = compile {
     args in
-    let (input, message, down, forget, gain) = (args[0], args[1], args[2], args[3], args[4])
+    let (input, message, down, forget, gain) = unpacked(args)
     let states = concatenated(
         [unweightedRMSNorm(input), unweightedRMSNorm(message)], axis: -1)
     let hidden = matmul(states.asType(down.dtype), down.transposed()).asType(.float32)
@@ -634,6 +761,7 @@ private final class Inkling2Attention: Module {
     let window: Int
     let scale: Float
     let isSliding: Bool
+
     let logScalingFloor: Float
     let logScalingAlpha: Float
     let qkThreshold: Float
@@ -722,6 +850,18 @@ private final class Inkling2Attention: Module {
 
     // MARK: Fused projections
 
+    /// The parameter names of the projections a fused query projection holds, in its order.
+    private static let fusedProjectionNames = [
+        "q_proj", "r_proj", "gate_proj", "sink_proj", "k_proj", "v_proj",
+    ]
+
+    /// The projections of `views`, the views of a fused projection, under their names.
+    private static func fusedViews(_ views: [Linear]) -> ModuleChildren {
+        ModuleChildren(
+            values: Dictionary(
+                uniqueKeysWithValues: zip(fusedProjectionNames, views.map { .value($0) })))
+    }
+
     func prepareFusedProjections() throws {
         installingViews = true
         defer { installingViews = false }
@@ -730,15 +870,11 @@ private final class Inkling2Attention: Module {
                 enabled: true,
                 linears: [queryProj, relativeProj, gateProj, sinkProj, keyProj, valueProj]
             ) { views in
-                try update(
-                    modules: ModuleChildren(values: [
-                        "q_proj": .value(views[0]), "r_proj": .value(views[1]),
-                        "gate_proj": .value(views[2]), "sink_proj": .value(views[3]),
-                        "k_proj": .value(views[4]), "v_proj": .value(views[5]),
-                    ]), verify: [])
+                try update(modules: Self.fusedViews(views), verify: [])
             }
             if prepared, let fused = fusedQuery.fused {
-                let rows = ..<(fused.weight.dim(0) - 2 * kvHeads * headDim)
+                let rows =
+                    ..<(fused.weight.dim(0) - keyProj.weight.dim(0) - valueProj.weight.dim(0))
                 queryRows.value = QuantizedLinear(
                     weight: fused.weight[rows], bias: nil, scales: fused.scales[rows],
                     biases: fused.biases?[rows], groupSize: fused.groupSize, bits: fused.bits,
@@ -749,11 +885,7 @@ private final class Inkling2Attention: Module {
         try fusedQuery.prepare(
             enabled: true, linears: [queryProj, relativeProj, gateProj, sinkProj]
         ) { views in
-            try update(
-                modules: ModuleChildren(values: [
-                    "q_proj": .value(views[0]), "r_proj": .value(views[1]),
-                    "gate_proj": .value(views[2]), "sink_proj": .value(views[3]),
-                ]), verify: [])
+            try update(modules: Self.fusedViews(views), verify: [])
         }
         if let convolution = dynamicKeyConvolution {
             try fusedKey.prepare(enabled: true, linears: [keyProj, convolution.weightProj]) {
@@ -829,15 +961,16 @@ private final class Inkling2Attention: Module {
 
         var result: Projections
         if isSliding, sharedInput, let fused = fusedQuery.fused {
-            let parts = split(
-                fused(queryInput), [queryDim, relativeDim, queryDim, heads, kvDim, kvDim])
+            let (queries, relative, gate, sinks, keys, values) = unpacked(
+                split(fused(queryInput), [queryDim, relativeDim, queryDim, heads, kvDim, kvDim]))
             return Projections(
-                queries: parts[0], relative: parts[1], gate: parts[2], sinks: parts[3],
-                keys: parts[4], values: parts[5])
+                queries: queries, relative: relative, gate: gate, sinks: sinks, keys: keys,
+                values: values)
         } else if let fused = isSliding ? queryRows.value : fusedQuery.fused {
-            let parts = split(fused(queryInput), [queryDim, relativeDim, queryDim, heads])
+            let (queries, relative, gate, sinks) = unpacked(
+                split(fused(queryInput), [queryDim, relativeDim, queryDim, heads]))
             result = Projections(
-                queries: parts[0], relative: parts[1], gate: parts[2], sinks: parts[3],
+                queries: queries, relative: relative, gate: gate, sinks: sinks,
                 keys: keyProj(keyInput), values: valueProj(valueInput))
         } else {
             result = Projections(
@@ -872,9 +1005,11 @@ private final class Inkling2Attention: Module {
         if let convolution = convolution as? Inkling2ShortConvolution {
             return convolution(x, state: state, mask: mask, keepsWindow: keepsWindow)
         }
-        let convolution = convolution as! Inkling2DynamicShortConvolution
+        guard let convolution = convolution as? Inkling2DynamicShortConvolution, let taps else {
+            preconditionFailure("A key or value convolution is static, or dynamic with taps")
+        }
         return convolution(
-            x, dynamicWeights: taps!, state: state, mask: mask, keepsWindow: keepsWindow)
+            x, dynamicWeights: taps, state: state, mask: mask, keepsWindow: keepsWindow)
     }
 
     /// - Parameters:
@@ -909,8 +1044,10 @@ private final class Inkling2Attention: Module {
         var k: MLXArray
         var v: MLXArray
         let relative: MLXArray
-        if Device.defaultDevice().deviceType == .gpu, headDim % 32 == 0,
-            relativeLogits.proj.dim(0) <= 32
+        // The prologue kernel gives each lane of a simdgroup a slice of a head and one relative
+        // dimension.
+        if Device.defaultDevice().deviceType == .gpu, headDim.isMultiple(of: metalSimdWidth),
+            relativeLogits.proj.dim(0) <= metalSimdWidth
         {
             let out = inkling2PrefillPrologue(
                 q: projections.queries, r: projections.relative, k: keys, v: values,
@@ -918,7 +1055,7 @@ private final class Inkling2Attention: Module {
                 heads: heads, kvHeads: kvHeads, headDim: headDim,
                 relativeDim: relativeLogits.proj.dim(0), qkThreshold: qkThreshold,
                 relativeThreshold: relativeThreshold)
-            (queries, relative, k, v) = (out[0], out[1], out[2], out[3])
+            (queries, relative, k, v) = unpacked(out)
         } else {
             queries = queryClip(projections.queries.reshaped(b, l, heads, headDim), tau: tau)
             k =
@@ -933,29 +1070,32 @@ private final class Inkling2Attention: Module {
         let gate = projections.gate
         let sinks = projections.sinks
 
-        queries = queries.transposed(0, 2, 1, 3)
-        k = k.transposed(0, 2, 1, 3)
-        v = v.transposed(0, 2, 1, 3)
+        queries = queries.swappedAxes(1, headPositionAxis)
+        k = k.swappedAxes(1, headPositionAxis)
+        v = v.swappedAxes(1, headPositionAxis)
         let output: MLXArray
         if let quantized = cache as? QuantizedKVCacheProtocol {
             let (quantizedKeys, quantizedValues) = quantized.updateQuantized(keys: k, values: v)
-            let s = quantizedKeys.0.dim(-2)
-            func grouped(_ x: MLXArray?) -> MLXArray? { x?.expandedDimensions(axis: 2) }
+            let s = quantizedKeys.0.dim(headPositionAxis)
+            // The query groups of each key head share its keys and values.
+            func grouped(_ x: MLXArray) -> MLXArray {
+                x.expandedDimensions(axis: headPositionAxis)
+            }
             output = referenceAttention(
                 queries: queries, positionBias: positionBias, sinks: sinks,
                 distance: masks.distance(keys: s, queries: l, ringIndex: nil, keep: 0, evicted: 0),
                 scores: { q in
                     quantizedMM(
-                        q, grouped(quantizedKeys.0)!, scales: grouped(quantizedKeys.1)!,
-                        biases: grouped(quantizedKeys.2), transpose: true,
+                        q, grouped(quantizedKeys.0), scales: grouped(quantizedKeys.1),
+                        biases: quantizedKeys.2.map(grouped), transpose: true,
                         groupSize: quantized.groupSize, bits: quantized.bits,
                         mode: quantized.mode
                     ).asType(.float32)
                 },
                 values: { weights in
                     quantizedMM(
-                        weights, grouped(quantizedValues.0)!, scales: grouped(quantizedValues.1)!,
-                        biases: grouped(quantizedValues.2), transpose: false,
+                        weights, grouped(quantizedValues.0), scales: grouped(quantizedValues.1),
+                        biases: quantizedValues.2.map(grouped), transpose: false,
                         groupSize: quantized.groupSize, bits: quantized.bits,
                         mode: quantized.mode)
                 })
@@ -1021,7 +1161,10 @@ private final class Inkling2Attention: Module {
         if let keyConvolution = dynamicKeyConvolution,
             let valueConvolution = dynamicValueConvolution
         {
-            taps = (p.keyTaps!, p.valueTaps!)
+            guard let keyTaps = p.keyTaps, let valueTaps = p.valueTaps else {
+                preconditionFailure("The projection of a dynamic convolution returns its taps")
+            }
+            taps = (keyTaps, valueTaps)
             weights = (keyConvolution.staticWeight, valueConvolution.staticWeight)
             // One scaling per token: a sequence's tokens stand at consecutive positions.
             let positions = sequential ? rows : 1
@@ -1030,8 +1173,9 @@ private final class Inkling2Attention: Module {
                     1 + logScalingAlpha * log(max(Float(offset + step) / logScalingFloor, 1))
                 })
         } else {
-            let keyConvolution = keyConvolution as! Inkling2ShortConvolution
-            let valueConvolution = valueConvolution as! Inkling2ShortConvolution
+            guard let keyConvolution = keyConvolution as? Inkling2ShortConvolution,
+                let valueConvolution = valueConvolution as? Inkling2ShortConvolution
+            else { preconditionFailure("Without dynamic convolutions both are static") }
             weights = (keyConvolution.conv1d.weight, valueConvolution.conv1d.weight)
         }
         let out = inkling2AttentionPrologue(
@@ -1041,28 +1185,34 @@ private final class Inkling2Attention: Module {
             relativeDim: relativeLogits.proj.dim(0), qkThreshold: qkThreshold,
             relativeThreshold: relativeThreshold)
         let rotating = cache as? RotatingKVCache
-        let attention: MLXArray
-        if let windows {
-            // The tokens of one sequence write their keys in order and attend causally.
-            let (keys, values) = cache.update(
-                keys: out[2].transposed(2, 1, 0, 3), values: out[3].transposed(2, 1, 0, 3))
-            attention = inkling2DecodeAttention(
-                q: out[0], k: keys, v: values, relative: out[1], table: relativeLogits.proj,
-                sinks: p.sinks, gate: p.gate, scale: scale, ringIndex: nil, window: window,
-                keep: rotating?.preservedPrefixTokens ?? 0, evicted: offset + rows - keys.dim(2),
-                causalRows: rows)
-            return (
-                outputProj(rowwiseMatvecInput(attention.reshaped(rows, 1, -1))), windows.0,
-                windows.1
+        // The tokens of one sequence write their keys in order and attend causally.
+        let (newKeys, newValues) =
+            windows == nil
+            ? (out[Inkling2PrologueOutput.keys], out[Inkling2PrologueOutput.values])
+            : (
+                // The `[rows, Hkv, 1, DH]` keys of the rows as the `[1, Hkv, rows, DH]` keys of
+                // one sequence.
+                out[Inkling2PrologueOutput.keys].swappedAxes(0, headPositionAxis),
+                out[Inkling2PrologueOutput.values].swappedAxes(0, headPositionAxis)
             )
-        }
-        let (keys, values) = cache.update(keys: out[2], values: out[3])
-        attention = inkling2DecodeAttention(
-            q: out[0], k: keys, v: values, relative: out[1], table: relativeLogits.proj,
-            sinks: p.sinks, gate: p.gate, scale: scale, ringIndex: rotating?.ringWriteIndex,
+        let (keys, values) = cache.update(keys: newKeys, values: newValues)
+        let written = windows == nil ? 1 : rows
+        let attention = inkling2DecodeAttention(
+            q: out[Inkling2PrologueOutput.queries], k: keys, v: values,
+            relative: out[Inkling2PrologueOutput.relative], table: relativeLogits.proj,
+            sinks: p.sinks,
+            gate: p.gate, scale: scale, ringIndex: windows == nil ? rotating?.ringWriteIndex : nil,
             window: window, keep: rotating?.preservedPrefixTokens ?? 0,
-            evicted: offset + 1 - keys.dim(2))
-        return (outputProj(attention.reshaped(rows, 1, -1)), out[4], out[5])
+            evicted: offset + written - keys.dim(headPositionAxis),
+            causalRows: windows == nil ? 0 : rows)
+        let attended = attention.reshaped(rows, 1, -1)
+        if let windows {
+            return (outputProj(rowwiseMatvecInput(attended)), windows.0, windows.1)
+        }
+        return (
+            outputProj(attended), out[Inkling2PrologueOutput.nextKeyState],
+            out[Inkling2PrologueOutput.nextValueState]
+        )
     }
 
     /// Attention with a relative position bias and a sink, `[B, L, H, D]`.
@@ -1070,8 +1220,8 @@ private final class Inkling2Attention: Module {
         queries: MLXArray, keys: MLXArray, values: MLXArray, positionBias: MLXArray,
         sinks: MLXArray, cache: KVCache?, end: Int, masks: Inkling2DecodeMasks
     ) -> MLXArray {
-        let (b, l) = (queries.dim(0), queries.dim(2))
-        let s = keys.dim(2)
+        let (b, l) = (queries.dim(0), queries.dim(headPositionAxis))
+        let s = keys.dim(headPositionAxis)
         let rotating = cache as? RotatingKVCache
         let keep = rotating?.preservedPrefixTokens ?? 0
         let onGPU = Device.defaultDevice().deviceType == .gpu
@@ -1090,9 +1240,12 @@ private final class Inkling2Attention: Module {
             scores: { q in
                 matmul(
                     q.asType(.float32),
-                    keys.asType(.float32).expandedDimensions(axis: 2).swappedAxes(-1, -2))
+                    keys.asType(.float32).expandedDimensions(axis: headPositionAxis)
+                        .swappedAxes(-1, matrixRowAxis))
             },
-            values: { weights in matmul(weights, values.expandedDimensions(axis: 2)) })
+            values: { weights in
+                matmul(weights, values.expandedDimensions(axis: headPositionAxis))
+            })
     }
 
     /// The materialized attention, for prefill off the GPU, batched decode and quantized caches.
@@ -1104,7 +1257,7 @@ private final class Inkling2Attention: Module {
         queries: MLXArray, positionBias: MLXArray, sinks: MLXArray, distance: MLXArray,
         scores: (MLXArray) -> MLXArray, values: (MLXArray) -> MLXArray
     ) -> MLXArray {
-        let (b, l, d) = (queries.dim(0), queries.dim(2), queries.dim(3))
+        let (b, l, d) = (queries.dim(0), queries.dim(headPositionAxis), queries.dim(-1))
         let s = distance.dim(-1)
         let extent = positionBias.dim(-1)
         var visible = distance .>= 0
@@ -1114,23 +1267,24 @@ private final class Inkling2Attention: Module {
         // [B, H, L, S] gather of the bias at each distance.
         let index = broadcast(
             clip(distance, min: 0, max: extent - 1), to: [b, heads, l, s])
-        var bias = takeAlong(positionBias.transposed(0, 2, 1, 3), index, axis: -1)
+        var bias = takeAlong(positionBias.swappedAxes(1, headPositionAxis), index, axis: -1)
         bias = which(distance .< extent, bias.asType(.float32), MLXArray(Float(0)))
         let mask = which(visible, bias, MLXArray(-Float.infinity)).reshaped(
             b, kvHeads, -1, l, s)
 
         let logits = scores(queries.reshaped(b, kvHeads, -1, l, d)) * scale + mask
-        let sinkLogits = sinks.asType(.float32).transposed(0, 2, 1).reshaped(b, kvHeads, -1, l, 1)
+        let sinkLogits = sinks.asType(.float32).swappedAxes(1, -1)
+            .reshaped(b, kvHeads, -1, l, 1)
         let weights = softmax(concatenated([logits, sinkLogits], axis: -1), axis: -1)[
             .ellipsis, ..<s]
         let output = values(weights.asType(queries.dtype))
-        return output.reshaped(b, heads, l, d).transposed(0, 2, 1, 3)
+        return output.reshaped(b, heads, l, d).swappedAxes(1, headPositionAxis)
     }
 }
 
 /// The key distances of one forward pass, shared by the layers whose caches agree.
 final class Inkling2DecodeMasks {
-    private var distances = [String: MLXArray]()
+    private var distances: [String: MLXArray] = [:]
 
     /// int32 `[L, S]` (`[S]` for one query): each query's distance to each key.
     ///
@@ -1173,7 +1327,7 @@ private final class Inkling2ExpertProjection: Module {
 
     init(experts: Int, inputDims: Int, outputDims: Int, format: Inkling2ExpertFormat) {
         self.format = format
-        let packed = inputDims * format.bits / 32
+        let packed = inputDims * format.bits / UInt32.bitWidth
         let groups = inputDims / format.groupSize
         self._weight.wrappedValue = MLXArray.zeros([experts, outputDims, packed], dtype: .uint32)
         let scaleType: DType = format.mode == .affine ? .bfloat16 : .uint8
@@ -1211,8 +1365,16 @@ struct Inkling2ExpertFormat: Equatable, Sendable {
     let groupSize: Int
     let hasGlobalScale: Bool
 
+    /// The bits of the 4-bit and the 8-bit formats.
+    private static let fourBits = 4
+    private static let eightBits = 8
+
+    /// The group sizes of the NVIDIA and the OCP microscaled formats.
+    private static let nvfp4GroupSize = 16
+    private static let microscaledGroupSize = 32
+
     static let nvfp4 = Inkling2ExpertFormat(
-        mode: .nvfp4, bits: 4, groupSize: 16, hasGlobalScale: true)
+        mode: .nvfp4, bits: fourBits, groupSize: nvfp4GroupSize, hasGlobalScale: true)
 
     init(mode: QuantizationMode, bits: Int, groupSize: Int, hasGlobalScale: Bool) {
         self.mode = mode
@@ -1226,7 +1388,7 @@ struct Inkling2ExpertFormat: Equatable, Sendable {
         guard let weight = weights["\(path).weight"], let scales = weights["\(path).scales"],
             weight.dtype == .uint32
         else { return nil }
-        let bits = weight.dim(-1) * 32 / inputDims
+        let bits = weight.dim(-1) * UInt32.bitWidth / inputDims
         let groupSize = inputDims / scales.dim(-1)
         if weights["\(path).biases"] != nil {
             self.init(mode: .affine, bits: bits, groupSize: groupSize, hasGlobalScale: false)
@@ -1234,9 +1396,9 @@ struct Inkling2ExpertFormat: Equatable, Sendable {
         }
         let mode: QuantizationMode
         switch (bits, groupSize) {
-        case (4, 16): mode = .nvfp4
-        case (4, 32): mode = .mxfp4
-        case (8, 32): mode = .mxfp8
+        case (Self.fourBits, Self.nvfp4GroupSize): mode = .nvfp4
+        case (Self.fourBits, Self.microscaledGroupSize): mode = .mxfp4
+        case (Self.eightBits, Self.microscaledGroupSize): mode = .mxfp8
         default: return nil
         }
         self.init(
@@ -1259,13 +1421,23 @@ private final class Inkling2Experts: Module {
     ) {
         let (dims, hidden) = (config.hiddenSize, config.intermediateSize)
         _gateUpProj.wrappedValue = Inkling2ExpertProjection(
-            experts: config.experts, inputDims: dims, outputDims: 2 * hidden, format: gateUp)
+            experts: config.experts, inputDims: dims, outputDims: gateUpRowsPerChannel * hidden,
+            format: gateUp)
         _downProj.wrappedValue = Inkling2ExpertProjection(
             experts: config.experts, inputDims: hidden, outputDims: dims, format: down)
         activation = softcappedSwiGLU(gateSoftcap: config.gateSoftcap, upSoftcap: config.upSoftcap)
         softcaps = ConstantBox(MLXArray([config.gateSoftcap, config.upSoftcap]))
         super.init()
     }
+
+    /// The routed rows from which the experts gather their rows sorted by expert.
+    private static let sortedRowsThreshold = 64
+
+    /// The most experts per token, and the multiples of the hidden and the input widths, that the
+    /// fused decode kernels take.
+    private static let fusedDecodeMaximumExperts = metalSimdWidth
+    private static let fusedDecodeHiddenMultiple = 4
+    private static let fusedDecodeWidthMultiple = 2
 
     /// `[..., K, D]` outputs of the `[..., K]` experts of each row of `x`.
     func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
@@ -1277,8 +1449,8 @@ private final class Inkling2Experts: Module {
     /// The expert outputs `[N * K, D]` of the rows of `x` and, when they are sorted by expert,
     /// the row of each output: output `i` of the flattened `indices` is at row `order[i]`.
     func outputs(_ x: MLXArray, _ indices: MLXArray) -> (MLXArray, order: MLXArray?) {
-        var x = MLX.expandedDimensions(x, axes: [-2, -3])
-        let sort = indices.size >= 64
+        var x = MLX.expandedDimensions(x, axes: [matrixRowAxis, matrixRowAxis - 1])
+        let sort = indices.size >= Self.sortedRowsThreshold
         var idx = indices
         var inverseOrder: MLXArray?
         if sort {
@@ -1287,7 +1459,8 @@ private final class Inkling2Experts: Module {
         }
         let gateUp = gateUpProj(x, idx, sorted: sort)
         let activated = activation(
-            gateUp[.ellipsis, .stride(from: 0, by: 2)], gateUp[.ellipsis, .stride(from: 1, by: 2)])
+            gateUp[.ellipsis, .stride(from: 0, by: gateUpRowsPerChannel)],
+            gateUp[.ellipsis, .stride(from: 1, by: gateUpRowsPerChannel)])
         let out = downProj(activated, idx, sorted: sort)
         return (out.reshaped(-1, out.dim(-1)), inverseOrder)
     }
@@ -1300,11 +1473,13 @@ private final class Inkling2Experts: Module {
         convolutionWeight: MLXArray
     ) -> (MLXArray, MLXArray) {
         let (gateUp, down) = (gateUpProj.tensors, downProj.tensors)
-        let (dims, hidden) = (down.weight.dim(1), gateUp.weight.dim(1) / 2)
+        let (dims, hidden) = (down.weight.dim(1), gateUp.weight.dim(1) / gateUpRowsPerChannel)
         // Up to the rows of a verify pass, so that each row of a verify computes what a decode
         // step of that row computes.
-        if indices.dim(0) <= Inkling2.speculativeVerifyPositions, indices.dim(-1) <= 32,
-            hidden % 4 == 0, dims % 2 == 0,
+        if indices.dim(0) <= Inkling2.speculativeVerifyPositions,
+            indices.dim(-1) <= Self.fusedDecodeMaximumExperts,
+            hidden.isMultiple(of: Self.fusedDecodeHiddenMultiple),
+            dims.isMultiple(of: Self.fusedDecodeWidthMultiple),
             gateUp.supportsFusedDecode(inputDims: dims),
             down.supportsFusedDecode(inputDims: hidden)
         {
@@ -1344,21 +1519,21 @@ private final class Inkling2Router: Module {
         let rows = x.size / width
         let logits =
             rows <= Inkling2.speculativeVerifyPositions
-                && width.isMultiple(of: inkling2RouterWidthMultiple)
-                && weight.dim(0).isMultiple(of: inkling2RouterExpertMultiple)
+                && inkling2RouterKernelReads(width: width, experts: weight.dim(0))
                 && Device.defaultDevice().deviceType == .gpu
             ? inkling2RouterLogits(x.reshaped(rows, width).asType(.float32), weight: weight)
                 .reshaped(Array(x.shape.dropLast()) + [weight.dim(0)])
             : matmul(x.asType(.float32), weight.transposed())
         if Device.defaultDevice().deviceType == .gpu {
             return inkling2ExpertRouting(
-                logits: logits, bias: bias, topK: topK, scoreEps: 1e-20, routeScale: routeScale)
+                logits: logits, bias: bias, topK: topK, scoreEps: routeWeightEpsilon,
+                routeScale: routeScale)
         }
         let scores = sigmoid(logits)
         let biased = scores + bias
         let indices = argPartition(-biased, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         var weights = takeAlong(scores, indices, axis: -1)
-        weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20)
+        weights = weights / (weights.sum(axis: -1, keepDims: true) + routeWeightEpsilon)
         return (indices.asType(.uint32), weights * routeScale)
     }
 }
@@ -1414,6 +1589,13 @@ private final class Inkling2SparseMoE: Module {
 
 // MARK: - Decoder layer
 
+/// The query, key, value and MLP messages of core layer `index` of a message bank
+/// `[..., 4 * layers, D]`.
+private func layerMessages(_ bank: MLXArray, index: Int) -> MLXArray {
+    let first = index * LayerMessage.count
+    return bank[.ellipsis, first ..< (first + LayerMessage.count), 0...]
+}
+
 private final class Inkling2DecoderLayer: Module {
     @ModuleInfo(key: "self_attn") var attention: Inkling2Attention
     @ModuleInfo var mlp: Inkling2SparseMoE
@@ -1451,7 +1633,7 @@ private final class Inkling2DecoderLayer: Module {
         _mlp.wrappedValue = Inkling2SparseMoE(config)
         if layer > 0 {
             _attentionInput.wrappedValue = Inkling2BlockAttentionResidual(
-                dimensions: dims, queries: isSliding ? 1 : 3)
+                dimensions: dims, queries: isSliding ? 1 : LayerMessage.attentionCount)
         }
         _mlpInput.wrappedValue = Inkling2BlockAttentionResidual(dimensions: dims)
         _postAttentionNorm.wrappedValue = RMSNorm(dimensions: dims, eps: eps)
@@ -1493,17 +1675,18 @@ private final class Inkling2DecoderLayer: Module {
                     readout[.ellipsis, 0, 0...]
                 )
                 : (
-                    readout[.ellipsis, 0, 0...], readout[.ellipsis, 1, 0...],
-                    readout[.ellipsis, 2, 0...]
+                    readout[.ellipsis, LayerMessage.query, 0...],
+                    readout[.ellipsis, LayerMessage.key, 0...],
+                    readout[.ellipsis, LayerMessage.value, 0...]
                 )
         } else {
             sources = (hidden, hidden, hidden)
         }
         if let messages, let queryMessageGate, let keyMessageGate, let valueMessageGate {
             sources = (
-                queryMessageGate(sources.0, messages[.ellipsis, 0, 0...]),
-                keyMessageGate(sources.1, messages[.ellipsis, 1, 0...]),
-                valueMessageGate(sources.2, messages[.ellipsis, 2, 0...])
+                queryMessageGate(sources.0, messages[.ellipsis, LayerMessage.query, 0...]),
+                keyMessageGate(sources.1, messages[.ellipsis, LayerMessage.key, 0...]),
+                valueMessageGate(sources.2, messages[.ellipsis, LayerMessage.value, 0...])
             )
         } else if isSliding, let inputNorm {
             let normed = inputNorm(sources.0).asType(dtype)
@@ -1515,9 +1698,10 @@ private final class Inkling2DecoderLayer: Module {
                 inputNorm(sources.2).asType(dtype)
             )
         }
+        let norms = attentionInputNorms
         return (
-            queryInputNorm!(sources.0).asType(dtype), keyInputNorm!(sources.1).asType(dtype),
-            valueInputNorm!(sources.2).asType(dtype)
+            norms.query(sources.0).asType(dtype), norms.key(sources.1).asType(dtype),
+            norms.value(sources.2).asType(dtype)
         )
     }
 
@@ -1539,42 +1723,39 @@ private final class Inkling2DecoderLayer: Module {
                 hidden, blocks: blocks, cache: cache, convolutionCache: convolutionCache,
                 bank: bank, sequential: sequential)
         }
-        let messages = bank.map { bank, index in
-            bank[.ellipsis, (index * 4) ..< (index * 4 + 4), 0...]
-        }
+        let messages = bank.map(layerMessages)
         let dtype = hidden.dtype
         let convolutionCache = cache?[1] as? ArraysCache
         let verifyCache = keepsVerifyWindows(
             convolutionCache, length: hidden.dim(1), convolutionMask: convolutionMask)
         let keepsWindows = verifyCache != nil
-        let states: [MLXArray?] = (0 ..< 4).map { convolutionCache?[$0] }
+        let states: [MLXArray?] = (0 ..< ConvolutionSlot.count).map { convolutionCache?[$0] }
         let normedResidual = unweightedRMSNorm(hidden.asType(.float32))
 
         var readout: MLXArray?
         if let attentionInput, let blocks {
             readout = attentionInput(blocks, normedResidual)
         }
-        let (b, l, dims) = (hidden.dim(0), hidden.dim(1), hidden.dim(2))
+        let (b, l, dims) = (hidden.dim(0), hidden.dim(1), hidden.dim(-1))
         let eps = postAttentionNorm.eps
         var gates: (controllers: MessageControllers, messages: MLXArray, first: Int)?
         if let bank, Device.defaultDevice().deviceType == .gpu,
             let controllers = messageControllers(), controllers.down.dtype == dtype
         {
-            gates = (controllers, bank.0.reshaped(b * l, -1, dims), bank.1 * 4)
+            gates = (controllers, bank.0.reshaped(b * l, -1, dims), bank.1 * LayerMessage.count)
         }
         let (q, k, v): (MLXArray, MLXArray, MLXArray)
         if let gates, let readout {
             let (controllers, messages, first) = gates
-            let norms =
-                inputNorm.map { $0.weight.reshaped(1, dims) }
-                ?? stacked([queryInputNorm!.weight, keyInputNorm!.weight, valueInputNorm!.weight])
+            let norms = attentionNormWeights
             let out = inkling2MessageGates(
                 inputs: readout.reshaped(b * l, -1, dims), messages: messages, first: first,
-                down: controllers.down[..<3], forget: controllers.forget[..<3],
-                gain: controllers.gain[..<3], normWeight: norms, eps: eps)
+                down: controllers.attention.down, forget: controllers.attention.forget,
+                gain: controllers.attention.gain, normWeight: norms, eps: eps)
             (q, k, v) = (
-                out[0].reshaped(b, l, dims), out[1].reshaped(b, l, dims),
-                out[2].reshaped(b, l, dims)
+                out[LayerMessage.query].reshaped(b, l, dims),
+                out[LayerMessage.key].reshaped(b, l, dims),
+                out[LayerMessage.value].reshaped(b, l, dims)
             )
         } else {
             (q, k, v) = attentionInputs(hidden, readout: readout, messages: messages)
@@ -1583,48 +1764,96 @@ private final class Inkling2DecoderLayer: Module {
             queryInput: q, keyInput: k, valueInput: v, cache: cache?[0], convolutions: states,
             convolutionMask: convolutionMask, masks: masks, keepsWindows: keepsWindows)
         let (residual, attentionWindow) = postAttentionConvolution.residual(
-            attentionOutput, base: isBlockBoundary ? nil : hidden, state: states[2],
+            attentionOutput, base: isBlockBoundary ? nil : hidden,
+            state: states[ConvolutionSlot.attention],
             mask: convolutionMask, keepsWindow: keepsWindows)
 
-        var blocks = blocks
-        if isBlockBoundary {
-            let block = normedResidual.expandedDimensions(axis: 0)
-            blocks = blocks.map { concatenated([$0, block]) } ?? block
-        }
+        let blocks = completedBlocks(blocks, normedResidual: normedResidual)
 
-        var mlpInputs = mlpInput(blocks!, unweightedRMSNorm(residual))[.ellipsis, 0, 0...]
+        var mlpInputs = mlpInput(blocks, unweightedRMSNorm(residual))[.ellipsis, 0, 0...]
         let expertInput: MLXArray
         if let gates {
             let (controllers, messages, first) = gates
             expertInput = inkling2MessageGates(
-                inputs: mlpInputs.reshaped(b * l, 1, dims), messages: messages, first: first + 3,
-                down: controllers.down[3...], forget: controllers.forget[3...],
-                gain: controllers.gain[3...],
+                inputs: mlpInputs.reshaped(b * l, 1, dims), messages: messages,
+                first: first + LayerMessage.mlp, down: controllers.mlp.down,
+                forget: controllers.mlp.forget, gain: controllers.mlp.gain,
                 normWeight: postAttentionNorm.weight.reshaped(1, dims),
                 eps: eps
             ).reshaped(b, l, dims)
         } else {
             if let messages, let mlpMessageGate {
-                mlpInputs = mlpMessageGate(mlpInputs, messages[.ellipsis, 3, 0...])
+                mlpInputs = mlpMessageGate(mlpInputs, messages[.ellipsis, LayerMessage.mlp, 0...])
             }
             expertInput = postAttentionNorm(mlpInputs).asType(dtype)
         }
         let (output, mlpWindow) = mlp.prefill(
             expertInput, residual: residual,
-            convolution: postMLPConvolution, state: states[3], mask: convolutionMask,
+            convolution: postMLPConvolution, state: states[ConvolutionSlot.mlp],
+            mask: convolutionMask,
             keepsWindow: keepsWindows)
 
-        let windows = [keyWindow, valueWindow, attentionWindow, mlpWindow]
         if let convolutionCache {
             let lengths = convolutionCache.currentLengths
-            for (slot, window) in windows.enumerated() {
-                convolutionCache[slot] = convolutionState(
-                    window, lengths: lengths, count: convolutionStateLength)
-            }
-            convolutionCache.advance(hidden.dim(1))
+            storeWindows(
+                [keyWindow, valueWindow, attentionWindow, mlpWindow], into: convolutionCache,
+                advancing: hidden.dim(1), keeping: verifyCache
+            ) { convolutionState($0, lengths: lengths, count: convolutionStateLength) }
         }
+        return (output, blocks)
+    }
+
+    /// The completed blocks the MoE input reads: `blocks`, and at a block boundary the
+    /// normalized residual of the layer as one block more.
+    ///
+    /// - Parameters:
+    ///   - blocks: the blocks before this layer, `[K, ...]`, or `nil` before the first block.
+    ///   - normedResidual: the normalized residual, the shape of one block.
+    private func completedBlocks(_ blocks: MLXArray?, normedResidual: MLXArray) -> MLXArray {
+        guard isBlockBoundary else {
+            guard let blocks else { preconditionFailure("The first layer opens the first block") }
+            return blocks
+        }
+        let block = normedResidual.expandedDimensions(axis: 0)
+        return blocks.map { concatenated([$0, block]) } ?? block
+    }
+
+    /// The query, key and value input norms of a full-attention layer.
+    private var attentionInputNorms: (query: RMSNorm, key: RMSNorm, value: RMSNorm) {
+        guard let queryInputNorm, let keyInputNorm, let valueInputNorm else {
+            preconditionFailure("A full-attention layer has query, key and value input norms")
+        }
+        return (queryInputNorm, keyInputNorm, valueInputNorm)
+    }
+
+    /// The weights of the attention input norms for the kernels: `[1, D]` for the one norm of a
+    /// sliding layer, `[3, D]` for the query, key and value norms of a full-attention layer.
+    private var attentionNormWeights: MLXArray {
+        if let inputNorm {
+            return inputNorm.weight.reshaped(1, -1)
+        }
+        let norms = attentionInputNorms
+        return stacked([norms.query.weight, norms.key.weight, norms.value.weight])
+    }
+
+    /// Stores the state each convolution window of a forward pass ends with, moves the cache past
+    /// the pass, and hands `verifyCache` the windows, so that it rewinds the pass in place.
+    ///
+    /// - Parameters:
+    ///   - windows: the key, value, attention and MLP convolution windows, in slot order.
+    ///   - cache: the convolution cache of this layer visit.
+    ///   - count: the tokens of the pass.
+    ///   - verifyCache: the cache that keeps the windows, or `nil`.
+    ///   - state: the state a window ends with.
+    private func storeWindows(
+        _ windows: [MLXArray], into cache: ArraysCache, advancing count: Int,
+        keeping verifyCache: SpeculativeConvolutionCache?, state: (MLXArray) -> MLXArray
+    ) {
+        for (slot, window) in windows.enumerated() {
+            cache[slot] = state(window)
+        }
+        cache.advance(count)
         verifyCache?.keepVerifyWindows(windows)
-        return (output, blocks!)
     }
 
     /// The convolution cache that keeps the windows of this forward pass, so that a speculative
@@ -1654,20 +1883,19 @@ private final class Inkling2DecoderLayer: Module {
         _ hidden: MLXArray, blocks: MLXArray?, cache: CacheList, convolutionCache: ArraysCache,
         bank: (MLXArray, Int)?, sequential: Bool
     ) -> (MLXArray, MLXArray) {
-        let (rows, dims) = (hidden.dim(0), hidden.dim(2))
+        let (rows, dims) = (hidden.dim(0), hidden.dim(-1))
         let kvDims = attention.kvHeads * attention.headDim
         let stateRows = sequential ? 1 : rows
         func state(_ slot: Int, _ channels: Int) -> MLXArray {
             convolutionCache[slot]
-                ?? MLXArray.zeros([stateRows, 3, channels], dtype: hidden.dtype)
+                ?? MLXArray.zeros(
+                    [stateRows, convolutionStateLength, channels], dtype: hidden.dtype)
         }
         let x = hidden.reshaped(rows, dims)
         let eps = postAttentionNorm.eps
-        let messages = bank.map { ($0.0.reshaped(rows, -1, dims), $0.1 * 4) }
+        let messages = bank.map { ($0.0.reshaped(rows, -1, dims), $0.1 * LayerMessage.count) }
         let controllers = messages == nil ? nil : messageControllers()
-        let attentionNorms =
-            inputNorm.map { $0.weight.reshaped(1, dims) }
-            ?? stacked([queryInputNorm!.weight, keyInputNorm!.weight, valueInputNorm!.weight])
+        let attentionNorms = attentionNormWeights
 
         // The normalized attention inputs.
         let normedResidual: MLXArray
@@ -1680,22 +1908,22 @@ private final class Inkling2DecoderLayer: Module {
             normedResidual = mix.normed
             if let messages, let controllers {
                 let (out, _) = inkling2MessageControllers(
-                    inputs: mix.readout.transposed(1, 0, 2), messages: messages.0,
-                    first: messages.1, down: controllers.down[..<3],
-                    forget: controllers.forget[..<3], gain: controllers.gain[..<3],
+                    inputs: mix.readout.swappedAxes(0, 1), messages: messages.0,
+                    first: messages.1, down: controllers.attention.down,
+                    forget: controllers.attention.forget, gain: controllers.attention.gain,
                     normWeight: attentionNorms, eps: eps, f32Copy: false)
-                inputs = (0 ..< 3).map { out[$0 ..< ($0 + 1)].reshaped(rows, 1, dims) }
+                inputs = (0 ..< LayerMessage.attentionCount).map {
+                    out[$0 ..< ($0 + 1)].reshaped(rows, 1, dims)
+                }
             } else {
                 let readout = mix.readout.reshaped(rows, 1, -1, dims)
-                inputs = (0 ..< readout.dim(2)).map { readout[0..., 0..., $0, 0...] }
+                inputs = (0 ..< readout.dim(matrixRowAxis)).map { readout[0..., 0..., $0, 0...] }
             }
         } else {
             normedResidual = unweightedRMSNorm(x.asType(.float32))
             let (q, k, v) = attentionInputs(
                 hidden, readout: nil,
-                messages: bank.map { bank, index in
-                    bank[.ellipsis, (index * 4) ..< (index * 4 + 4), 0...]
-                })
+                messages: bank.map(layerMessages))
             inputs = [q, k, v]
         }
         if inputs.count == 1 {
@@ -1703,9 +1931,11 @@ private final class Inkling2DecoderLayer: Module {
         }
 
         let (attentionOutput, keyState, valueState) = attention.decode(
-            queryInput: inputs[0], keyInput: inputs[1], valueInput: inputs[2], cache: cache[0],
-            states: (state(0, kvDims), state(1, kvDims)), sequential: sequential)
-        var attentionState = state(2, dims)
+            queryInput: inputs[LayerMessage.query], keyInput: inputs[LayerMessage.key],
+            valueInput: inputs[LayerMessage.value], cache: cache[0],
+            states: (state(ConvolutionSlot.key, kvDims), state(ConvolutionSlot.value, kvDims)),
+            sequential: sequential)
+        var attentionState = state(ConvolutionSlot.attention, dims)
         var attentionWindow: MLXArray?
         if sequential {
             (attentionState, attentionWindow) = chainedConvolutionStates(
@@ -1713,14 +1943,11 @@ private final class Inkling2DecoderLayer: Module {
         }
 
         // The MoE input from the blocks and the residual after the attention.
-        var blocks = blocks?.reshaped(-1, rows, dims)
-        if isBlockBoundary {
-            let block = normedResidual.expandedDimensions(axis: 0)
-            blocks = blocks.map { concatenated([$0, block]) } ?? block
-        }
+        let blocks = completedBlocks(
+            blocks?.reshaped(-1, rows, dims), normedResidual: normedResidual)
         let mlpNorm = postAttentionNorm.weight.reshaped(1, dims)
         let mix = inkling2DepthMix(
-            blocks: blocks!, base: isBlockBoundary ? nil : x,
+            blocks: blocks, base: isBlockBoundary ? nil : x,
             convolution: (
                 attentionOutput.reshaped(rows, dims), attentionState,
                 postAttentionConvolution.conv1d.weight
@@ -1729,49 +1956,58 @@ private final class Inkling2DecoderLayer: Module {
             normWeight: controllers == nil ? mlpNorm : nil, f32Copy: controllers == nil,
             eps: eps)
         var expertInput = mix.readout.reshaped(rows, dims)
-        var routerInput = mix.readoutF32?.reshaped(rows, dims)
+        var routerFloat32 = mix.readoutF32
         if let messages, let controllers {
             let (out, f32) = inkling2MessageControllers(
                 inputs: mix.readout.reshaped(1, rows, dims), messages: messages.0,
-                first: messages.1 + 3, down: controllers.down[3...],
-                forget: controllers.forget[3...], gain: controllers.gain[3...],
+                first: messages.1 + LayerMessage.mlp, down: controllers.mlp.down,
+                forget: controllers.mlp.forget, gain: controllers.mlp.gain,
                 normWeight: mlpNorm, eps: eps, f32Copy: true)
             expertInput = out.reshaped(rows, dims)
-            routerInput = f32!.reshaped(rows, dims)
+            routerFloat32 = f32
+        }
+        guard let routerInput = routerFloat32?.reshaped(rows, dims) else {
+            preconditionFailure("The MoE input has a float32 copy for the router")
         }
         let convolutionWeight = postMLPConvolution.conv1d.weight
         if let attentionWindow {
             // Each token's expert sum convolves with the sums of the tokens before it, so the
             // sums come first: the next state of every row ends with the row's own sum.
             let sums = mlp.decode(
-                expertInput, routerInput: routerInput!, residual: mix.residual,
+                expertInput, routerInput: routerInput, residual: mix.residual,
                 state: MLXArray.zeros([rows, convolutionStateLength, dims], dtype: hidden.dtype),
                 convolutionWeight: convolutionWeight
             ).1[0..., convolutionStateLength - 1, 0...]
             let (mlpStates, mlpWindow) = chainedConvolutionStates(
-                state(3, dims), inputs: sums.expandedDimensions(axis: 1))
+                state(ConvolutionSlot.mlp, dims), inputs: sums.expandedDimensions(axis: 1))
             let output = inkling2ExpertConvolution(
                 sums: sums, residual: mix.residual, state: mlpStates,
                 convolutionWeight: convolutionWeight
             ).hidden
-            let windows = [keyState, valueState, attentionWindow, mlpWindow]
-            for (slot, window) in windows.enumerated() {
-                convolutionCache[slot] = window[0..., (-convolutionStateLength)..., 0...]
+            let verifyCache = keepsVerifyWindows(
+                convolutionCache, length: rows, convolutionMask: nil)
+            storeWindows(
+                [keyState, valueState, attentionWindow, mlpWindow], into: convolutionCache,
+                advancing: rows, keeping: verifyCache
+            ) { window in
+                // A window the cache keeps lives on anyway, so its state stays a view of it.
+                verifyCache == nil
+                    ? convolutionState(window, lengths: nil, count: convolutionStateLength)
+                    : window[0..., (-convolutionStateLength)..., 0...]
             }
-            convolutionCache.advance(rows)
-            (convolutionCache as? SpeculativeConvolutionCache)?.keepVerifyWindows(windows)
-            return (output.reshaped(rows, 1, dims), blocks!.reshaped(-1, rows, 1, dims))
+            return (output.reshaped(rows, 1, dims), blocks.reshaped(-1, rows, 1, dims))
         }
         let (output, mlpState) = mlp.decode(
-            expertInput, routerInput: routerInput!, residual: mix.residual, state: state(3, dims),
+            expertInput, routerInput: routerInput, residual: mix.residual,
+            state: state(ConvolutionSlot.mlp, dims),
             convolutionWeight: convolutionWeight)
 
-        convolutionCache[0] = keyState
-        convolutionCache[1] = valueState
-        convolutionCache[2] = mix.state
-        convolutionCache[3] = mlpState
+        convolutionCache[ConvolutionSlot.key] = keyState
+        convolutionCache[ConvolutionSlot.value] = valueState
+        convolutionCache[ConvolutionSlot.attention] = mix.state
+        convolutionCache[ConvolutionSlot.mlp] = mlpState
         convolutionCache.advance(1)
-        return (output.reshaped(rows, 1, dims), blocks!.reshaped(-1, rows, 1, dims))
+        return (output.reshaped(rows, 1, dims), blocks.reshaped(-1, rows, 1, dims))
     }
 
     // MARK: Stacked message controllers
@@ -1783,6 +2019,21 @@ private final class Inkling2DecoderLayer: Module {
         var forget: MLXArray
         /// bfloat16 `[4, R, D]`.
         var gain: MLXArray
+
+        /// The query, key and value controllers.
+        var attention: MessageControllers {
+            MessageControllers(
+                down: down[..<LayerMessage.attentionCount],
+                forget: forget[..<LayerMessage.attentionCount],
+                gain: gain[..<LayerMessage.attentionCount])
+        }
+
+        /// The MLP controllers.
+        var mlp: MessageControllers {
+            MessageControllers(
+                down: down[LayerMessage.mlp...], forget: forget[LayerMessage.mlp...],
+                gain: gain[LayerMessage.mlp...])
+        }
     }
 
     private let stackedControllers = MessageControllersBox()
@@ -1794,7 +2045,7 @@ private final class Inkling2DecoderLayer: Module {
     /// The controllers stacked for the decode kernels. The gates' weights become views of the
     /// stacked storage, in bfloat16, which holds the float32 checkpoint values exactly.
     func prepareMessageControllers() throws {
-        guard gates.count == 4, stackedControllers.value == nil else { return }
+        guard gates.count == LayerMessage.count, stackedControllers.value == nil else { return }
         let stacked = MessageControllers(
             down: MLX.stacked(gates.map { $0.downProj.weight.asType(.bfloat16) }),
             forget: MLX.stacked(gates.map { $0.forgetProj.weight.T.asType(.bfloat16) }),
@@ -1815,7 +2066,7 @@ private final class Inkling2DecoderLayer: Module {
 
     private func messageControllers() -> MessageControllers? {
         if let value = stackedControllers.value { return value }
-        guard gates.count == 4 else { return nil }
+        guard gates.count == LayerMessage.count else { return nil }
         return MessageControllers(
             down: MLX.stacked(gates.map { $0.downProj.weight.asType(.bfloat16) }),
             forget: MLX.stacked(gates.map { $0.forgetProj.weight.T.asType(.bfloat16) }),
@@ -1918,7 +2169,7 @@ private final class Inkling2TextModel: Module {
             outputRows == nil || !taps.contains(finalTap),
             "Inkling 2 taps the final hidden state of every row")
         let tapped = Set(taps)
-        var captured = [Int: MLXArray]()
+        var captured: [Int: MLXArray] = [:]
         var hidden = embeddings
         let caches = cache?.map { $0 as? CacheList }
         let masks = Inkling2DecodeMasks()
@@ -1931,11 +2182,16 @@ private final class Inkling2TextModel: Module {
         let sequential = runsSequentialDecode(
             embeddings, caches: caches, convolutionMask: convolutionMask)
         if sequential {
-            hidden = hidden.transposed(1, 0, 2)
+            hidden = hidden.swappedAxes(0, 1)
         }
 
         var visit = 0
         var blocks: MLXArray?
+        /// The blocks after the layers run so far, which open with the first layer.
+        func completedBlocks() -> MLXArray {
+            guard let blocks else { preconditionFailure("The first layer opens the first block") }
+            return blocks
+        }
         /// The messages of a loop pass read the previous pass's blocks after the prelude and its
         /// partial block, with the `[layers, 4, D]` queries of the core layers.
         typealias MessageSources = (blocks: MLXArray, partial: MLXArray, queries: MLXArray)
@@ -1946,14 +2202,14 @@ private final class Inkling2TextModel: Module {
                     ? inkling2DepthReadout(
                         blocks: sources.blocks, partial: sources.partial,
                         queries: sources.queries.reshaped(-1, config.hiddenSize),
-                        queriesPerGroup: 4) : nil
+                        queriesPerGroup: LayerMessage.count) : nil
             }
             for (index, layer) in layerRange.enumerated() {
                 var layerMessages = bank.map { ($0, index) }
                 if let messages, bank == nil {
                     let readout = inkling2DepthReadout(
                         blocks: messages.blocks, partial: messages.partial,
-                        queries: messages.queries[index], queriesPerGroup: 4)
+                        queries: messages.queries[index], queriesPerGroup: LayerMessage.count)
                     layerMessages = (readout, 0)
                 }
                 if tapped.contains(visit) {
@@ -1966,7 +2222,7 @@ private final class Inkling2TextModel: Module {
                 if sequential, visit % Self.sequentialSubmitInterval == 0 {
                     // A verify pass waits on the host before it is built, so the GPU would idle
                     // while the CPU builds it. Submitting each part as it is built overlaps them.
-                    asyncEval(hidden, blocks!)
+                    asyncEval(hidden, completedBlocks())
                 }
             }
         }
@@ -1974,13 +2230,13 @@ private final class Inkling2TextModel: Module {
         if let loop = config.loop, let messageInput {
             run(0 ..< loop.coreStart, messages: nil)
             let preludeHidden = hidden
-            let preludeBlocks = blocks!
+            let preludeBlocks = completedBlocks()
             let preludeCount = preludeBlocks.dim(0)
             for pass in 0 ..< loop.passes {
                 var messages: MessageSources?
                 if pass > 0 {
                     messages = (
-                        blocks![(preludeCount + 1)...],
+                        completedBlocks()[(preludeCount + 1)...],
                         unweightedRMSNorm(hidden.asType(.float32)), messageInput.query
                     )
                     hidden = preludeHidden
@@ -1993,11 +2249,12 @@ private final class Inkling2TextModel: Module {
             run(0 ..< config.hiddenLayers, messages: nil)
         }
 
-        var finalBlocks = blocks!
+        var finalBlocks = completedBlocks()
         if sequential {
-            hidden = hidden.transposed(1, 0, 2)
-            finalBlocks = finalBlocks.transposed(0, 2, 1, 3)
-            captured = captured.mapValues { $0.transposed(1, 0, 2) }
+            hidden = hidden.swappedAxes(0, 1)
+            // `[K, L, 1, D]` blocks of the rows as the `[K, 1, L, D]` blocks of one sequence.
+            finalBlocks = finalBlocks.swappedAxes(1, headPositionAxis)
+            captured = captured.mapValues { $0.swappedAxes(0, 1) }
         }
         if let outputRows {
             hidden = hidden[0..., outputRows, 0...]
@@ -2035,9 +2292,8 @@ private final class Inkling2TextModel: Module {
 private final class Inkling2Vision: Module {
     @ModuleInfo(key: "vision_tower") var tower: Inkling2VisionModel
 
-    init(_ config: Inkling2Configuration) {
-        _tower.wrappedValue = Inkling2VisionModel(
-            config.visionConfiguration!, textHiddenSize: config.textConfiguration.hiddenSize)
+    init(_ vision: Inkling2VisionConfiguration, textHiddenSize: Int) {
+        _tower.wrappedValue = Inkling2VisionModel(vision, textHiddenSize: textHiddenSize)
         super.init()
     }
 }
@@ -2081,7 +2337,9 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         if let vision = config.visionConfiguration {
             _visionTower.wrappedValue = Inkling2VisionModel(
                 vision, textHiddenSize: text.hiddenSize)
-            onDemandVision = OnDemandComponent(.vision) { Inkling2Vision(config) }
+            onDemandVision = OnDemandComponent(.vision) {
+                Inkling2Vision(vision, textHiddenSize: text.hiddenSize)
+            }
         } else {
             onDemandVision = nil
         }
@@ -2099,7 +2357,8 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
             return CacheList(
                 attention,
                 SpeculativeConvolutionCache(
-                    size: 4, maximumVerifyPositions: Self.speculativeVerifyPositions))
+                    size: ConvolutionSlot.count,
+                    maximumVerifyPositions: Self.speculativeVerifyPositions))
         }
     }
 
@@ -2119,11 +2378,9 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         let tower = try vision()
         let features = try tower.encode(pixels: image.pixels, grids: grids)
             .asType(embeddings.dtype)
-        var positions = [Int32]()
-        for (index, id) in tokens.reshaped(-1).asArray(Int.self).enumerated()
-        where id == config.imageTokenId {
-            positions.append(Int32(index))
-        }
+        let positions = tokens.reshaped(-1).asArray(Int.self).enumerated()
+            .filter { $0.element == config.imageTokenId }
+            .map { Int32($0.offset) }
         guard positions.count == features.dim(0) else {
             throw VLMError.processing(
                 "Image features and image tokens do not match: tokens=\(positions.count), "

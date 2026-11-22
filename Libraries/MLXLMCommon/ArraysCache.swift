@@ -374,7 +374,7 @@ public class MambaCache: ArraysCache {
 /// chat-template rewinds possible without keeping the full prompt activation
 /// history. Trims larger than the retained window fail atomically and callers
 /// can rebuild from the common prefix.
-public final class RewindableConvolutionCache: MambaCache {
+public final class RewindableConvolutionCache: MambaCache, VerifyInputRewindableCache {
     public override class var serializedClassName: String? { "RewindableConvolutionCache" }
 
     /// The configuration and contents of a saved `RewindableConvolutionCache`.
@@ -562,7 +562,7 @@ extension RewindableConvolutionCache: PromptCacheRestorable {
 /// The windows are transient. The next forward pass drops them (``advance(_:)``), and they are
 /// never part of the state, a copy, a prompt cache checkpoint or a saved prompt cache: the cache
 /// saves and restores as an ``ArraysCache``, under its name.
-public final class SpeculativeConvolutionCache: ArraysCache {
+public final class SpeculativeConvolutionCache: ArraysCache, VerifyInputRewindableCache {
 
     /// The windows of the last verify pass and the tokens of the pass the cache holds.
     private struct VerifyWindows {

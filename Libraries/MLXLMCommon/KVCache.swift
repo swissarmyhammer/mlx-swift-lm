@@ -685,6 +685,10 @@ func canRewindConvolutionCache(_ cache: KVCache, positions: Int) -> Bool {
     return true
 }
 
+/// A convolution cache that keeps the inputs of a speculative verify pass and so rewinds the
+/// drafts the pass rejects, for a pass as long as ``KVCache/isTrimmable(after:)`` allows.
+package protocol VerifyInputRewindableCache: KVCache {}
+
 /// Whether every attention entry of a hybrid attention/recurrent cache can rewind, in place,
 /// the rejected drafts of a speculative verify of `positions` tokens written into it: up to
 /// `positions - 1` tokens, since the bonus token at the head of the verify is always kept.
@@ -707,9 +711,7 @@ package func canRewindSpeculativeVerify(_ cache: [KVCache], positions: Int) -> B
         switch entry {
         case let list as CacheList:
             canRewindSpeculativeVerify(list.children, positions: positions)
-        case let convolution as RewindableConvolutionCache:
-            convolution.isTrimmable(after: positions)
-        case let convolution as SpeculativeConvolutionCache:
+        case let convolution as any VerifyInputRewindableCache:
             convolution.isTrimmable(after: positions)
         case is MambaCache: true
         case is RotatingKVCache: positions > 1

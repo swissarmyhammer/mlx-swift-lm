@@ -38,41 +38,8 @@ enum Qwen38FourBitMTPModel {
     /// The two best logits of one row.
     private static let topCandidateCount = 2
 
-    /// Where MTP first parts from plain decode, and the two best logits of an uncached forward
-    /// pass of the target over the tokens both decodes share.
-    ///
-    /// A greedy MTP round verifies its drafts in one batched forward pass, and plain decode
-    /// feeds one token at a time, thus the two can round a near tie apart.
-    struct Divergence: CustomStringConvertible {
-
-        /// The index of the first token where the two parts.
-        let step: Int
-
-        /// The token MTP wrote there, or `nil` when MTP wrote no token there.
-        let mtpToken: Int?
-
-        /// The two best tokens of the forward pass, best first.
-        let topTokens: [Int]
-
-        /// The logits of ``topTokens``.
-        let topLogits: [Float]
-
-        /// Whether MTP wrote the second best token, within ``nearTieLogitGap`` of the best.
-        var mtpWroteANearTie: Bool {
-            mtpToken == topTokens[1] && topLogits[0] - topLogits[1] < nearTieLogitGap
-        }
-
-        /// Whether MTP wrote the best token of the uncached forward pass, thus plain decode's
-        /// cached forward passes rounded the other way.
-        var mtpWroteTheArgmax: Bool { mtpToken == topTokens[0] }
-
-        var description: String {
-            """
-            MTP parts from plain decode at token \(step): MTP \(mtpToken ?? -1), plain best \
-            \(topTokens) with logits \(topLogits)
-            """
-        }
-    }
+    /// Where MTP first parts from plain decode, as ``divergence(mtp:plain:context:)`` finds it.
+    typealias Divergence = MTPDivergence
 
     /// Where `mtp` first parts from `plain`.
     ///
@@ -84,22 +51,16 @@ enum Qwen38FourBitMTPModel {
     /// - Throws: The error of the model load.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     static func divergence(mtp: [Int], plain: [Int], context: [Int]) async throws -> Divergence? {
-        guard mtp != plain else { return nil }
-        let comparedCount = Swift.min(mtp.count, plain.count)
-        let step = (0 ..< comparedCount).first { mtp[$0] != plain[$0] } ?? comparedCount
-        let container = try await make(speculates: false).loadContainer()
-        let (topTokens, topLogits) = await container.perform { modelContext in
-            let tokens = context + plain.prefix(step)
-            let logits = modelContext.model(
-                LMInput.Text(tokens: MLXArray(tokens.map(Int32.init))[.newAxis, 0...]),
-                cache: nil, state: nil
-            ).logits[0, -1].asType(.float32)
-            let order = argSort(-logits)[..<topCandidateCount]
-            return (order.asArray(Int.self), logits[order].asArray(Float.self))
+        try await MTPDivergence.find(mtp: mtp, plain: plain, context: context) { tokens in
+            let container = try await make(speculates: false).loadContainer()
+            return await container.perform { modelContext in
+                MTPDivergence.topCandidates(
+                    of: modelContext.model(
+                        LMInput.Text(tokens: MLXArray(tokens.map(Int32.init))[.newAxis, 0...]),
+                        cache: nil, state: nil
+                    ).logits[0, -1])
+            }
         }
-        return Divergence(
-            step: step, mtpToken: step < mtp.count ? mtp[step] : nil, topTokens: topTokens,
-            topLogits: topLogits)
     }
 
     /// The two best tokens of one row of logits, best first, with their log probabilities: the
@@ -253,6 +214,17 @@ enum Qwen38FourBitMTPModel {
         return LoadedWithDrafter(
             model: model, speculation: speculation, container: container, drafter: drafter)
     }
+}
+
+extension MTPDivergence {
+
+    /// Whether MTP wrote the second best token, within
+    /// ``Qwen38FourBitMTPModel/nearTieLogitGap`` of the best.
+    var mtpWroteANearTie: Bool { wroteSecondBest(within: Qwen38FourBitMTPModel.nearTieLogitGap) }
+
+    /// Whether MTP wrote the best token of the uncached forward pass, thus plain decode's cached
+    /// forward passes rounded the other way.
+    var mtpWroteTheArgmax: Bool { wroteTheArgmax }
 }
 
 #endif

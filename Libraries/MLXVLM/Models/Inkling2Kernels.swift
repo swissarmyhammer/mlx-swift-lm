@@ -4,6 +4,66 @@ import Foundation
 import MLX
 import MLXLMCommon
 
+// MARK: - Launch geometry
+
+/// The threads of the widest threadgroup the kernels launch.
+private let maximumThreadgroupThreads = 1024
+
+/// The threads of the threadgroups of the elementwise and per-token kernels.
+private let standardThreadgroupThreads = 256
+
+/// The values of a row each thread of ``rowThreads(_:)`` handles at least.
+private let valuesPerRowThread = 8
+
+/// The taps of the static short convolutions.
+let staticConvolutionTaps = 4
+
+/// The taps of a dynamic short convolution: the static taps and the dynamic taps of its heads.
+private let dynamicConvolutionTaps = 8
+
+/// The rows of a short convolution state: the inputs before the newest one.
+private let convolutionStateRows = staticConvolutionTaps - 1
+
+/// The divisor `sqrt(K + 1)` of the static short convolutions.
+private let staticConvolutionDivisor = Float(staticConvolutionTaps + 1).squareRoot()
+
+/// The divisor `sqrt(K + 1)` of the dynamic short convolutions.
+private let dynamicConvolutionDivisor = Float(dynamicConvolutionTaps + 1).squareRoot()
+
+/// The simdgroups of the attention prologues for each head: the queries and relative states of
+/// a query head, the keys and values of a key-value head.
+private let prologueSimdgroupsPerHead = 2
+
+/// The keys up to which one threadgroup per head runs the decode attention; longer caches split.
+private let singleThreadgroupDecodeKeys = 1024
+
+/// The statistics a split of the decode attention writes per row: its running max and sum.
+private let decodeSplitStatistics = 2
+
+/// The parts of the message pair the down projection reads: the normalized input and message.
+let messagePairParts = 2
+
+/// The bits of the 4-bit quantized expert formats.
+private let fourBitExpertBits = 4
+
+/// The bits of the 8-bit quantized expert formats.
+private let eightBitExpertBits = 8
+
+/// The bits of the quantized expert formats the fused expert kernels read.
+private let fusedExpertBits: Set<Int> = [fourBitExpertBits, eightBitExpertBits]
+
+/// The fused expert kernels read groups and rows of a multiple of this many values.
+private let fusedExpertWidthMultiple = 16
+
+/// The rows of a gate-up expert projection for each channel: the gate and up rows alternate.
+let gateUpRowsPerChannel = 2
+
+/// The outputs of ``inkling2DepthMix(blocks:base:convolution:queries:normWeight:f32Copy:eps:)``
+/// in the order the kernel writes them.
+private enum DepthMixOutput: Int {
+    case residual, normed, readout, readoutF32, state
+}
+
 // MARK: - Depth attention
 
 // Each threadgroup handles one row and Q depth queries.
@@ -143,7 +203,9 @@ private final class Inkling2Kernels: Sendable {
 
 /// Threads for a threadgroup that handles one row of `dim` values.
 private func rowThreads(_ dim: Int) -> Int {
-    min(1024, max(32, dim / 8 / 32 * 32))
+    min(
+        maximumThreadgroupThreads,
+        max(metalSimdWidth, dim / valuesPerRowThread / metalSimdWidth * metalSimdWidth))
 }
 
 /// Softmax attention of `queries` over the depth sources of each row.
@@ -348,8 +410,8 @@ func inkling2RelativeAttention(
     q: MLXArray, k: MLXArray, v: MLXArray, rel: MLXArray, sinks: MLXArray,
     scale: Float, window: Int, keyStart: MLXArray, keep: Int, evicted: Int
 ) -> MLXArray {
-    let (b, hq, l, d) = (q.dim(0), q.dim(1), q.dim(2), q.dim(3))
-    let (hkv, s) = (k.dim(1), k.dim(2))
+    let (b, hq, l, d) = q.shape4
+    let (_, hkv, s, _) = k.shape4
     let block = relativeAttentionQueryBlock
     let threads = relativeAttentionThreads
     return Inkling2Kernels.shared.relativeAttention(
@@ -456,6 +518,10 @@ func inkling2PrefillPrologue(
     qkThreshold: Float, relativeThreshold: Float
 ) -> [MLXArray] {
     let (b, l) = (q.dim(0), q.dim(1))
+    let outputShapes = [
+        [b, l, heads, headDim], [b, l, heads, relativeDim], [b, l, kvHeads, headDim],
+        [b, l, kvHeads, headDim],
+    ]
     return Inkling2Kernels.shared.prefillPrologue(
         [
             q, r, k, v, qScale, rScale, tau ?? MLXArray([Float(1)]), MLXArray([Int32(l)]),
@@ -465,12 +531,9 @@ func inkling2PrefillPrologue(
             ("T", q.dtype), ("DH", headDim), ("HQ", heads), ("HKV", kvHeads),
             ("DR", relativeDim), ("FULL", tau != nil),
         ],
-        grid: ((2 * heads + 2 * kvHeads) * 32, b * l, 1), threadGroup: (32, 1, 1),
-        outputShapes: [
-            [b, l, heads, headDim], [b, l, heads, relativeDim], [b, l, kvHeads, headDim],
-            [b, l, kvHeads, headDim],
-        ],
-        outputDTypes: Array(repeating: q.dtype, count: 4))
+        grid: (prologueSimdgroupsPerHead * (heads + kvHeads) * metalSimdWidth, b * l, 1),
+        threadGroup: (metalSimdWidth, 1, 1), outputShapes: outputShapes,
+        outputDTypes: Array(repeating: q.dtype, count: outputShapes.count))
 }
 
 // MARK: - Prefill message gates
@@ -579,8 +642,9 @@ func inkling2MessageGates(
     inputs: MLXArray, messages: MLXArray, first: Int, down: MLXArray, forget: MLXArray,
     gain: MLXArray, normWeight: MLXArray, eps: Float
 ) -> MLXArray {
-    let (streams, rows, d) = (down.dim(0), messages.dim(0), messages.dim(2))
-    let threads = 256
+    let streams = down.dim(0)
+    let (rows, _, d) = messages.shape3
+    let threads = standardThreadgroupThreads
     let template: [(String, any KernelTemplateArg)] = [
         ("T", down.dtype), ("D", d), ("S", streams), ("Q", inputs.dim(1)), ("TG", threads),
         ("MSTRIDE", messages.dim(1)), ("NW", normWeight.dim(0)),
@@ -590,8 +654,8 @@ func inkling2MessageGates(
     let pair = kernels.messagePair(
         [inputs, messages, firstArray], template: template,
         grid: (streams * rows * threads, 1, 1), threadGroup: (threads, 1, 1),
-        outputShapes: [[streams, rows, 2 * d]], outputDTypes: [down.dtype])[0]
-    let h = matmul(pair, down.transposed(0, 2, 1)).asType(.float32)
+        outputShapes: [[streams, rows, messagePairParts * d]], outputDTypes: [down.dtype])[0]
+    let h = matmul(pair, down.swappedAxes(1, -1)).asType(.float32)
     let f = matmul(h, forget.asType(.float32))
     let g = matmul(h, gain.asType(.float32))
     return kernels.messageBlendNorm(
@@ -694,7 +758,7 @@ func inkling2RowConvolution(
     dynamicTaps: MLXArray? = nil
 ) -> (output: MLXArray, state: MLXArray) {
     let (b, l, k) =
-        experts.map { ($0.weights.dim(0), $0.weights.dim(1), $0.weights.dim(2)) }
+        experts.map { $0.weights.shape3 }
         ?? (x.dim(0), x.dim(1), 0)
     let c = x.dim(-1)
     let dtype = x.dtype
@@ -707,16 +771,18 @@ func inkling2RowConvolution(
             experts.map { contiguous($0.weights) } ?? placeholder,
             state.map { contiguous($0) } ?? placeholder, base ?? placeholder, contiguous(weight),
             dynamicTaps ?? placeholder, MLXArray([Int32(l)]),
-            MLXArray([Float(dynamicTaps == nil ? 5 : 9).squareRoot()]),
+            MLXArray([dynamicTaps == nil ? staticConvolutionDivisor : dynamicConvolutionDivisor]),
         ],
         template: [
             ("T", dtype), ("OT", outputType), ("C", c), ("K", k),
             ("SORTED", experts?.order != nil), ("HAS_STATE", state != nil),
             ("HAS_BASE", base != nil), ("DYN", dynamicTaps != nil),
-            ("HEADS", (dynamicTaps?.dim(-1) ?? 4) / 4), ("RB", rowsPerThread),
+            ("HEADS", (dynamicTaps?.dim(-1) ?? staticConvolutionTaps) / staticConvolutionTaps),
+            ("RB", rowsPerThread),
         ],
-        grid: (c, (l + rowsPerThread - 1) / rowsPerThread, b), threadGroup: (256, 1, 1),
-        outputShapes: [[b, l, c], [b, 3, c]], outputDTypes: [outputType, dtype])
+        grid: (c, (l + rowsPerThread - 1) / rowsPerThread, b),
+        threadGroup: (standardThreadgroupThreads, 1, 1),
+        outputShapes: [[b, l, c], [b, convolutionStateRows, c]], outputDTypes: [outputType, dtype])
     return (out[0], out[1])
 }
 
@@ -995,16 +1061,16 @@ func inkling2DecodeAttention(
     sinks: MLXArray, gate: MLXArray, scale: Float, ringIndex: Int?, window: Int, keep: Int,
     evicted: Int, causalRows: Int = 0
 ) -> MLXArray {
-    let (b, hq, d) = (q.dim(0), q.dim(1), q.dim(2))
-    let (hkv, s) = (k.dim(1), k.dim(2))
+    let (b, hq, d) = q.shape3
+    let (_, hkv, s, _) = k.shape4
     let kernels = Inkling2DecodeKernels.shared
     let rowParameters = 4
     var (k, v) = (k, v)
     let params: MLXArray
     if causalRows > 0 {
         // Each row reads the shared keys up to its own; a broadcast batch axis has stride 0.
-        k = broadcast(k, to: [causalRows, hkv, s, k.dim(3)])
-        v = broadcast(v, to: [causalRows, hkv, s, v.dim(3)])
+        k = broadcast(k, to: [causalRows, hkv, s, k.dim(-1)])
+        v = broadcast(v, to: [causalRows, hkv, s, v.dim(-1)])
         params = MLXArray(
             (0 ..< causalRows).flatMap { row in
                 [Int32(s - (causalRows - 1 - row)), -1, Int32(keep), Int32(evicted)]
@@ -1020,11 +1086,12 @@ func inkling2DecodeAttention(
         ("DR", table.dim(0)), ("WINDOW", window), ("PS", causalRows > 0 ? rowParameters : 0),
     ]
     // Up to a sliding window, one threadgroup per head is fastest; longer caches are split.
-    if s <= 1024 {
+    if s <= singleThreadgroupDecodeKeys {
         let simdgroups = 32
         return kernels.single(
             inputs, template: template + [("NSG", simdgroups)],
-            grid: (b * hq * simdgroups * 32, 1, 1), threadGroup: (simdgroups * 32, 1, 1),
+            grid: (b * hq * simdgroups * metalSimdWidth, 1, 1),
+            threadGroup: (simdgroups * metalSimdWidth, 1, 1),
             outputShapes: [[b, hq * d]], outputDTypes: [q.dtype]
         )[0]
     }
@@ -1032,9 +1099,9 @@ func inkling2DecodeAttention(
     let splits = (s + keysPerSplit - 1) / keysPerSplit
     template += [("NSG", simdgroups), ("PER", keysPerSplit), ("SPLITS", splits)]
     let partial = kernels.split(
-        inputs, template: template, grid: (b * hkv * simdgroups * 32, splits, 1),
-        threadGroup: (simdgroups * 32, 1, 1),
-        outputShapes: [[b * hq * splits, d], [b * hq * splits, 2]],
+        inputs, template: template, grid: (b * hkv * simdgroups * metalSimdWidth, splits, 1),
+        threadGroup: (simdgroups * metalSimdWidth, 1, 1),
+        outputShapes: [[b * hq * splits, d], [b * hq * splits, decodeSplitStatistics]],
         outputDTypes: [.float32, .float32])
     return kernels.reduce(
         [partial[0], partial[1], sinks, gate],
@@ -1228,14 +1295,14 @@ func inkling2DepthMix(
     let d = queries.dim(-1)
     let q = queries.dim(0)
     let rows = blocks.dim(1)
-    let threads = 1024
+    let threads = maximumThreadgroupThreads
     let dummy = MLXArray.zeros([1], dtype: .bfloat16)
     let norm = normWeight != nil
     let out = Inkling2DecodeKernels.shared.depthMix(
         [
             blocks, base ?? dummy, convolution?.x ?? dummy, convolution?.state ?? dummy,
             convolution?.weight ?? dummy, queries, normWeight ?? dummy,
-            MLXArray([1 / Float(d).squareRoot(), eps, Float(5).squareRoot()]),
+            MLXArray([1 / Float(d).squareRoot(), eps, staticConvolutionDivisor]),
         ],
         template: [
             ("T", DType.bfloat16), ("TO", norm ? DType.bfloat16 : DType.float32),
@@ -1246,12 +1313,14 @@ func inkling2DepthMix(
         grid: (rows * threads, 1, 1), threadGroup: (threads, 1, 1),
         outputShapes: [
             [rows, d], [rows, d], [rows, q, d], f32Copy ? [rows, q, d] : [1],
-            convolution != nil ? [rows, 3, d] : [1],
+            convolution != nil ? [rows, convolutionStateRows, d] : [1],
         ],
         outputDTypes: [.float32, .float32, norm ? .bfloat16 : .float32, .float32, .bfloat16])
+    func output(_ part: DepthMixOutput) -> MLXArray { out[part.rawValue] }
     return Inkling2DepthMix(
-        residual: out[0], normed: out[1], readout: out[2], readoutF32: f32Copy ? out[3] : nil,
-        state: convolution != nil ? out[4] : nil)
+        residual: output(.residual), normed: output(.normed), readout: output(.readout),
+        readoutF32: f32Copy ? output(.readoutF32) : nil,
+        state: convolution != nil ? output(.state) : nil)
 }
 
 // MARK: - Attention prologue
@@ -1354,6 +1423,23 @@ private let attentionPrologueSource = """
         }
     """
 
+/// The index of each output of ``inkling2AttentionPrologue``; ``inkling2PrefillPrologue``
+/// returns the first four in the same order.
+enum Inkling2PrologueOutput {
+    /// The queries.
+    static let queries = 0
+    /// The relative states.
+    static let relative = 1
+    /// The keys.
+    static let keys = 2
+    /// The values.
+    static let values = 3
+    /// The next key convolution state.
+    static let nextKeyState = 4
+    /// The next value convolution state.
+    static let nextValueState = 5
+}
+
 /// The decode inputs of the attention from its projections.
 ///
 /// - Parameters:
@@ -1374,7 +1460,12 @@ func inkling2AttentionPrologue(
     let kv = kvHeads * headDim
     let full = taps != nil
     let dummy = MLXArray.zeros([1], dtype: q.dtype)
-    let divisor = Float(full ? 9 : 5).squareRoot()
+    let divisor = full ? dynamicConvolutionDivisor : staticConvolutionDivisor
+    let outputShapes = [
+        [rows, heads, headDim], [rows, heads, relativeDim], [rows, kvHeads, 1, headDim],
+        [rows, kvHeads, 1, headDim], [rows, convolutionStateRows, kv],
+        [rows, convolutionStateRows, kv],
+    ]
     return Inkling2DecodeKernels.shared.attentionPrologue(
         [
             q, r, k, v, taps?.k ?? dummy, taps?.v ?? dummy, weights.k, weights.v, states.k,
@@ -1385,12 +1476,9 @@ func inkling2AttentionPrologue(
             ("T", q.dtype), ("DH", headDim), ("HQ", heads), ("HKV", kvHeads),
             ("DR", relativeDim), ("FULL", full), ("TAU_ROWS", (tau?.size ?? 1) > 1),
         ],
-        grid: ((2 * heads + 2 * kvHeads) * 32, rows, 1), threadGroup: (32, 1, 1),
-        outputShapes: [
-            [rows, heads, headDim], [rows, heads, relativeDim], [rows, kvHeads, 1, headDim],
-            [rows, kvHeads, 1, headDim], [rows, 3, kv], [rows, 3, kv],
-        ],
-        outputDTypes: Array(repeating: q.dtype, count: 6))
+        grid: (prologueSimdgroupsPerHead * (heads + kvHeads) * metalSimdWidth, rows, 1),
+        threadGroup: (metalSimdWidth, 1, 1), outputShapes: outputShapes,
+        outputDTypes: Array(repeating: q.dtype, count: outputShapes.count))
 }
 
 // MARK: - Message controllers
@@ -1544,9 +1632,9 @@ func inkling2MessageControllers(
     gain: MLXArray, normWeight: MLXArray, eps: Float, f32Copy: Bool
 ) -> (MLXArray, MLXArray?) {
     let (streams, rank) = (down.dim(0), down.dim(1))
-    let (rows, d) = (messages.dim(0), messages.dim(2))
+    let (rows, _, d) = messages.shape3
     // Small threadgroups spread the weight reads over every GPU core.
-    let threads = 256
+    let threads = standardThreadgroupThreads
     let chunks = (d + threads - 1) / threads
     let template: [(String, any KernelTemplateArg)] = [
         ("T", down.dtype), ("D", d), ("S", streams), ("R", rank), ("TG", threads),
@@ -1556,7 +1644,10 @@ func inkling2MessageControllers(
     let firstArray = MLXArray(Int32(first))
     let h = kernels.messageDown(
         [inputs, messages, firstArray, down], template: template,
-        grid: (streams * rows * threads, (rank + threads / 32 - 1) / (threads / 32), 1),
+        grid: (
+            streams * rows * threads,
+            (rank + threads / metalSimdWidth - 1) / (threads / metalSimdWidth), 1
+        ),
         threadGroup: (threads, 1, 1),
         outputShapes: [[streams, rows, rank]], outputDTypes: [.float32])[0]
     let blend = kernels.messageBlend(
@@ -1579,7 +1670,7 @@ func inkling2MessageControllers(
 // MARK: - Expert epilogue
 
 /// The divisor `sqrt(K + 1)` of the 4-tap static convolution after the experts.
-private let expertConvolutionDivisor = Float(5).squareRoot()
+private let expertConvolutionDivisor = staticConvolutionDivisor
 
 /// The short convolution of the expert sum `m` of `row` at channel `d`, and the residual add.
 private let expertEpilogueTail = """
@@ -1628,15 +1719,16 @@ func inkling2ExpertEpilogue(
     outputs: MLXArray, weights: MLXArray, residual: MLXArray, state: MLXArray,
     convolutionWeight: MLXArray
 ) -> (hidden: MLXArray, state: MLXArray) {
-    let (rows, k, d) = (outputs.dim(0), outputs.dim(1), outputs.dim(2))
+    let (rows, k, d) = outputs.shape3
     let out = Inkling2DecodeKernels.shared.expertEpilogue(
         [
             outputs, weights, residual, state, convolutionWeight,
             MLXArray([expertConvolutionDivisor]),
         ],
         template: [("T", outputs.dtype), ("D", d), ("KE", k)],
-        grid: (rows * d, 1, 1), threadGroup: (256, 1, 1),
-        outputShapes: [[rows, d], [rows, 3, d]], outputDTypes: [outputs.dtype, outputs.dtype])
+        grid: (rows * d, 1, 1), threadGroup: (standardThreadgroupThreads, 1, 1),
+        outputShapes: [[rows, d], [rows, convolutionStateRows, d]],
+        outputDTypes: [outputs.dtype, outputs.dtype])
     return (out[0], out[1])
 }
 
@@ -1659,8 +1751,9 @@ func inkling2ExpertConvolution(
     let out = Inkling2DecodeKernels.shared.expertConvolution(
         [sums, residual, state, convolutionWeight, MLXArray([expertConvolutionDivisor])],
         template: [("T", sums.dtype), ("D", d)],
-        grid: (rows * d, 1, 1), threadGroup: (256, 1, 1),
-        outputShapes: [[rows, d], [rows, 3, d]], outputDTypes: [sums.dtype, sums.dtype])
+        grid: (rows * d, 1, 1), threadGroup: (standardThreadgroupThreads, 1, 1),
+        outputShapes: [[rows, d], [rows, convolutionStateRows, d]],
+        outputDTypes: [sums.dtype, sums.dtype])
     return (out[0], out[1])
 }
 
@@ -1810,8 +1903,9 @@ struct Inkling2ExpertTensors {
     /// Whether the fused expert kernels read this format with `inputDims` per row.
     func supportsFusedDecode(inputDims: Int) -> Bool {
         let modes: [QuantizationMode] = [.affine, .nvfp4, .mxfp4, .mxfp8]
-        return modes.contains(format.mode) && [4, 8].contains(format.bits)
-            && format.groupSize % 16 == 0 && inputDims % 16 == 0
+        return modes.contains(format.mode) && fusedExpertBits.contains(format.bits)
+            && format.groupSize.isMultiple(of: fusedExpertWidthMultiple)
+            && inputDims.isMultiple(of: fusedExpertWidthMultiple)
             && (format.mode == .affine) == (biases != nil)
     }
 
@@ -1838,14 +1932,15 @@ func inkling2ExpertGateUp(
     _ x: MLXArray, experts: Inkling2ExpertTensors, indices: MLXArray, softcaps: MLXArray
 ) -> MLXArray {
     let (rows, k) = (indices.dim(0), indices.dim(1))
-    let (din, channels) = (x.dim(-1), experts.weight.dim(1) / 2)
+    let (din, channels) = (x.dim(-1), experts.weight.dim(1) / gateUpRowsPerChannel)
     let simdgroups = 4
     return Inkling2DecodeKernels.shared.expertGateUp(
         [x] + experts.inputs() + [indices, softcaps],
         template: experts.template(x.dtype) + [
             ("DIN", din), ("I", channels), ("KE", k), ("NSG", simdgroups),
         ],
-        grid: (channels * 32, rows * k, 1), threadGroup: (simdgroups * 32, 1, 1),
+        grid: (channels * metalSimdWidth, rows * k, 1),
+        threadGroup: (simdgroups * metalSimdWidth, 1, 1),
         outputShapes: [[rows, k, channels]], outputDTypes: [x.dtype])[0]
 }
 
@@ -1860,7 +1955,7 @@ func inkling2ExpertDown(
     _ activations: MLXArray, experts: Inkling2ExpertTensors, indices: MLXArray,
     weights: MLXArray, residual: MLXArray, state: MLXArray, convolutionWeight: MLXArray
 ) -> (hidden: MLXArray, state: MLXArray) {
-    let (rows, k, inner) = (activations.dim(0), activations.dim(1), activations.dim(2))
+    let (rows, k, inner) = activations.shape3
     let d = experts.weight.dim(1)
     let tile = 2
     let out = Inkling2DecodeKernels.shared.expertDown(
@@ -1871,8 +1966,8 @@ func inkling2ExpertDown(
         template: experts.template(activations.dtype) + [
             ("K", inner), ("D", d), ("KE", k), ("ROWS", tile),
         ],
-        grid: (d / tile * k * 32, rows, 1), threadGroup: (k * 32, 1, 1),
-        outputShapes: [[rows, d], [rows, 3, d]],
+        grid: (d / tile * k * metalSimdWidth, rows, 1), threadGroup: (k * metalSimdWidth, 1, 1),
+        outputShapes: [[rows, d], [rows, convolutionStateRows, d]],
         outputDTypes: [activations.dtype, activations.dtype])
     return (out[0], out[1])
 }
@@ -2045,15 +2140,28 @@ let inkling2RouterWidthMultiple = 4
 /// holds this many simdgroups, one expert each.
 let inkling2RouterExpertMultiple = 8
 
+/// Whether ``inkling2RouterLogits(_:weight:)`` runs its kernel for an input width of `width` and
+/// `experts` experts: the kernel reads whole `float4` vectors and fills whole threadgroups.
+func inkling2RouterKernelReads(width: Int, experts: Int) -> Bool {
+    width.isMultiple(of: inkling2RouterWidthMultiple)
+        && experts.isMultiple(of: inkling2RouterExpertMultiple)
+}
+
 /// The float32 router logits `x @ weight.T` of a few rows, `[N, E]`, each row computed alone.
 ///
+/// A shape the kernel does not read (see ``inkling2RouterKernelReads(width:experts:)``) takes a
+/// float32 matmul instead, whose rows may round with the other rows of the call.
+///
 /// - Parameters:
-///   - x: float32 `[N, D]`, with `D` a multiple of ``inkling2RouterWidthMultiple``.
-///   - weight: float32 `[E, D]`, with `E` a multiple of ``inkling2RouterExpertMultiple``.
+///   - x: float32 `[N, D]`.
+///   - weight: float32 `[E, D]`.
 /// - Returns: float32 `[N, E]`.
 func inkling2RouterLogits(_ x: MLXArray, weight: MLXArray) -> MLXArray {
     let (rows, d) = (x.dim(0), x.dim(1))
     let experts = weight.dim(0)
+    guard inkling2RouterKernelReads(width: d, experts: experts) else {
+        return matmul(x, weight.transposed())
+    }
     let threads = inkling2RouterExpertMultiple * metalSimdWidth
     return Inkling2Kernels.shared.routerLogits(
         [x, weight], template: [("D", d), ("E", experts)],
@@ -2070,8 +2178,8 @@ func inkling2ExpertRouting(
     let out = Inkling2Kernels.shared.expertRouting(
         [logits, bias, MLXArray(scoreEps), MLXArray(routeScale)],
         template: [("E", e), ("K", topK)],
-        grid: (tokens * 32, 1, 1),
-        threadGroup: (256, 1, 1),
+        grid: (tokens * metalSimdWidth, 1, 1),
+        threadGroup: (standardThreadgroupThreads, 1, 1),
         outputShapes: [shape, shape],
         outputDTypes: [.uint32, .float32])
     return (out[0], out[1])
