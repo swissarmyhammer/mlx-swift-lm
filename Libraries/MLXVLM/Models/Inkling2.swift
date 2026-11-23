@@ -223,8 +223,9 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
 
     public let config: Inkling2Configuration
 
-    /// Long chunks give each of the 128 experts enough rows to fill its matmul tiles.
-    static let prefillStepSize = 2048
+    /// Long chunks give each of the 128 experts enough rows to fill its matmul tiles. 4096
+    /// prefills 4-7% faster than 2048 on an M5 Ultra for about 1 GiB more peak memory.
+    static let prefillStepSize = 4096
 
     /// The most tokens of a speculative verify pass whose convolution windows each layer visit
     /// keeps, thus the pass rewinds in place: the bonus token and up to 15 drafts.
@@ -434,6 +435,7 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         for layer in languageModel.layers {
             try layer.attention.prepareFusedProjections()
             try layer.prepareMessageControllers()
+            layer.prepareAttentionNorms()
         }
     }
 

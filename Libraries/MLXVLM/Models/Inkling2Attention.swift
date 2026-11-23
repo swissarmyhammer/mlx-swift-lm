@@ -474,6 +474,69 @@ final class Inkling2Attention: Module {
         !(cache is QuantizedKVCacheProtocol) && !(cache is KVCacheAttentionProtocol)
     }
 
+    /// The log-length scaling of a full-attention decode step at `offset`, `[1]`, or `nil` for a
+    /// sliding layer.
+    var hasLogScaling: Bool { dynamicKeyConvolution != nil }
+
+    func decodeTau(offset: Int) -> MLXArray? {
+        guard dynamicKeyConvolution != nil else { return nil }
+        return MLXArray([1 + logScalingAlpha * log(max(Float(offset + 1) / logScalingFloor, 1))])
+    }
+
+    /// The part of a one-row decode step before the cache: the prologue outputs (see
+    /// ``Inkling2PrologueOutput``), then the gate and the sinks. It reads no cache, so it traces.
+    func decodePrologue(
+        queryInput: MLXArray, keyInput: MLXArray, valueInput: MLXArray,
+        states: (MLXArray, MLXArray), tau: MLXArray?
+    ) -> [MLXArray] {
+        let p = project(queryInput: queryInput, keyInput: keyInput, valueInput: valueInput)
+        var taps: (k: MLXArray, v: MLXArray)?
+        let weights: (k: MLXArray, v: MLXArray)
+        if let keyConvolution = dynamicKeyConvolution,
+            let valueConvolution = dynamicValueConvolution
+        {
+            guard let keyTaps = p.keyTaps, let valueTaps = p.valueTaps else {
+                preconditionFailure("The projection of a dynamic convolution returns its taps")
+            }
+            taps = (keyTaps, valueTaps)
+            weights = (keyConvolution.staticWeight, valueConvolution.staticWeight)
+        } else {
+            guard let keyConvolution = keyConvolution as? Inkling2ShortConvolution,
+                let valueConvolution = valueConvolution as? Inkling2ShortConvolution
+            else { preconditionFailure("Without dynamic convolutions both are static") }
+            weights = (keyConvolution.conv1d.weight, valueConvolution.conv1d.weight)
+        }
+        let out = inkling2AttentionPrologue(
+            q: p.queries, r: p.relative, k: p.keys, v: p.values, taps: taps, weights: weights,
+            states: states, qScale: queryClip.scale, rScale: relativeClip.scale, tau: tau,
+            heads: heads, kvHeads: kvHeads, headDim: headDim,
+            relativeDim: relativeLogits.proj.dim(0), qkThreshold: qkThreshold,
+            relativeThreshold: relativeThreshold)
+        return out + [p.gate, p.sinks]
+    }
+
+    /// The gated attention of a one-row decode step over `cache`, after it stores the step's
+    /// key and value, `[B, 1, heads * headDim]` before the output projection.
+    ///
+    /// - Parameter prologue: the outputs of ``decodePrologue(queryInput:keyInput:valueInput:states:tau:)``.
+    func decodeAttend(_ prologue: [MLXArray], cache: KVCache) -> MLXArray {
+        let rows = prologue[Inkling2PrologueOutput.queries].dim(0)
+        let offset = cache.offset
+        let rotating = cache as? RotatingKVCache
+        let (keys, values) = cache.update(
+            keys: prologue[Inkling2PrologueOutput.keys],
+            values: prologue[Inkling2PrologueOutput.values])
+        let gate = prologue[Inkling2PrologueOutput.nextValueState + 1]
+        let sinks = prologue[Inkling2PrologueOutput.nextValueState + 2]
+        return inkling2DecodeAttention(
+            q: prologue[Inkling2PrologueOutput.queries], k: keys, v: values,
+            relative: prologue[Inkling2PrologueOutput.relative], table: relativeLogits.proj,
+            sinks: sinks, gate: gate, scale: scale, ringIndex: rotating?.ringWriteIndex,
+            window: window, keep: rotating?.preservedPrefixTokens ?? 0,
+            evicted: offset + 1 - keys.dim(headPositionAxis)
+        ).reshaped(rows, 1, -1)
+    }
+
     /// One token per row through the decode kernels.
     ///
     /// The rows are the sequences of a batch, or with `sequential` the consecutive tokens of one

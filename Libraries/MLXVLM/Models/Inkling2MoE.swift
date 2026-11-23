@@ -218,6 +218,29 @@ final class Inkling2Experts: Module {
             outputs: self(x, indices), weights: weights, residual: residual, state: state,
             convolutionWeight: convolutionWeight)
     }
+
+    /// ``decode(_:indices:weights:residual:state:convolutionWeight:)`` that routes inside the
+    /// gate and up kernel, or `nil` when the fused kernels do not take these shapes.
+    func decode(
+        _ x: MLXArray, logits: MLXArray, bias: MLXArray, topK: Int, scoreEps: Float,
+        routeScale: Float, residual: MLXArray, state: MLXArray, convolutionWeight: MLXArray
+    ) -> (MLXArray, MLXArray)? {
+        let (gateUp, down) = (gateUpProj.tensors, downProj.tensors)
+        let (dims, hidden) = (down.weight.dim(1), gateUp.weight.dim(1) / gateUpRowsPerChannel)
+        guard logits.dim(0) <= Inkling2.speculativeVerifyPositions,
+            topK <= Self.fusedDecodeMaximumExperts,
+            hidden.isMultiple(of: Self.fusedDecodeHiddenMultiple),
+            dims.isMultiple(of: Self.fusedDecodeWidthMultiple),
+            gateUp.supportsFusedDecode(inputDims: dims),
+            down.supportsFusedDecode(inputDims: hidden)
+        else { return nil }
+        let routed = inkling2RoutedExpertGateUp(
+            x, experts: gateUp, logits: logits, bias: bias, topK: topK, scoreEps: scoreEps,
+            routeScale: routeScale, softcaps: softcaps.value)
+        return inkling2ExpertDown(
+            routed.activations, experts: down, indices: routed.indices, weights: routed.weights,
+            residual: residual, state: state, convolutionWeight: convolutionWeight)
+    }
 }
 
 private final class Inkling2Router: Module {
@@ -233,6 +256,18 @@ private final class Inkling2Router: Module {
         _weight.wrappedValue = MLXArray.zeros([config.experts, config.hiddenSize], dtype: .float32)
         _bias.wrappedValue = MLXArray.zeros([config.experts], dtype: .float32)
         super.init()
+    }
+
+    /// The float32 router logits `[N, E]` of the rows of `x` from the logits kernel, or `nil`
+    /// when the rows do not take it.
+    func kernelLogits(_ x: MLXArray) -> MLXArray? {
+        let width = x.dim(-1)
+        let rows = x.size / width
+        guard rows <= Inkling2.speculativeVerifyPositions,
+            inkling2RouterKernelReads(width: width, experts: weight.dim(0)),
+            Device.defaultDevice().deviceType == .gpu
+        else { return nil }
+        return inkling2RouterLogits(x.reshaped(rows, width).asType(.float32), weight: weight)
     }
 
     /// The top experts of each row of `x` and their weights.
@@ -304,6 +339,14 @@ final class Inkling2SparseMoE: Module {
         convolutionWeight: MLXArray
     ) -> (MLXArray, MLXArray) {
         let rows = routerInput.dim(0)
+        if let logits = router.kernelLogits(routerInput),
+            let output = experts.decode(
+                x, logits: logits, bias: router.bias, topK: router.topK,
+                scoreEps: routeWeightEpsilon, routeScale: router.routeScale, residual: residual,
+                state: state, convolutionWeight: convolutionWeight)
+        {
+            return output
+        }
         var (indices, weights) = router(routerInput)
         (indices, weights) = (indices.reshaped(rows, -1), weights.reshaped(rows, -1))
         return experts.decode(

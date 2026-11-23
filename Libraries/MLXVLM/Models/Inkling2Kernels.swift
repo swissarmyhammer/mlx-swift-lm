@@ -650,7 +650,7 @@ func inkling2MessageGates(
         ("MSTRIDE", messages.dim(1)), ("NW", normWeight.dim(0)),
     ]
     let kernels = Inkling2Kernels.shared
-    let firstArray = MLXArray(Int32(first))
+    let firstArray = Inkling2KernelConstants.int(Int32(first))
     let pair = kernels.messagePair(
         [inputs, messages, firstArray], template: template,
         grid: (streams * rows * threads, 1, 1), threadGroup: (threads, 1, 1),
@@ -659,7 +659,8 @@ func inkling2MessageGates(
     let f = matmul(h, forget.asType(.float32))
     let g = matmul(h, gain.asType(.float32))
     return kernels.messageBlendNorm(
-        [inputs, messages, firstArray, f, g, normWeight, MLXArray([eps])], template: template,
+        [inputs, messages, firstArray, f, g, normWeight, Inkling2KernelConstants.floats([eps])],
+        template: template,
         grid: (streams * rows * threads, 1, 1), threadGroup: (threads, 1, 1),
         outputShapes: [[streams, rows, d]], outputDTypes: [down.dtype])[0]
 }
@@ -763,7 +764,7 @@ func inkling2RowConvolution(
     let c = x.dim(-1)
     let dtype = x.dtype
     let rowsPerThread = 16
-    let placeholder = MLXArray([Float(0)])
+    let placeholder = Inkling2KernelConstants.floats([0])
     let out = Inkling2Kernels.shared.rowConvolution(
         [
             experts == nil ? x : contiguous(x),
@@ -771,7 +772,9 @@ func inkling2RowConvolution(
             experts.map { contiguous($0.weights) } ?? placeholder,
             state.map { contiguous($0) } ?? placeholder, base ?? placeholder, contiguous(weight),
             dynamicTaps ?? placeholder, MLXArray([Int32(l)]),
-            MLXArray([dynamicTaps == nil ? staticConvolutionDivisor : dynamicConvolutionDivisor]),
+            Inkling2KernelConstants.floats([
+                dynamicTaps == nil ? staticConvolutionDivisor : dynamicConvolutionDivisor
+            ]),
         ],
         template: [
             ("T", dtype), ("OT", outputType), ("C", c), ("K", k),
@@ -1296,13 +1299,15 @@ func inkling2DepthMix(
     let q = queries.dim(0)
     let rows = blocks.dim(1)
     let threads = maximumThreadgroupThreads
-    let dummy = MLXArray.zeros([1], dtype: .bfloat16)
+    let dummy = Inkling2KernelConstants.zeros(.bfloat16)
     let norm = normWeight != nil
     let out = Inkling2DecodeKernels.shared.depthMix(
         [
             blocks, base ?? dummy, convolution?.x ?? dummy, convolution?.state ?? dummy,
             convolution?.weight ?? dummy, queries, normWeight ?? dummy,
-            MLXArray([1 / Float(d).squareRoot(), eps, staticConvolutionDivisor]),
+            Inkling2KernelConstants.floats([
+                1 / Float(d).squareRoot(), eps, staticConvolutionDivisor,
+            ]),
         ],
         template: [
             ("T", DType.bfloat16), ("TO", norm ? DType.bfloat16 : DType.float32),
@@ -1459,7 +1464,7 @@ func inkling2AttentionPrologue(
     let rows = q.dim(0)
     let kv = kvHeads * headDim
     let full = taps != nil
-    let dummy = MLXArray.zeros([1], dtype: q.dtype)
+    let dummy = Inkling2KernelConstants.zeros(q.dtype)
     let divisor = full ? dynamicConvolutionDivisor : staticConvolutionDivisor
     let outputShapes = [
         [rows, heads, headDim], [rows, heads, relativeDim], [rows, kvHeads, 1, headDim],
@@ -1469,8 +1474,8 @@ func inkling2AttentionPrologue(
     return Inkling2DecodeKernels.shared.attentionPrologue(
         [
             q, r, k, v, taps?.k ?? dummy, taps?.v ?? dummy, weights.k, weights.v, states.k,
-            states.v, qScale, rScale, tau ?? MLXArray([Float(1)]),
-            MLXArray([qkThreshold, relativeThreshold, divisor]),
+            states.v, qScale, rScale, tau ?? Inkling2KernelConstants.floats([1]),
+            Inkling2KernelConstants.floats([qkThreshold, relativeThreshold, divisor]),
         ],
         template: [
             ("T", q.dtype), ("DH", headDim), ("HQ", heads), ("HKV", kvHeads),
@@ -1641,7 +1646,7 @@ func inkling2MessageControllers(
         ("SHARED", inputs.dim(0) == 1 && streams > 1), ("MSTRIDE", messages.dim(1)),
     ]
     let kernels = Inkling2DecodeKernels.shared
-    let firstArray = MLXArray(Int32(first))
+    let firstArray = Inkling2KernelConstants.int(Int32(first))
     let h = kernels.messageDown(
         [inputs, messages, firstArray, down], template: template,
         grid: (
@@ -1656,7 +1661,7 @@ func inkling2MessageControllers(
         outputShapes: [[streams, rows, d], [streams, rows, chunks]],
         outputDTypes: [.float32, .float32])
     let out = kernels.messageNorm(
-        [blend[0], blend[1], normWeight, MLXArray([eps])],
+        [blend[0], blend[1], normWeight, Inkling2KernelConstants.floats([eps])],
         template: [
             ("T", down.dtype), ("D", d), ("S", streams), ("C", chunks), ("TG", threads),
             ("NW", normWeight.dim(0)), ("F32_COPY", f32Copy),
@@ -1723,7 +1728,7 @@ func inkling2ExpertEpilogue(
     let out = Inkling2DecodeKernels.shared.expertEpilogue(
         [
             outputs, weights, residual, state, convolutionWeight,
-            MLXArray([expertConvolutionDivisor]),
+            Inkling2KernelConstants.floats([expertConvolutionDivisor]),
         ],
         template: [("T", outputs.dtype), ("D", d), ("KE", k)],
         grid: (rows * d, 1, 1), threadGroup: (standardThreadgroupThreads, 1, 1),
@@ -1749,7 +1754,10 @@ func inkling2ExpertConvolution(
 ) -> (hidden: MLXArray, state: MLXArray) {
     let (rows, d) = (sums.dim(0), sums.dim(1))
     let out = Inkling2DecodeKernels.shared.expertConvolution(
-        [sums, residual, state, convolutionWeight, MLXArray([expertConvolutionDivisor])],
+        [
+            sums, residual, state, convolutionWeight,
+            Inkling2KernelConstants.floats([expertConvolutionDivisor]),
+        ],
         template: [("T", sums.dtype), ("D", d)],
         grid: (rows * d, 1, 1), threadGroup: (standardThreadgroupThreads, 1, 1),
         outputShapes: [[rows, d], [rows, convolutionStateRows, d]],
@@ -1858,6 +1866,91 @@ private let expertGateUpSource = """
         }
     """
 
+/// ``expertGateUpSource`` that routes its own row first: the first simdgroup of each
+/// threadgroup runs the routing of ``expertRoutingSource`` on the row's router logits, and the
+/// first threadgroup of each expert slot writes the slot's expert and weight for the down
+/// projection. One dispatch fewer per layer visit, with the bits of the two kernels.
+private let expertRoutedGateUpSource = """
+        constexpr int RE = (E + 31) / 32;
+        const uint lane = thread_index_in_simdgroup;
+        const uint sg = simdgroup_index_in_threadgroup;
+        const int bj = threadgroup_position_in_grid.y;
+        const int token = bj / KE;
+        const int slot = bj % KE;
+        threadgroup uint chosen;
+        if (sg == 0) {
+            auto lrow = logits + size_t(token) * E;
+            float score[RE];
+            float biased[RE];
+            for (int i = 0; i < RE; i++) {
+                int ex = lane + 32 * i;
+                score[i] = 0.0f;
+                biased[i] = -INFINITY;
+                if (ex < E) {
+                    float xl = lrow[ex];
+                    float y = 1.0f / (1.0f + metal::precise::exp(metal::abs(xl)));
+                    score[i] = xl < 0 ? y : 1.0f - y;
+                    biased[i] = score[i] + bias[ex];
+                }
+            }
+            float wk[KE];
+            int winners[KE];
+            for (int k = 0; k < KE; k++) {
+                float best = -INFINITY;
+                int best_e = E;
+                for (int i = 0; i < RE; i++) {
+                    int ex = lane + 32 * i;
+                    if (biased[i] > best || (biased[i] == best && ex < best_e)) {
+                        best = biased[i];
+                        best_e = ex;
+                    }
+                }
+                float top = simd_max(best);
+                int winner = simd_min(best == top ? best_e : E);
+                float sc = 0.0f;
+                for (int i = 0; i < RE; i++) {
+                    if (lane + 32 * i == winner) {
+                        sc = score[i];
+                        biased[i] = -INFINITY;
+                    }
+                }
+                wk[k] = simd_sum(sc);
+                winners[k] = winner;
+            }
+            if (lane == 0) {
+                chosen = winners[slot];
+                if (threadgroup_position_in_grid.x == 0) {
+                    float total = 0.0f;
+                    for (int k = 0; k < KE; k++) {
+                        total = wk[k] + total;
+                    }
+                    inds[bj] = winners[slot];
+                    weights[bj] = wk[slot] / (total + eps) * scale;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const int c = threadgroup_position_in_grid.x * NSG + sg;
+        const uint e = chosen;
+        const size_t row = size_t(e) * 2 * I + 2 * c;
+        float acc[2] = {0.0f, 0.0f};
+        inkling2_rows_dot<BITS, GS, AFFINE, DIN, 2>(
+            (const device uint8_t*)w + row * (DIN * BITS / 8), scales + row * (DIN / GS),
+            biases + (AFFINE ? row * (DIN / GS) : 0), x + size_t(token) * DIN, lane, acc);
+        const float g = simd_sum(acc[0]);
+        const float u = simd_sum(acc[1]);
+        if (lane == 0) {
+            const float s = HAS_GS ? global_scale[e] / (448.0f * 6.0f) : 1.0f;
+            const float gate = float(T(g * s));
+            const float up = float(T(u * s));
+            const float y = 1.0f / (1.0f + metal::precise::exp(metal::abs(gate)));
+            const float sig = gate < 0 ? y : 1.0f - y;
+            const float gc = metal::precise::tanh(gate / caps[0]) * caps[0];
+            const float uc = metal::precise::tanh(up / caps[1]) * caps[1];
+            act[size_t(bj) * I + c] = T(gc * sig * uc);
+        }
+    """
+
 /// One simdgroup per routed expert over `ROWS` output channels, then the weighted sum of the
 /// experts, its short convolution and the residual add.
 private let expertDownSource =
@@ -1910,7 +2003,10 @@ struct Inkling2ExpertTensors {
     }
 
     fileprivate func inputs() -> [MLXArray] {
-        [weight, scales, biases ?? MLXArray([Float(0)]), globalScale ?? MLXArray([Float(1)])]
+        [
+            weight, scales, biases ?? Inkling2KernelConstants.floats([0]),
+            globalScale ?? Inkling2KernelConstants.floats([1]),
+        ]
     }
 
     fileprivate func template(_ dtype: DType) -> [(String, any KernelTemplateArg)] {
@@ -1944,6 +2040,36 @@ func inkling2ExpertGateUp(
         outputShapes: [[rows, k, channels]], outputDTypes: [x.dtype])[0]
 }
 
+/// ``inkling2ExpertGateUp(_:experts:indices:softcaps:)`` that routes each row from its router
+/// logits, with the arithmetic of ``inkling2ExpertRouting(logits:bias:topK:scoreEps:routeScale:)``.
+///
+/// - Parameters:
+///   - logits: float32 `[B, E]`, the router logits.
+///   - bias: float32 `[E]`, the score correction.
+/// - Returns: the activations `[B, K, I]`, the uint32 experts `[B, K]` and their float32
+///   weights `[B, K]`.
+func inkling2RoutedExpertGateUp(
+    _ x: MLXArray, experts: Inkling2ExpertTensors, logits: MLXArray, bias: MLXArray, topK: Int,
+    scoreEps: Float, routeScale: Float, softcaps: MLXArray
+) -> (activations: MLXArray, indices: MLXArray, weights: MLXArray) {
+    let rows = logits.dim(0)
+    let (din, channels) = (x.dim(-1), experts.weight.dim(1) / gateUpRowsPerChannel)
+    let simdgroups = 4
+    let out = Inkling2DecodeKernels.shared.routedExpertGateUp(
+        [x] + experts.inputs() + [
+            logits, bias, MLXArray(scoreEps), MLXArray(routeScale), softcaps,
+        ],
+        template: experts.template(x.dtype) + [
+            ("DIN", din), ("I", channels), ("KE", topK), ("NSG", simdgroups),
+            ("E", logits.dim(-1)),
+        ],
+        grid: (channels * metalSimdWidth, rows * topK, 1),
+        threadGroup: (simdgroups * metalSimdWidth, 1, 1),
+        outputShapes: [[rows, topK, channels], [rows, topK], [rows, topK]],
+        outputDTypes: [x.dtype, .uint32, .float32])
+    return (out[0], out[1], out[2])
+}
+
 /// ``inkling2ExpertEpilogue(outputs:weights:residual:state:convolutionWeight:)`` of the down
 /// projections of `activations`, without materializing the expert outputs.
 ///
@@ -1961,7 +2087,7 @@ func inkling2ExpertDown(
     let out = Inkling2DecodeKernels.shared.expertDown(
         [activations] + experts.inputs() + [
             indices, weights, residual, state, convolutionWeight,
-            MLXArray([expertConvolutionDivisor]),
+            Inkling2KernelConstants.floats([expertConvolutionDivisor]),
         ],
         template: experts.template(activations.dtype) + [
             ("K", inner), ("D", d), ("KE", k), ("ROWS", tile),
@@ -1982,6 +2108,7 @@ private final class Inkling2DecodeKernels: Sendable {
     let expertEpilogue: MLXFast.MLXFastKernel
     let expertConvolution: MLXFast.MLXFastKernel
     let expertGateUp: MLXFast.MLXFastKernel
+    let routedExpertGateUp: MLXFast.MLXFastKernel
     let expertDown: MLXFast.MLXFastKernel
     let depthMix: MLXFast.MLXFastKernel
     let messageDown: MLXFast.MLXFastKernel
@@ -2021,6 +2148,14 @@ private final class Inkling2DecodeKernels: Sendable {
         expertGateUp = MLXFast.metalKernel(
             name: "inkling2_expert_gate_up", inputNames: ["x"] + experts + ["caps"],
             outputNames: ["act"], source: expertGateUpSource, header: expertHeader)
+        routedExpertGateUp = MLXFast.metalKernel(
+            name: "inkling2_routed_expert_gate_up",
+            inputNames: [
+                "x", "w", "scales", "biases", "global_scale", "logits", "bias", "eps",
+                "scale", "caps",
+            ],
+            outputNames: ["act", "inds", "weights"], source: expertRoutedGateUpSource,
+            header: expertHeader)
         expertDown = MLXFast.metalKernel(
             name: "inkling2_expert_down",
             inputNames: ["act"] + experts + [
@@ -2183,4 +2318,45 @@ func inkling2ExpertRouting(
         outputShapes: [shape, shape],
         outputDTypes: [.uint32, .float32])
     return (out[0], out[1])
+}
+
+// MARK: - Constants
+
+/// The small constant arrays the kernel calls take, made once per value from host data. A
+/// decode step makes hundreds of kernel calls, and each new array costs host time to build and,
+/// for a filled array, a dispatch. Host data needs no evaluation, so a compiled trace may make
+/// them.
+enum Inkling2KernelConstants {
+    private enum Key: Hashable {
+        case zeros(DType)
+        case floats([Float])
+        case int(Int32)
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var arrays: [Key: MLXArray] = [:]
+
+    /// A one-element zero array, the placeholder of an unused kernel input.
+    static func zeros(_ dtype: DType) -> MLXArray {
+        cached(.zeros(dtype)) { MLXArray(Data(count: dtype.size), [1], dtype: dtype) }
+    }
+
+    /// A float32 vector of `values`.
+    static func floats(_ values: [Float]) -> MLXArray {
+        cached(.floats(values)) { MLXArray(values) }
+    }
+
+    /// An int32 scalar.
+    static func int(_ value: Int32) -> MLXArray {
+        cached(.int(value)) { MLXArray(value) }
+    }
+
+    private static func cached(_ key: Key, make: () -> MLXArray) -> MLXArray {
+        lock.withLock {
+            if let array = arrays[key] { return array }
+            let array = make()
+            arrays[key] = array
+            return array
+        }
+    }
 }

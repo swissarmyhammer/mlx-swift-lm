@@ -201,10 +201,11 @@ final class Inkling2DecoderLayer: Module {
         if let gates, let readout {
             let (controllers, messages, first) = gates
             let norms = attentionNormWeights
+            let attention = parts(of: controllers).attention
             let out = inkling2MessageGates(
                 inputs: readout.reshaped(b * l, -1, dims), messages: messages, first: first,
-                down: controllers.attention.down, forget: controllers.attention.forget,
-                gain: controllers.attention.gain, normWeight: norms, eps: eps)
+                down: attention.down, forget: attention.forget,
+                gain: attention.gain, normWeight: norms, eps: eps)
             (q, k, v) = (
                 out[LayerMessage.query].reshaped(b, l, dims),
                 out[LayerMessage.key].reshaped(b, l, dims),
@@ -227,10 +228,11 @@ final class Inkling2DecoderLayer: Module {
         let expertInput: MLXArray
         if let gates {
             let (controllers, messages, first) = gates
+            let mlp = parts(of: controllers).mlp
             expertInput = inkling2MessageGates(
                 inputs: mlpInputs.reshaped(b * l, 1, dims), messages: messages,
-                first: first + LayerMessage.mlp, down: controllers.mlp.down,
-                forget: controllers.mlp.forget, gain: controllers.mlp.gain,
+                first: first + LayerMessage.mlp, down: mlp.down,
+                forget: mlp.forget, gain: mlp.gain,
                 normWeight: postAttentionNorm.weight.reshaped(1, dims),
                 eps: eps
             ).reshaped(b, l, dims)
@@ -285,9 +287,20 @@ final class Inkling2DecoderLayer: Module {
         if let inputNorm {
             return inputNorm.weight.reshaped(1, -1)
         }
+        if let cached = stackedNorms.value { return cached }
         let norms = attentionInputNorms
         return stacked([norms.query.weight, norms.key.weight, norms.value.weight])
     }
+
+    /// Stacks the attention input norms of a full-attention layer once, for the kernels.
+    func prepareAttentionNorms() {
+        guard inputNorm == nil, stackedNorms.value == nil else { return }
+        let weights = attentionNormWeights
+        eval(weights)
+        stackedNorms.value = weights
+    }
+
+    private let stackedNorms = Inkling2ArrayBox()
 
     /// Stores the state each convolution window of a forward pass ends with, moves the cache past
     /// the pass, and hands `verifyCache` the windows, so that it rewinds the pass in place.
@@ -330,12 +343,229 @@ final class Inkling2DecoderLayer: Module {
             && Device.defaultDevice().deviceType == .gpu
     }
 
+    // MARK: Compiled decode
+
+    /// The places of the arguments of the decode traces.
+    private enum TraceArgument {
+        /// Both traces: the layer input `[1, D]`.
+        static let hidden = 0
+        /// Prologue: the key and value convolution states.
+        static let keyState = 1
+        static let valueState = 2
+        /// Epilogue: the gated attention, the normalized residual and the attention and MLP
+        /// convolution states.
+        static let attended = 1
+        static let normedResidual = 2
+        static let attentionState = 3
+        static let mlpState = 4
+    }
+
+    /// The trace of the part of a one-row decode step before the attention cache.
+    private let compiledPrologue = CompiledTrace<Inkling2DecoderLayer> { layer, arguments in
+        layer.decodePrologue(arguments)
+    }
+    private let compiledMessagePrologue = CompiledTrace<Inkling2DecoderLayer> {
+        layer, arguments in
+        layer.decodePrologue(arguments)
+    }
+    /// The trace of the part of a one-row decode step after the attention cache.
+    private let compiledEpilogue = CompiledTrace<Inkling2DecoderLayer> { layer, arguments in
+        layer.decodeEpilogue(arguments)
+    }
+    private let compiledMessageEpilogue = CompiledTrace<Inkling2DecoderLayer> {
+        layer, arguments in
+        layer.decodeEpilogue(arguments)
+    }
+
+    /// The core-layer index of the messages a trace reads, fixed for each layer.
+    private var traceMessageIndex = 0
+
+    /// Optional trace arguments after the fixed ones: the blocks, the message bank and the
+    /// log-length scaling, each present or not for every call of one trace.
+    private struct OptionalArguments {
+        var blocks: MLXArray?
+        var messages: MLXArray?
+        var tau: MLXArray?
+
+        var arrays: [MLXArray] { [blocks, messages, tau].compactMap { $0 } }
+
+        /// Reads the optional arguments after `fixed` arguments, with the presence of each.
+        init(_ arguments: [MLXArray], fixed: Int, blocks: Bool, messages: Bool, tau: Bool) {
+            var index = fixed
+            func next(_ present: Bool) -> MLXArray? {
+                guard present else { return nil }
+                defer { index += 1 }
+                return arguments[index]
+            }
+            self.blocks = next(blocks)
+            self.messages = next(messages)
+            self.tau = next(tau)
+        }
+
+        init(blocks: MLXArray?, messages: MLXArray?, tau: MLXArray?) {
+            self.blocks = blocks
+            self.messages = messages
+            self.tau = tau
+        }
+    }
+
+    private var tracePrologueFixed: Int { 3 }
+    private var traceEpilogueFixed: Int { 5 }
+
+    /// The traced prologue: `[normedResidual] + prologue outputs + [gate, sinks]`.
+    private func decodePrologue(_ arguments: [MLXArray]) -> [MLXArray] {
+        let x = arguments[TraceArgument.hidden]
+        let rows = x.dim(0)
+        let dims = x.dim(-1)
+        let options = OptionalArguments(
+            arguments, fixed: tracePrologueFixed, blocks: attentionInput != nil,
+            messages: arguments.count > tracePrologueFixed + (attentionInput != nil ? 1 : 0)
+                + (attention.hasLogScaling ? 1 : 0),
+            tau: attention.hasLogScaling)
+        let eps = postAttentionNorm.eps
+        let messages = options.messages.map { ($0, traceMessageIndex * LayerMessage.count) }
+        let controllers = messages == nil ? nil : messageControllers().map(parts(of:))
+        let attentionNorms = attentionNormWeights
+        let normedResidual: MLXArray
+        var inputs: [MLXArray]
+        if let attentionInput, let blocks = options.blocks {
+            let mix = inkling2DepthMix(
+                blocks: blocks.reshaped(-1, rows, dims), base: x, convolution: nil,
+                queries: attentionInput.query.reshaped(-1, dims),
+                normWeight: controllers == nil ? attentionNorms : nil, eps: eps)
+            normedResidual = mix.normed
+            if let messages, let controllers {
+                let (out, _) = inkling2MessageControllers(
+                    inputs: mix.readout.swappedAxes(0, 1), messages: messages.0,
+                    first: messages.1, down: controllers.attention.down,
+                    forget: controllers.attention.forget, gain: controllers.attention.gain,
+                    normWeight: attentionNorms, eps: eps, f32Copy: false)
+                inputs = (0 ..< LayerMessage.attentionCount).map {
+                    out[$0 ..< ($0 + 1)].reshaped(rows, 1, dims)
+                }
+            } else {
+                let readout = mix.readout.reshaped(rows, 1, -1, dims)
+                inputs = (0 ..< readout.dim(matrixRowAxis)).map { readout[0..., 0..., $0, 0...] }
+            }
+        } else {
+            normedResidual = unweightedRMSNorm(x.asType(.float32))
+            let (q, k, v) = attentionInputs(
+                x.reshaped(rows, 1, dims), readout: nil,
+                messages: messages.map { layerMessages($0.0, index: traceMessageIndex) })
+            inputs = [q, k, v]
+        }
+        if inputs.count == 1 {
+            inputs = [inputs[0], inputs[0], inputs[0]]
+        }
+        return [normedResidual]
+            + attention.decodePrologue(
+                queryInput: inputs[LayerMessage.query], keyInput: inputs[LayerMessage.key],
+                valueInput: inputs[LayerMessage.value],
+                states: (arguments[TraceArgument.keyState], arguments[TraceArgument.valueState]),
+                tau: options.tau)
+    }
+
+    /// The traced epilogue: `[output, blocks, attentionState, mlpState]`.
+    private func decodeEpilogue(_ arguments: [MLXArray]) -> [MLXArray] {
+        let x = arguments[TraceArgument.hidden]
+        let rows = x.dim(0)
+        let dims = x.dim(-1)
+        let options = OptionalArguments(
+            arguments, fixed: traceEpilogueFixed, blocks: attentionInput != nil,
+            messages: arguments.count > traceEpilogueFixed + (attentionInput != nil ? 1 : 0),
+            tau: false)
+        let eps = postAttentionNorm.eps
+        let messages = options.messages.map { ($0, traceMessageIndex * LayerMessage.count) }
+        let controllers = messages == nil ? nil : messageControllers().map(parts(of:))
+        let attentionOutput = attention.outputProj(arguments[TraceArgument.attended])
+        let blocks = completedBlocks(
+            options.blocks?.reshaped(-1, rows, dims),
+            normedResidual: arguments[TraceArgument.normedResidual])
+        let mlpNorm = postAttentionNorm.weight.reshaped(1, dims)
+        let mix = inkling2DepthMix(
+            blocks: blocks, base: isBlockBoundary ? nil : x,
+            convolution: (
+                attentionOutput.reshaped(rows, dims), arguments[TraceArgument.attentionState],
+                postAttentionConvolution.conv1d.weight
+            ),
+            queries: mlpInput.query.reshaped(1, dims),
+            normWeight: controllers == nil ? mlpNorm : nil, f32Copy: controllers == nil,
+            eps: eps)
+        var expertInput = mix.readout.reshaped(rows, dims)
+        var routerFloat32 = mix.readoutF32
+        if let messages, let controllers {
+            let (out, f32) = inkling2MessageControllers(
+                inputs: mix.readout.reshaped(1, rows, dims), messages: messages.0,
+                first: messages.1 + LayerMessage.mlp, down: controllers.mlp.down,
+                forget: controllers.mlp.forget, gain: controllers.mlp.gain,
+                normWeight: mlpNorm, eps: eps, f32Copy: true)
+            expertInput = out.reshaped(rows, dims)
+            routerFloat32 = f32
+        }
+        guard let routerInput = routerFloat32?.reshaped(rows, dims), let state = mix.state else {
+            preconditionFailure("The MoE input has a float32 copy for the router")
+        }
+        let (output, mlpState) = mlp.decode(
+            expertInput, routerInput: routerInput, residual: mix.residual,
+            state: arguments[TraceArgument.mlpState],
+            convolutionWeight: postMLPConvolution.conv1d.weight)
+        return [output, blocks, state, mlpState]
+    }
+
+    /// A one-row decode step through the traces of the parts before and after the cache.
+    private func compiledDecode(
+        _ hidden: MLXArray, blocks: MLXArray?, cache: CacheList, convolutionCache: ArraysCache,
+        bank: (MLXArray, Int)?
+    ) -> (MLXArray, MLXArray) {
+        let dims = hidden.dim(-1)
+        let kvDims = attention.kvHeads * attention.headDim
+        func state(_ slot: Int, _ channels: Int) -> MLXArray {
+            convolutionCache[slot]
+                ?? MLXArray.zeros([1, convolutionStateLength, channels], dtype: hidden.dtype)
+        }
+        let x = hidden.reshaped(1, dims)
+        if let bank { traceMessageIndex = bank.1 }
+        let messages = bank.map { $0.0.reshaped(1, -1, dims) }
+        let blocks = blocks?.reshaped(-1, 1, dims)
+        let prologueTrace = messages == nil ? compiledPrologue : compiledMessagePrologue
+        let prologue = prologueTrace(
+            self,
+            [x, state(ConvolutionSlot.key, kvDims), state(ConvolutionSlot.value, kvDims)]
+                + OptionalArguments(
+                    blocks: attentionInput == nil ? nil : blocks, messages: messages,
+                    tau: attention.decodeTau(offset: cache[0].offset)
+                ).arrays)
+        let attended = attention.decodeAttend(Array(prologue.dropFirst()), cache: cache[0])
+        let epilogueTrace = messages == nil ? compiledEpilogue : compiledMessageEpilogue
+        let epilogue = epilogueTrace(
+            self,
+            [
+                x, attended, prologue[0], state(ConvolutionSlot.attention, dims),
+                state(ConvolutionSlot.mlp, dims),
+            ]
+                + OptionalArguments(
+                    blocks: attentionInput == nil ? nil : blocks, messages: messages, tau: nil
+                ).arrays)
+        convolutionCache[ConvolutionSlot.key] = prologue[1 + Inkling2PrologueOutput.nextKeyState]
+        convolutionCache[ConvolutionSlot.value] =
+            prologue[1 + Inkling2PrologueOutput.nextValueState]
+        convolutionCache[ConvolutionSlot.attention] = epilogue[2]
+        convolutionCache[ConvolutionSlot.mlp] = epilogue[3]
+        convolutionCache.advance(1)
+        return (epilogue[0].reshaped(1, 1, dims), epilogue[1].reshaped(-1, 1, 1, dims))
+    }
+
     /// One token per row through the decode kernels; with `sequential` the rows are the
     /// consecutive tokens of one sequence.
     private func decode(
         _ hidden: MLXArray, blocks: MLXArray?, cache: CacheList, convolutionCache: ArraysCache,
         bank: (MLXArray, Int)?, sequential: Bool
     ) -> (MLXArray, MLXArray) {
+        if !sequential, hidden.dim(0) == 1 {
+            return compiledDecode(
+                hidden, blocks: blocks, cache: cache, convolutionCache: convolutionCache,
+                bank: bank)
+        }
         let (rows, dims) = (hidden.dim(0), hidden.dim(-1))
         let kvDims = attention.kvHeads * attention.headDim
         let stateRows = sequential ? 1 : rows
@@ -347,7 +577,7 @@ final class Inkling2DecoderLayer: Module {
         let x = hidden.reshaped(rows, dims)
         let eps = postAttentionNorm.eps
         let messages = bank.map { ($0.0.reshaped(rows, -1, dims), $0.1 * LayerMessage.count) }
-        let controllers = messages == nil ? nil : messageControllers()
+        let controllers = messages == nil ? nil : messageControllers().map(parts(of:))
         let attentionNorms = attentionNormWeights
 
         // The normalized attention inputs.
@@ -515,6 +745,19 @@ final class Inkling2DecoderLayer: Module {
                 ]), verify: [])
         }
         stackedControllers.value = stacked
+        let parts = (attention: stacked.attention, mlp: stacked.mlp)
+        eval(
+            parts.attention.down, parts.attention.forget, parts.attention.gain, parts.mlp.down,
+            parts.mlp.forget, parts.mlp.gain)
+        stackedControllers.parts = parts
+    }
+
+    /// The attention and MLP parts of `controllers`, sliced once when the controllers are
+    /// prepared.
+    private func parts(of controllers: MessageControllers) -> (
+        attention: MessageControllers, mlp: MessageControllers
+    ) {
+        stackedControllers.parts ?? (controllers.attention, controllers.mlp)
     }
 
     private func messageControllers() -> MessageControllers? {
@@ -533,23 +776,44 @@ final class Inkling2DecoderLayer: Module {
         let replacesGates = parameters.flattened().contains { key, _ in
             key.contains("_message_gate.")
         }
-        defer { if replacesGates { stackedControllers.invalidate() } }
+        defer {
+            stackedNorms.value = nil
+            invalidateCompiledTraces()
+            if replacesGates { stackedControllers.invalidate() }
+        }
         return try super.update(
             parameters: parameters, verify: verify, path: path, modulePath: modulePath)
     }
 
     override func updateModule(key: String, _ value: Any) throws {
-        defer { if key.hasSuffix("_message_gate") { stackedControllers.invalidate() } }
+        defer {
+            stackedNorms.value = nil
+            invalidateCompiledTraces()
+            if key.hasSuffix("_message_gate") { stackedControllers.invalidate() }
+        }
         try super.updateModule(key: key, value)
     }
+}
+
+/// Hides a derived array from `Module` reflection.
+private final class Inkling2ArrayBox {
+    var value: MLXArray?
 }
 
 /// Hides the stacked controllers from `Module` reflection.
 private final class MessageControllersBox {
     var value: Inkling2DecoderLayer.MessageControllers?
+    var parts:
+        (
+            attention: Inkling2DecoderLayer.MessageControllers,
+            mlp: Inkling2DecoderLayer.MessageControllers
+        )?
     var installing = false
 
     func invalidate() {
-        if !installing { value = nil }
+        if !installing {
+            value = nil
+            parts = nil
+        }
     }
 }
