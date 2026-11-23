@@ -79,8 +79,31 @@ comments:
     - evidence: swift build --build-tests exit 0, 0 compiler warnings (build was already up to date; only an llbuild note about a missing creator for the Cmlx bundle MacOS node). xcrun xctest on 5 bundles under bench.lock, all exit 0: MLXLMTests 2604 Swift Testing tests + 1260 XCTest, 0 failures, 3 known issues (expected); MLXGuidedGenerationTests 95; MLXFoundationModelsTests 605; CXGrammarTests 7; MLXHuggingFaceMacrosTests XCTest 0 failures. 0 skipped. IntegrationTesting not run.
     - next: commit
   timestamp: 2026-11-23T15:16:23.828273+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m84fp4288q78m4r5q675hg0z
+  text: |-
+    ### commit — changed
+    - evidence: 6b7db65d docs(mlxlmcommon): keep MTPDrafterRegistry's doc on its declaration (^4rbbqvb review)
+    - next: none (local commit only, not pushed)
+  timestamp: 2026-11-23T15:16:41.160722+00:00
+- actor: claude-code
+  id: 01m84fpyz7tj1h0726tchq94da
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (6b7db65d) — 0 findings, 0 confirmed, 0 refuted (7 validator passes, 0 failed); prior finding MTPDrafterModelFactory.swift:109 checked
+    - next: none; card moved to done
+  timestamp: 2026-11-23T15:17:08.711986+00:00
+- actor: claude-code
+  id: 01m84fq7btegqggkghw7p4823k
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — MTPDrafterModelFactory.swift (doc on declaration, disable:this, factory members documented)
+    - test: green — 5 bundles (2604/95/605/7/11)
+    - commit: 6b7db65d
+    - review: clean — 0 findings
+  timestamp: 2026-11-23T15:17:17.306086+00:00
+position_column: done
+position_ordinal: ffffde80
 title: MTPDrafterRegistry must restate inherited @unchecked Sendable (build warning)
 ---
 `swift build --build-tests` warns: `Libraries/MLXLMCommon/MTPDrafterModelFactory.swift: warning: class 'MTPDrafterRegistry' must restate inherited '@unchecked Sendable' conformance`. Found while building for ^mga47hg, whose diff does not touch this file. Restate the conformance on the class so the build is warning-free.
