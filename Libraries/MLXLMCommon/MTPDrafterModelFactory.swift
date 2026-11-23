@@ -105,8 +105,7 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
 /// The class adds no stored state. It restates the `@unchecked Sendable` conformance of
 /// ``AbstractModelRegistry``, whose lock guards every read and write of the registered
 /// configurations.
-// swiftlint:disable:next no_unchecked_sendable The class adds no stored state, and the lock of AbstractModelRegistry guards every read and write of the registered configurations.
-public final class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
+public final class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {  // swiftlint:disable:this no_unchecked_sendable The class adds no stored state, and the lock of AbstractModelRegistry guards every read and write of the registered configurations.
     /// The registry of ``MTPDrafterModelFactory/shared`` and
     /// ``MTPDrafterModelFactory/visionLanguage``, holding every checkpoint constant below.
     public static let shared = MTPDrafterRegistry(modelConfigurations: all())
@@ -168,9 +167,15 @@ public final class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendabl
 /// input processor, no message generator — drafters borrow their target's
 /// tokenizer).
 public final class MTPDrafterModelFactory: GenericModelFactory {
+    /// The context that ``_load(configuration:tokenizerLoader:)`` gives back: the drafter
+    /// model and its configuration, with no tokenizer.
     public typealias ContextType = MTPDrafterContext
+
+    /// The `Sendable` container that ``_wrap(_:)`` puts a drafter context in.
     public typealias ContainerType = MTPDrafterContainer
 
+    /// Loader for text drafters, with the drafter model types of ``MTPDrafterTypeRegistry/shared``
+    /// and the checkpoints of ``MTPDrafterRegistry/shared``.
     public static let shared = MTPDrafterModelFactory(
         typeRegistry: MTPDrafterTypeRegistry.shared,
         modelRegistry: MTPDrafterRegistry.shared
@@ -183,9 +188,19 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
         modelRegistry: MTPDrafterRegistry.shared
     )
 
+    /// registry of drafter model type, e.g. configuration value `qwen3_5_mtp` -> configuration
+    /// and init methods
     public let typeRegistry: ModelTypeRegistry<any MTPDrafterModel>
+
+    /// registry of model id to configuration, e.g. `mlx-community/gemma-4-31B-it-assistant-bf16`
     public let modelRegistry: AbstractModelRegistry
 
+    /// Creates a factory that makes drafter models from the types of `typeRegistry` and looks
+    /// up model ids in `modelRegistry`.
+    ///
+    /// - Parameters:
+    ///   - typeRegistry: The drafter model types, keyed by the `model_type` of `config.json`.
+    ///   - modelRegistry: The drafter checkpoints, keyed by model id.
     public init(
         typeRegistry: ModelTypeRegistry<any MTPDrafterModel>,
         modelRegistry: AbstractModelRegistry
@@ -194,6 +209,16 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
         self.modelRegistry = modelRegistry
     }
 
+    /// Loads the drafter model of a resolved configuration into an ``MTPDrafterContext``: reads
+    /// `config.json`, creates the model of its `model_type`, and loads the weights. The context
+    /// holds no tokenizer, because a drafter borrows the tokenizer of its target.
+    ///
+    /// - Parameters:
+    ///   - configuration: The resolved configuration, whose directory holds the checkpoint.
+    ///   - tokenizerLoader: Unused, because a drafter loads no tokenizer.
+    /// - Returns: The context that holds the loaded drafter model.
+    /// - Throws: ``ModelFactoryError`` when `config.json` cannot be read or decoded, or an error
+    ///   of the weight load.
     public func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader
@@ -239,6 +264,10 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
         return MTPDrafterContext(configuration: modelConfig, model: model)
     }
 
+    /// Wraps a drafter context in an ``MTPDrafterContainer``.
+    ///
+    /// - Parameter context: The context that ``_load(configuration:tokenizerLoader:)`` gave back.
+    /// - Returns: The `Sendable` container that holds the context.
     public func _wrap(_ context: MTPDrafterContext) -> MTPDrafterContainer {
         .init(context: context)
     }
