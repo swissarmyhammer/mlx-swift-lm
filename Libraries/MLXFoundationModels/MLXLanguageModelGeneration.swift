@@ -1709,6 +1709,33 @@ extension MLXLanguageModel.Executor {
         )
     }
 
+    /// The prompt of a no-tools text pass, with the ``ReasoningConfig/answerOpening`` of
+    /// `config` after it when thinking is off.
+    ///
+    /// A model whose protocol declares an answer opening (Inkling 2) writes the header of its
+    /// next frame itself, and its template reads thinking off only as a hint: with
+    /// `reasoning_effort: none` the model still opens a thinking frame, which can spend the
+    /// whole token budget and leave the answer empty. The header after the prompt starts the
+    /// answer frame, thus thinking off is a hard off. Tool turns keep the prompt of the
+    /// template, as the header would leave the model no tool frame.
+    ///
+    /// - Parameters:
+    ///   - prepared: The render and the prompt it made
+    ///   - config: The reasoning protocol of the model
+    ///   - thinkingEnabled: The thinking state the prompt was rendered with
+    ///   - tokenizer: The tokenizer of the model
+    /// - Returns: `prepared`, with the answer opening after its prompt when thinking is off.
+    static func answering(
+        _ prepared: (render: ThinkingRender, input: LMInput), config: ReasoningConfig,
+        thinkingEnabled: Bool?, tokenizer: any Tokenizer
+    ) -> (render: ThinkingRender, input: LMInput) {
+        guard thinkingEnabled == false else { return prepared }
+        return (
+            prepared.render,
+            ThinkingRender.openingAnswer(of: prepared.input, config: config, tokenizer: tokenizer)
+        )
+    }
+
     /// The events of a token-stream decoder on the no-tools reasoning path.
     struct ReasoningDecodedEvents {
         /// The text segments that wait to go to the channel.

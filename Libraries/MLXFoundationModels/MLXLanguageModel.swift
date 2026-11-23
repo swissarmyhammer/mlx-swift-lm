@@ -1810,10 +1810,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             if mayRunReasoningPath, !declaresReasoning,
                 let suppressionConfig = resolved.reasoningConfig
             {
-                suppressed = try await Self.preparedInput(
-                    messages: messages, config: suppressionConfig,
-                    thinkingEnabled: false, context: context,
-                    cannotDisableMessage: Self.undeclaredReasoningMessage)
+                suppressed = Self.answering(
+                    try await Self.preparedInput(
+                        messages: messages, config: suppressionConfig,
+                        thinkingEnabled: false, context: context,
+                        cannotDisableMessage: Self.undeclaredReasoningMessage),
+                    config: suppressionConfig, thinkingEnabled: false,
+                    tokenizer: context.tokenizer)
             } else {
                 suppressed = nil
             }
@@ -1825,12 +1828,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             {
                 let thinkingEnabled = Self.thinkingEnabled(
                     for: request.contextOptions.reasoningLevel)
-                let prepared = try await Self.preparedInput(
-                    messages: messages, config: reasoningConfig,
-                    thinkingEnabled: thinkingEnabled, context: context,
-                    cannotDisableMessage:
-                        "This model always reasons; reasoning cannot be disabled via reasoningLevel."
-                )
+                let prepared = Self.answering(
+                    try await Self.preparedInput(
+                        messages: messages, config: reasoningConfig,
+                        thinkingEnabled: thinkingEnabled, context: context,
+                        cannotDisableMessage:
+                            "This model always reasons; reasoning cannot be disabled via reasoningLevel."
+                    ),
+                    config: reasoningConfig, thinkingEnabled: thinkingEnabled,
+                    tokenizer: context.tokenizer)
                 reasoning = prepared
                 reasoningSetup = (
                     prepared.input, reasoningConfig,
