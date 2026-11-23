@@ -1,0 +1,1 @@
+{"id":"01M8488WPSH71WW529Y3RFP9Q7","timestamp":"2026-11-23T13:07:07.609419Z","op":"create","item_id":"01M8488WPS7A5YC2CXVZG6PT1N","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: fbca04\n+tag_name: '570'\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: fbca04\n-tag_name: '570'\n","transaction_id":null}
