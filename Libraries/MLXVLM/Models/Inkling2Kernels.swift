@@ -149,6 +149,7 @@ private final class Inkling2Kernels: Sendable {
 
     let depthAttention: MLXFast.MLXFastKernel
     let relativeAttention: MLXFast.MLXFastKernel
+    let relativeAttentionNAX: MLXFast.MLXFastKernel
     let expertRouting: MLXFast.MLXFastKernel
     let routerLogits: MLXFast.MLXFastKernel
     let rowConvolution: MLXFast.MLXFastKernel
@@ -167,6 +168,12 @@ private final class Inkling2Kernels: Sendable {
             inputNames: ["q", "k", "v", "rel", "sinks", "key_start", "sizes", "scale"],
             outputNames: ["out"],
             source: relativeAttentionSource,
+            ensureRowContiguous: false)
+        relativeAttentionNAX = MLXFast.metalKernel(
+            name: "inkling2_relative_attention_nax",
+            inputNames: ["q", "k", "v", "rel", "sinks", "key_start", "sizes", "scale"],
+            outputNames: ["out"],
+            source: relativeAttentionNAXSource, header: relativeAttentionNAXHeader,
             ensureRowContiguous: false)
         expertRouting = MLXFast.metalKernel(
             name: "inkling2_expert_routing",
@@ -394,6 +401,258 @@ private let relativeAttentionSource = """
         }
     """
 
+/// The matmuls of ``relativeAttentionNAXSource`` on the neural accelerators: one
+/// `16 x 32 += 16 x 16 * 16 x 32` product per call, the 32 columns as two 16 x 16 fragments.
+/// A lane holds rows `fm` and `fm + 8`, columns `fn ..< fn + 4` of each fragment.
+private let relativeAttentionNAXHeader = """
+    #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+
+    template <typename AT, typename BT, bool TB>
+    inline void inkling2_nax_mma(
+        thread float* c0, thread float* c1, thread const AT* a, thread const BT* b0,
+        thread const BT* b1) {
+        constexpr auto desc = mpp::tensor_ops::matmul2d_descriptor(
+            16, 32, 16, false, TB, true,
+            mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+        mpp::tensor_ops::matmul2d<desc, metal::execution_simdgroup> op;
+        auto ca = op.template get_left_input_cooperative_tensor<AT, BT, float>();
+        auto cb = op.template get_right_input_cooperative_tensor<AT, BT, float>();
+        auto cc = op.template get_destination_cooperative_tensor<
+            metal::remove_addrspace_t<decltype(ca)>, metal::remove_addrspace_t<decltype(cb)>,
+            float>();
+        for (short i = 0; i < 8; i++) {
+            ca[i] = a[i];
+            cb[i] = b0[i];
+            cb[8 + i] = b1[i];
+            cc[i] = c0[i];
+            cc[8 + i] = c1[i];
+        }
+        op.run(ca, cb, cc);
+        for (short i = 0; i < 8; i++) {
+            c0[i] = cc[i];
+            c1[i] = cc[8 + i];
+        }
+    }
+
+    """
+
+/// ``relativeAttentionSource`` on the neural accelerators: each simdgroup holds 16 query rows
+/// and walks its own keys in blocks of 32, with the scores, the probabilities and the output
+/// in registers.
+private let relativeAttentionNAXSource = """
+        constexpr float LOG2E = 1.4426950408889634f;
+        constexpr int BK = 32;
+        constexpr int TD = D / 16;
+        const int L = sizes[0];
+        const int S = sizes[1];
+        const int keep = sizes[2];
+        const int evicted = sizes[3];
+        const uint lane = thread_index_in_simdgroup;
+        const uint sg = simdgroup_index_in_threadgroup;
+        const int batch = threadgroup_position_in_grid.z;
+        const int head = threadgroup_position_in_grid.y;
+        const int kv_head = head / (HQ / HKV);
+        const int q0 = threadgroup_position_in_grid.x * BQ + int(sg) * 16;
+        if (q0 >= L) {
+            return;
+        }
+        const short qid = lane >> 2;
+        const short fm = (qid & 4) | ((lane >> 1) & 3);
+        const short fn = ((qid & 2) | (lane & 1)) * 4;
+        const int start = key_start[batch];
+        const float qscale = scale * LOG2E;
+
+        int row[2];
+        bool row_ok[2];
+        int diag[2];
+        float row_max[2];
+        float row_sum[2];
+        const device T* bias[2];
+        for (short i = 0; i < 2; i++) {
+            row[i] = q0 + fm + i * 8;
+            row_ok[i] = row[i] < L;
+            diag[i] = S - L + row[i];
+            row_max[i] = row_ok[i] ? float(sinks[(batch * L + row[i]) * HQ + head]) * LOG2E : 0.0f;
+            row_sum[i] = 1.0f;
+            bias[i] = rel + (size_t(batch * L + (row_ok[i] ? row[i] : 0)) * HQ + head) * R;
+        }
+
+        const device T* q_head = q + batch * q_strides[0] + head * q_strides[1];
+        // Each row's queries, read again for each block from the cache: holding all of them
+        // in registers costs more in occupancy than the reads cost.
+        const device T* q_rows[2];
+        for (short i = 0; i < 2; i++) {
+            q_rows[i] = q_head + (row_ok[i] ? row[i] : row[0]) * q_strides[2] + fn;
+        }
+        float acc[TD][8];
+        for (short d = 0; d < TD; d++) {
+            for (short e = 0; e < 8; e++) {
+                acc[d][e] = 0.0f;
+            }
+        }
+
+        const int first_diag = S - L + q0;
+        const int last_diag = S - L + min(q0 + 16, L) - 1;
+        int first_key = WINDOW > 0 ? max(0, first_diag - WINDOW + 1) : 0;
+        first_key = max(first_key, start);
+        const device T* k_head = k + batch * k_strides[0] + kv_head * k_strides[1];
+        const device T* v_head = v + batch * v_strides[0] + kv_head * v_strides[1];
+
+        for (int k0 = first_key / BK * BK; k0 <= last_diag; k0 += BK) {
+            // A far block: every key exists, sits past the bias extent of every row, and is
+            // visible to all of them, so its scores need only the scale.
+            const bool far = k0 + BK <= S && k0 >= start && k0 >= keep && WINDOW == 0
+                && first_diag - (k0 + BK - 1) >= R;
+            float sc[2][8];
+            for (short f = 0; f < 2; f++) {
+                for (short e = 0; e < 8; e++) {
+                    sc[f][e] = 0.0f;
+                }
+            }
+            // Unrolled by 4, so the next key loads interleave with the running products.
+    #pragma clang loop unroll_count(4)
+            for (short d = 0; d < TD; d++) {
+                T kf[2][8];
+                for (short f = 0; f < 2; f++) {
+                    for (short i = 0; i < 2; i++) {
+                        const int key = k0 + f * 16 + fm + i * 8;
+                        const device T* kp = k_head + key * k_strides[2] + d * 16 + fn;
+                        if (far || key < S) {
+                            const vec<T, 4> x = *(const device vec<T, 4>*)kp;
+                            for (short j = 0; j < 4; j++) {
+                                kf[f][i * 4 + j] = x[j];
+                            }
+                        } else {
+                            for (short j = 0; j < 4; j++) {
+                                kf[f][i * 4 + j] = T(0);
+                            }
+                        }
+                    }
+                }
+                T qf[8];
+                for (short i = 0; i < 2; i++) {
+                    const vec<T, 4> x = *(const device vec<T, 4>*)(q_rows[i] + d * 16);
+                    for (short j = 0; j < 4; j++) {
+                        qf[i * 4 + j] = x[j];
+                    }
+                }
+                inkling2_nax_mma<T, T, true>(sc[0], sc[1], qf, kf[0], kf[1]);
+            }
+
+            float tile_max[2] = {-INFINITY, -INFINITY};
+            if (far) {
+                for (short f = 0; f < 2; f++) {
+                    for (short e = 0; e < 8; e++) {
+                        sc[f][e] *= qscale;
+                        tile_max[e >> 2] = max(tile_max[e >> 2], sc[f][e]);
+                    }
+                }
+            } else {
+                for (short f = 0; f < 2; f++) {
+                    for (short e = 0; e < 8; e++) {
+                        const short i = e >> 2;
+                        const int key = k0 + f * 16 + fn + (e & 3);
+                        const int d = diag[i] - key + (key < keep ? evicted : 0);
+                        const bool visible = row_ok[i] && key < S && d >= 0 && key >= start
+                            && (WINDOW == 0 || d < WINDOW);
+                        float s = -INFINITY;
+                        if (visible) {
+                            s = sc[f][e] * qscale;
+                            if (d < R) {
+                                s += float(bias[i][d]) * LOG2E;
+                            }
+                        }
+                        sc[f][e] = s;
+                        tile_max[i] = max(tile_max[i], s);
+                    }
+                }
+            }
+            float p_sum[2];
+            float factor[2];
+            for (short i = 0; i < 2; i++) {
+                // The 4 lanes of a row are lane ^ 1 and lane ^ 8 apart.
+                tile_max[i] = max(tile_max[i], simd_shuffle_xor(tile_max[i], ushort(1)));
+                tile_max[i] = max(tile_max[i], simd_shuffle_xor(tile_max[i], ushort(8)));
+                const float new_max = max(row_max[i], tile_max[i]);
+                factor[i] = fast::exp2(row_max[i] - new_max);
+                row_max[i] = new_max;
+                p_sum[i] = 0.0f;
+            }
+            for (short f = 0; f < 2; f++) {
+                for (short e = 0; e < 8; e++) {
+                    const float p = fast::exp2(sc[f][e] - row_max[e >> 2]);
+                    sc[f][e] = p;
+                    p_sum[e >> 2] += p;
+                }
+            }
+            for (short i = 0; i < 2; i++) {
+                p_sum[i] += simd_shuffle_xor(p_sum[i], ushort(1));
+                p_sum[i] += simd_shuffle_xor(p_sum[i], ushort(8));
+                row_sum[i] = row_sum[i] * factor[i] + p_sum[i];
+            }
+            for (short d = 0; d < TD; d++) {
+                for (short e = 0; e < 8; e++) {
+                    acc[d][e] *= factor[e >> 2];
+                }
+            }
+
+            for (short d = 0; d < TD; d += 2) {
+                if (TD == 8 && d == 4) {
+                    threadgroup_barrier(mem_flags::mem_none);
+                }
+                for (short f = 0; f < 2; f++) {
+                    T vf[2][8];
+                    for (short h = 0; h < 2; h++) {
+                        for (short i = 0; i < 2; i++) {
+                            const int key = k0 + f * 16 + fm + i * 8;
+                            const device T* vp = v_head + key * v_strides[2] + (d + h) * 16 + fn;
+                            if (far || key < S) {
+                                const vec<T, 4> x = *(const device vec<T, 4>*)vp;
+                                for (short j = 0; j < 4; j++) {
+                                    vf[h][i * 4 + j] = x[j];
+                                }
+                            } else {
+                                for (short j = 0; j < 4; j++) {
+                                    vf[h][i * 4 + j] = T(0);
+                                }
+                            }
+                        }
+                    }
+                    inkling2_nax_mma<float, T, false>(acc[d], acc[d + 1], sc[f], vf[0], vf[1]);
+                }
+            }
+        }
+
+        for (short i = 0; i < 2; i++) {
+            if (!row_ok[i]) {
+                continue;
+            }
+            device T* op = out + (size_t(batch * L + row[i]) * HQ + head) * D;
+            for (short d = 0; d < TD; d++) {
+                for (short j = 0; j < 4; j++) {
+                    op[d * 16 + fn + j] = T(acc[d][i * 4 + j] / row_sum[i]);
+                }
+            }
+        }
+    """
+
+/// The query rows of a threadgroup of ``relativeAttentionNAXSource``: four simdgroups of 16.
+private let relativeAttentionNAXQueryBlock = 64
+
+/// Whether the GPU has neural accelerators that the tensor ops of
+/// ``relativeAttentionNAXSource`` run on, as MLX decides for its own attention: macOS 26.2 or
+/// later and an Apple GPU of generation 17 or later (18 for the `p` variants).
+let inkling2HasNeuralAccelerators: Bool = {
+    guard #available(macOS 26.2, iOS 26.2, tvOS 26.2, visionOS 26.2, *) else { return false }
+    let architecture = GPU.deviceInfo().architecture
+    guard let suffix = architecture.split(separator: "_").last, suffix.first == "g" else {
+        return false
+    }
+    let variant = suffix.last ?? " "
+    guard let generation = Int(suffix.dropFirst().prefix { $0.isNumber }) else { return false }
+    return generation >= (variant == "p" ? 18 : 17)
+}()
+
 /// Causal attention with a relative position bias and a sink per query.
 ///
 /// - Parameters:
@@ -405,16 +664,23 @@ private let relativeAttentionSource = """
 ///   - window: the sliding window, or 0 for full attention.
 ///   - keyStart: int32 `[B]`, the first visible key of each row.
 ///   - keep: the pinned keys at the front, `evicted` positions older than their slots.
+///   - neuralAccelerators: whether to run the matmuls on the GPU's neural accelerators, which
+///     needs a head dimension that is a multiple of 32.
 /// - Returns: `[B, L, Hq, D]`.
 func inkling2RelativeAttention(
     q: MLXArray, k: MLXArray, v: MLXArray, rel: MLXArray, sinks: MLXArray,
-    scale: Float, window: Int, keyStart: MLXArray, keep: Int, evicted: Int
+    scale: Float, window: Int, keyStart: MLXArray, keep: Int, evicted: Int,
+    neuralAccelerators: Bool = inkling2HasNeuralAccelerators
 ) -> MLXArray {
     let (b, hq, l, d) = q.shape4
     let (_, hkv, s, _) = k.shape4
-    let block = relativeAttentionQueryBlock
-    let threads = relativeAttentionThreads
-    return Inkling2Kernels.shared.relativeAttention(
+    let nax = neuralAccelerators && d.isMultiple(of: 32)
+    let block = nax ? relativeAttentionNAXQueryBlock : relativeAttentionQueryBlock
+    let threads =
+        nax ? relativeAttentionNAXQueryBlock / 16 * metalSimdWidth : relativeAttentionThreads
+    let kernel =
+        nax ? Inkling2Kernels.shared.relativeAttentionNAX : Inkling2Kernels.shared.relativeAttention
+    return kernel(
         [
             q, k, v, contiguous(rel), contiguous(sinks.asType(.float32)),
             contiguous(keyStart.asType(.int32)),

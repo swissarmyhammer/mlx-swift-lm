@@ -184,8 +184,12 @@ struct Inkling2KernelTests {
             (window: 16, cached: 0, keep: 0, evicted: 0),
             (window: 16, cached: 23, keep: 0, evicted: 0),
             (window: 0, cached: 23, keep: 4, evicted: 3),
-        ])
-    func prefillAttention(window: Int, cached: Int, keep: Int, evicted: Int) {
+            (window: 0, cached: 1100, keep: 0, evicted: 0),
+        ], [false, inkling2HasNeuralAccelerators])
+    func prefillAttention(
+        _ shape: (window: Int, cached: Int, keep: Int, evicted: Int), neuralAccelerators: Bool
+    ) {
+        let (window, cached, keep, evicted) = shape
         MLXRandom.seed(2)
         let (b, hq, hkv, l, d, extent) = (1, 4, 2, 40, 64, 24)
         let s = cached + l
@@ -197,7 +201,8 @@ struct Inkling2KernelTests {
 
         let out = inkling2RelativeAttention(
             q: q, k: k, v: v, rel: rel, sinks: sinks, scale: 0.125, window: window,
-            keyStart: MLXArray([Int32(-evicted)]), keep: keep, evicted: evicted)
+            keyStart: MLXArray([Int32(-evicted)]), keep: keep, evicted: evicted,
+            neuralAccelerators: neuralAccelerators)
         // The pinned keys hold positions 0 ..< keep and the others end at the last query.
         let queries = MLXArray.arange(l, dtype: .int32) + Int32(s - l + evicted)
         let slots = MLXArray.arange(s, dtype: .int32)
