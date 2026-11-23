@@ -72,8 +72,31 @@ comments:
     - evidence: swift build --build-tests exit 0 (only a SwiftPM "missing creator for mutated node" bundle note, no compiler warnings). xcrun xctest on 5 bundles all exit 0: MLXLMTests 2604 Swift Testing (3 expected known issues) + 1260 XCTest, 0 failures; MLXGuidedGenerationTests 95; MLXFoundationModelsTests 605; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11 XCTest, 0 failures. xcodebuild IntegrationTesting Inkling2ThinkingOffSummaryTests exit 0: "Test run with 1 test in 1 suite passed after 69.413 seconds", TEST SUCCEEDED; INKLING2 SUMMARY lines show reasoning 0 chars for no_think and nil-level calls.
     - next: review/commit
   timestamp: 2026-11-23T14:50:46.525121+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m84e7c7et83a310rjnaw9akr
+  text: |-
+    ### commit — changed
+    - evidence: 0e5d9dc6 test(fm): log the Inkling summary suite and share effortToken (^mga47hg review)
+    - next: none
+  timestamp: 2026-11-23T14:51:09.422595+00:00
+- actor: claude-code
+  id: 01m84e8zreyt0ndbg2rathf02w
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (0e5d9dc6) — 0 findings, 0 confirmed, 0 refuted; 7 attempted, 0 failed; 6 files reviewed, 2 kanban files skipped (no validator); all 4 prior findings checked
+    - next: none — card moved to done. Tell foundationmodelsrouter-23 so it can remove `ReasoningControl.reducible` (Router ci/inkling-matrix 18ad4a19).
+  timestamp: 2026-11-23T14:52:02.190516+00:00
+- actor: claude-code
+  id: 01m84e981vzkypd58tqd2zwr91
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 6 files, 4/4 findings checked
+    - test: green — 5 bundles (2604/95/605/7/11) + Inkling2ThinkingOffSummaryTests 6/6 no reasoning
+    - commit: 0e5d9dc6
+    - review: clean — 0 findings
+  timestamp: 2026-11-23T14:52:10.683883+00:00
+position_column: done
+position_ordinal: ffffdd80
 title: Inkling thinking-off text calls still reason and can return an empty answer
 ---
 Reported by the Router session (CI run 45078982291, `.emptySummary`). With `.custom("no_think")`, Inkling 2 Mini still opens a thinking frame: `reasoning_effort: none` is only a hint. On a blank transcript with a long summary prompt and maxTokens 400, three runs reasoned for 817, 287 and 1233 chars; the last answer was cut to 50 chars. One run with reasoning undeclared came back fully empty.

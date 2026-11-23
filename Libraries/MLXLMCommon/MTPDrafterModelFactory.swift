@@ -102,9 +102,11 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
 /// to ``ModelConfiguration``. Drafters don't have prompts, so the
 /// configurations omit `defaultPrompt`.
 ///
-/// The class adds no stored state. It is `Sendable` through ``AbstractModelRegistry``, whose
-/// lock guards every read and write of the registered configurations.
-public final class MTPDrafterRegistry: AbstractModelRegistry {
+/// The class adds no stored state. It restates the `@unchecked Sendable` conformance of
+/// ``AbstractModelRegistry``, whose lock guards every read and write of the registered
+/// configurations.
+// swiftlint:disable:next no_unchecked_sendable The class adds no stored state, and the lock of AbstractModelRegistry guards every read and write of the registered configurations.
+public final class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendable {
     /// The registry of ``MTPDrafterModelFactory/shared`` and
     /// ``MTPDrafterModelFactory/visionLanguage``, holding every checkpoint constant below.
     public static let shared = MTPDrafterRegistry(modelConfigurations: all())
