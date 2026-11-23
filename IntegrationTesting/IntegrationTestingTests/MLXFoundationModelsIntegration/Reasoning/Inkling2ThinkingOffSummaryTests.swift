@@ -38,6 +38,12 @@ struct Inkling2ThinkingOffSummaryTests {
     /// The ceiling of the summary size, with no thinking allowance.
     private static let summaryTokenCeiling = 400
 
+    /// The tag of the result lines in the unified log.
+    private static let resultTag = "INKLING2 SUMMARY"
+
+    /// The number of characters of the reasoning and of the response that a result line holds.
+    private static let reportedPrefixLength = 300
+
     /// A conversation of a coding session, long enough to stand for a compaction prompt.
     private static let conversation: String = {
         let turns = (1 ... turnCount).map { index in
@@ -129,12 +135,21 @@ struct Inkling2ThinkingOffSummaryTests {
             for attempt in 1 ... Self.attemptsPerSetting {
                 let result = try await run(
                     level: level, capabilities: capabilities, maxTokens: Self.summaryTokenCeiling)
-                print(
-                    "INKLING-SUMMARY [\(label)] #\(attempt): reasoning \(result.reasoning.count) "
-                        + "chars, response \(result.response.count) chars")
-                print("INKLING-SUMMARY reasoning: \(result.reasoning.prefix(300).debugDescription)")
-                print("INKLING-SUMMARY response: \(result.response.prefix(300).debugDescription)")
-                #expect(result.reasoning.isEmpty, "\(label) #\(attempt) reasoned with thinking off")
+                Inkling2ResultLog.report(
+                    Self.resultTag,
+                    "[\(label)] #\(attempt): reasoning \(result.reasoning.count) chars, "
+                        + "response \(result.response.count) chars")
+                let reasoningPrefix = result.reasoning.prefix(Self.reportedPrefixLength)
+                let responsePrefix = result.response.prefix(Self.reportedPrefixLength)
+                let reasoningSummary =
+                    "\(result.reasoning.count) chars, \(reasoningPrefix.debugDescription)"
+                Inkling2ResultLog.report(
+                    Self.resultTag, "reasoning: \(reasoningPrefix.debugDescription)")
+                Inkling2ResultLog.report(
+                    Self.resultTag, "response: \(responsePrefix.debugDescription)")
+                #expect(
+                    result.reasoning.isEmpty,
+                    "\(label) #\(attempt) reasoned with thinking off: \(reasoningSummary)")
                 #expect(!result.response.isEmpty, "\(label) #\(attempt) returned an empty response")
             }
         }

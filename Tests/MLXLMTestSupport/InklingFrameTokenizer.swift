@@ -114,6 +114,15 @@ public struct InklingFrameTokenizer: Tokenizer {
         tokenOfPiece[piece] ?? unknownTokenID
     }
 
+    /// The token of the thinking-effort text at `level`, ``effortPrefix`` followed by `level`.
+    ///
+    /// - Parameter level: an effort level, such as ``defaultEffort`` or
+    ///   ``InklingReasoningProtocol/thinkingOffEffort``.
+    /// - Returns: its token, or ``unknownTokenID`` when the vocabulary does not hold it.
+    public func effortToken(_ level: String) -> Int {
+        token(Self.effortPrefix + level)
+    }
+
     /// The text of the tool call that the published template writes: compact JSON with sorted
     /// keys.
     ///

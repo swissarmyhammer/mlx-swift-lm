@@ -68,11 +68,6 @@ struct InklingExecutorSchemaPromptTests {
         [tokenizer.token(.messageModel), tokenizer.token(.contentText)]
     }
 
-    /// The token of the thinking-effort text at `level`.
-    private static func effortToken(_ level: String) -> Int {
-        tokenizer.token(InklingFrameTokenizer.effortPrefix + level)
-    }
-
     /// The prompts of a scripted Inkling 2 model for one call under a Boolean schema, and the
     /// response text of the call.
     ///
@@ -153,8 +148,11 @@ struct InklingExecutorSchemaPromptTests {
     func theSchemaPassRendersThinkingOff() async throws {
         let pass = try await Self.schemaPass(reasoningConfig: InklingReasoningProtocol.inkling2)
 
-        #expect(pass.prompt.contains(Self.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
-        #expect(!pass.prompt.contains(Self.effortToken(InklingFrameTokenizer.defaultEffort)))
+        #expect(
+            pass.prompt.contains(
+                Self.tokenizer.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
+        #expect(
+            !pass.prompt.contains(Self.tokenizer.effortToken(InklingFrameTokenizer.defaultEffort)))
     }
 
     @Test("a model without an answer opening keeps the prompt of the template")
@@ -163,7 +161,8 @@ struct InklingExecutorSchemaPromptTests {
         let pass = try await Self.schemaPass(reasoningConfig: nil)
 
         #expect(pass.prompt.suffix(Self.questionFrame.count) == ArraySlice(Self.questionFrame))
-        #expect(pass.prompt.contains(Self.effortToken(InklingFrameTokenizer.defaultEffort)))
+        #expect(
+            pass.prompt.contains(Self.tokenizer.effortToken(InklingFrameTokenizer.defaultEffort)))
     }
 
     @Test("a reasoning protocol without an answer opening keeps the prompt of the template")
@@ -174,9 +173,11 @@ struct InklingExecutorSchemaPromptTests {
         let pass = try await Self.schemaPass(reasoningConfig: QwenReasoningProtocol.qwen35)
 
         #expect(pass.prompt == template.prompt)
-        #expect(pass.prompt.contains(Self.effortToken(InklingFrameTokenizer.defaultEffort)))
         #expect(
-            !pass.prompt.contains(Self.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
+            pass.prompt.contains(Self.tokenizer.effortToken(InklingFrameTokenizer.defaultEffort)))
+        #expect(
+            !pass.prompt.contains(
+                Self.tokenizer.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
         #expect(pass.response == Self.answer)
     }
 
@@ -194,7 +195,8 @@ struct InklingExecutorSchemaPromptTests {
             schemaPrompt.suffix(Self.questionFrame.count + Self.answerHeader.count)
                 == ArraySlice(Self.questionFrame + Self.answerHeader))
         #expect(
-            schemaPrompt.contains(Self.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
+            schemaPrompt.contains(
+                Self.tokenizer.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
         #expect(call.response == Self.answer)
     }
 

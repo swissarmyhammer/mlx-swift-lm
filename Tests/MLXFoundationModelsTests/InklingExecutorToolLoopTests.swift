@@ -279,8 +279,7 @@ struct InklingExecutorToolLoopTests {
             MLXLanguageModel.Executor.sessionCacheKey(
                 for: request, modelID: model.modelID, kvCache: nil))
         let render = try #require(await store.peek(key)?.renderTokens)
-        let effortNone = Self.tokenizer.token(
-            InklingFrameTokenizer.effortPrefix + InklingReasoningProtocol.thinkingOffEffort)
+        let effortNone = Self.tokenizer.effortToken(InklingReasoningProtocol.thinkingOffEffort)
         #expect(render.contains(effortNone))
         #expect(pass.responseText == Self.loop.answer)
     }

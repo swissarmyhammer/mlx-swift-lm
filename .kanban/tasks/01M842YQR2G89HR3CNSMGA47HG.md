@@ -28,6 +28,50 @@ comments:
     - evidence: swift build --build-tests (exit 0; one warning "missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS" from the build system; the MTPDrafterRegistry @unchecked Sendable warning (^4rbbqvb) was not re-emitted because the build was incremental). xcrun xctest per bundle, all exit=0: MLXLMTests Test run with 2604 tests in 249 suites passed, 3 known issues (expected), Executed 1260 tests with 0 failures; MLXGuidedGenerationTests Test run with 95 tests in 22 suites passed; MLXFoundationModelsTests Test run with 605 tests in 84 suites passed; CXGrammarTests Test run with 7 tests in 5 suites passed; MLXHuggingFaceMacrosTests Executed 11 tests with 0 failures. The 3 new InklingExecutorThinkingOffPromptTests tests pass. 0 skipped. IntegrationTesting not run.
     - next: review/commit
   timestamp: 2026-11-23T14:32:17.126709+00:00
+- actor: claude-code
+  id: 01m84d5hw3xm81ztfjg441k04t
+  text: |-
+    ### commit — changed
+    - evidence: 672e699a fix(fm): hard thinking-off for Inkling text calls via the answer opening (^mga47hg)
+    - next: none (local commit only, not pushed)
+  timestamp: 2026-11-23T14:32:41.091323+00:00
+- actor: claude-code
+  id: 01m84d9yfn66ndbn95aa9tv15f
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (672e699a) — 4 findings (4 confirmed, 2 refuted) — IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/Reasoning/Inkling2ThinkingOffSummaryTests.swift:132, :135, :136 (code-hygiene/disallowed-constructs-swift); Tests/MLXFoundationModelsTests/InklingExecutorThinkingOffPromptTests.swift:51 (reuse/reuse)
+    - next: implement the 4 items in `## Review Findings (2026-11-23 08:32)`; task stays in review
+  timestamp: 2026-11-23T14:35:05.077024+00:00
+- actor: claude-code
+  id: 01m84dae0v5vv63qh2cm891t21
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 4 files (fix already in tree, test doc/constants tidy)
+    - test: green — 5 bundles: MLXLMTests 2604 (3 known), Guided 95, FM 605, CXGrammar 7, Macros 11
+    - commit: 672e699a
+    - review: findings — Inkling2ThinkingOffSummaryTests.swift:132, :135, :136 (no_direct_standard_out_logs); InklingExecutorThinkingOffPromptTests.swift:51 (reuse effortToken)
+  timestamp: 2026-11-23T14:35:20.987377+00:00
+- actor: claude-code
+  id: 01m84de1t90k0j9crp9ze3h1t8
+  text: |-
+    Fixed the 4 review findings.
+    - no_direct_standard_out_logs: all three `print` calls in Inkling2ThinkingOffSummaryTests are gone. The suite now writes its result lines through `Inkling2ResultLog.report` (tag `INKLING2 SUMMARY`, unified log `com.apple.FoundationModels-MLX`/`Inkling2`). Every other Inkling 2 integration suite uses this, including the ones under MLXFoundationModelsIntegration/. The literal 300 is now `reportedPrefixLength`. The reasoning `#expect` message now carries the char count and a prefix of the reasoning, so a CI failure shows what the model wrote. I avoided `+` concatenation inside the `#expect` comment (`Comment` has no `+`). IntegrationTesting is not compiled by `swift build`, so I checked this edit by reading it only.
+    - reuse: added `public func effortToken(_ level: String) -> Int` on `InklingFrameTokenizer` (Tests/MLXLMTestSupport). It is public because MLXLMTestSupport is a separate module and its other members are public. I deleted the private copies in InklingExecutorThinkingOffPromptTests and InklingExecutorSchemaPromptTests. I also folded in the two inline `tokenizer.token(InklingFrameTokenizer.effortPrefix + …thinkingOffEffort)` copies in InklingExecutorToolLoopTests and Tests/MLXLMTests/Inkling2ToolLoopSessionTests.
+  timestamp: 2026-11-23T14:37:19.561731+00:00
+- actor: claude-code
+  id: 01m84de4mwy8wgre50vbg7mzjv
+  text: |-
+    ### implement — changed
+    - evidence: 6 files — IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/Reasoning/Inkling2ThinkingOffSummaryTests.swift, Tests/MLXLMTestSupport/InklingFrameTokenizer.swift, Tests/MLXFoundationModelsTests/InklingExecutorThinkingOffPromptTests.swift, Tests/MLXFoundationModelsTests/InklingExecutorSchemaPromptTests.swift, Tests/MLXFoundationModelsTests/InklingExecutorToolLoopTests.swift, Tests/MLXLMTests/Inkling2ToolLoopSessionTests.swift; swift-format applied to each; `swift build --build-tests` Build complete (only the build-system "missing creator for mutated node" warning); 4/4 findings checked
+    - next: test (MLXFoundationModelsTests, MLXLMTests), then /review
+  timestamp: 2026-11-23T14:37:22.460382+00:00
+- actor: claude-code
+  id: 01m84e6nvx6w5fefrnpdjshh51
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests exit 0 (only a SwiftPM "missing creator for mutated node" bundle note, no compiler warnings). xcrun xctest on 5 bundles all exit 0: MLXLMTests 2604 Swift Testing (3 expected known issues) + 1260 XCTest, 0 failures; MLXGuidedGenerationTests 95; MLXFoundationModelsTests 605; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11 XCTest, 0 failures. xcodebuild IntegrationTesting Inkling2ThinkingOffSummaryTests exit 0: "Test run with 1 test in 1 suite passed after 69.413 seconds", TEST SUCCEEDED; INKLING2 SUMMARY lines show reasoning 0 chars for no_think and nil-level calls.
+    - next: review/commit
+  timestamp: 2026-11-23T14:50:46.525121+00:00
 position_column: doing
 position_ordinal: '80'
 title: Inkling thinking-off text calls still reason and can return an empty answer
@@ -41,3 +85,18 @@ Tests: `InklingExecutorThinkingOffPromptTests` (scripted) and `Inkling2ThinkingO
 When this lands, tell foundationmodelsrouter-23 so it can remove `ReasoningControl.reducible` (Router ci/inkling-matrix 18ad4a19).
 
 #inkling #bug
+
+## Review Findings (2026-11-23 08:32)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 4 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M842YQR2G89HR3CNSMGA47HG.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M842YQR2G89HR3CNSMGA47HG.md` — no validator matches this file
+> - `.kanban/tasks/01M84CEHAPVWFM1KJY04RBBQVB.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M84CEHAPVWFM1KJY04RBBQVB.md` — no validator matches this file
+
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/Reasoning/Inkling2ThinkingOffSummaryTests.swift:132` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/Reasoning/Inkling2ThinkingOffSummaryTests.swift:135` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `IntegrationTesting/IntegrationTestingTests/MLXFoundationModelsIntegration/Reasoning/Inkling2ThinkingOffSummaryTests.swift:136` `code-hygiene/disallowed-constructs-swift` — no_direct_standard_out_logs: Do not commit print(…), debugPrint(…), dump(…) or _printChanges(), which write to standard out in release. Log to a dedicated logging system, or silence one debug-only line with // swiftlint:disable:next no_direct_standard_out_logs and the reason after it.
+- [x] `Tests/MLXFoundationModelsTests/InklingExecutorThinkingOffPromptTests.swift:51` `reuse/reuse` — The new `effortToken(_:)` helper is an exact copy of a private helper already in the sibling Inkling test suite. Two identical copies will drift apart, and a fix to the effort-token lookup would have to be made twice. Delete the private `effortToken` here and share one helper for both suites: move it to a shared test-support file (for example beside `InklingFrameTokenizer`) as an internal static on `InklingFrameTokenizer` or a free function, and have both suites call it.

@@ -160,8 +160,7 @@ struct Inkling2ToolLoopSessionTests {
 
         _ = try await session.respond(to: Self.question)
 
-        let effortNone = Self.tokenizer.token(
-            InklingFrameTokenizer.effortPrefix + InklingReasoningProtocol.thinkingOffEffort)
+        let effortNone = Self.tokenizer.effortToken(InklingReasoningProtocol.thinkingOffEffort)
         #expect(model.passes.first?.tokens.contains(effortNone) == true)
     }
 }

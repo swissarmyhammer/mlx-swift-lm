@@ -47,11 +47,6 @@ struct InklingExecutorThinkingOffPromptTests {
         [tokenizer.token(answer), tokenizer.token(.endMessage), tokenizer.token(.endSampling)]
     }
 
-    /// The token of the thinking-effort text at `level`.
-    private static func effortToken(_ level: String) -> Int {
-        tokenizer.token(InklingFrameTokenizer.effortPrefix + level)
-    }
-
     /// The prompt of the one pass of a text call of a scripted Inkling 2 model, and the text the
     /// call streamed as its response.
     ///
@@ -107,7 +102,9 @@ struct InklingExecutorThinkingOffPromptTests {
         #expect(
             pass.prompt.suffix(Self.questionFrame.count + Self.answerHeader.count)
                 == ArraySlice(Self.questionFrame + Self.answerHeader))
-        #expect(pass.prompt.contains(Self.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
+        #expect(
+            pass.prompt.contains(
+                Self.tokenizer.effortToken(InklingReasoningProtocol.thinkingOffEffort)))
         #expect(pass.response == Self.answer)
     }
 
