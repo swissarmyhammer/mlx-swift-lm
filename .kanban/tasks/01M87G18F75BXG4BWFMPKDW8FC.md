@@ -11,6 +11,23 @@ comments:
     - Ring backend runs fine with 2 local processes (hostfile [["127.0.0.1:p"],["127.0.0.1:p+1"]]).
     - MoE throws unsupported (no MoE model to validate on).
   timestamp: 2026-11-24T19:38:40.389361+00:00
+- actor: wballard
+  id: 01m87hjmfte214h30nhd7kgcs1
+  text: |-
+    ### implement — changed
+    - evidence: de0b6969, 36c72079. shard-check PASS on Qwen3.5-2B-mxfp4 (9/9 tokens, max abs diff 0.1875) and Qwen3.8-27B-4bit (9/9, 0.1875). Full suite: XCTest 1260/0 failures; swift-testing 2618 tests, 1 unexpected failure (ChatSessionRecurrentCheckpointTests sliding-window fork), which passes alone (21/21).
+    - next: review
+  timestamp: 2026-11-24T19:47:27.354646+00:00
+- actor: claude-code
+  id: 01m87wjpgdyxm3gwsk6at8ew2j
+  text: |-
+    ### implement — changed (needs review)
+    - Commits: de0b6969 feat(qwen35): shard the Qwen 3.5 family; 36c72079 test(shard-check); b75c680d (JACCL from the environment); 965d6424 (KL gate). Pushed to origin/cluster.
+    - Results:
+      - One Mac, ring: Qwen3.5-2B and Qwen3.8-27B-4bit both 9/9 tokens.
+      - Real 2-Mac JACCL (m5u2 rdma_en6 ↔ m5u1 rdma_en5): 27B 33/33 tokens, max KL 0.025 (at step 31), every other step < 0.002. 14.3 ms/token with MLX_METAL_FAST_SYNCH=1, vs 18.7 on one Mac and 58 without FAST_SYNCH.
+    - Open: Qwen35 MoE throws `.unsupported`. verify-docs, DocC/skill pages and a swift-format pass are still to do (covered by the review task).
+  timestamp: 2026-11-24T22:59:43.757928+00:00
 position_column: doing
 position_ordinal: '80'
 title: Tensor-parallel sharding for Qwen35 + 2-process ShardCheck harness

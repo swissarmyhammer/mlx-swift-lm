@@ -1,0 +1,1 @@
+{"id":"01M87WJZQW21P6FQBPFMCJJGA4","timestamp":"2026-11-24T22:59:53.212386Z","op":"create","item_id":"01M87WJZQT595E0EYVYZZ8V831","forward_patch":"--- original\n+++ modified\n@@ -0,0 +1,2 @@\n+color: bfd4f2\n+tag_name: cluster\n","reverse_patch":"--- original\n+++ modified\n@@ -1,2 +0,0 @@\n-color: bfd4f2\n-tag_name: cluster\n","transaction_id":null}
