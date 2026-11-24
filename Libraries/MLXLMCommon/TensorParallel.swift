@@ -134,11 +134,52 @@ public enum TensorParallel {
     public static func shardLeadingAxis(
         of owner: Module, _ segments: [String: Segments], group: MLXDistributed.Group
     ) throws {
+        try shardAxes(
+            of: owner, segments.mapValues { Split(axis: 0, segments: $0) }, group: group)
+    }
+
+    /// The axis a parameter splits on, and the segments of that axis.
+    public struct Split: Equatable, Sendable {
+        /// The axis to split.
+        public let axis: Int
+        /// The segments of the unsharded axis, each of which splits on its own.
+        public let segments: Segments
+
+        /// - Parameters:
+        ///   - axis: The axis to split.
+        ///   - segments: The segments of the unsharded axis.
+        public init(axis: Int, segments: Segments) {
+            self.axis = axis
+            self.segments = segments
+        }
+    }
+
+    /// The split of the parameter at `path`, or nil when it stays whole.
+    ///
+    /// A key names a parameter, or a child module whose parameters all split.
+    ///
+    /// - Parameters:
+    ///   - path: The path of the parameter in the owner, such as `q_proj.weight`.
+    ///   - splits: The split of each key.
+    public static func split(of path: String, in splits: [String: Split]) -> Split? {
+        splits.first { key, _ in path == key || path.hasPrefix("\(key).") }?.value
+    }
+
+    /// Splits the named parameters of `owner` across `group` on their own axes, in place.
+    ///
+    /// The update goes through `owner`, as in ``shardLeadingAxis(of:_:group:)``.
+    ///
+    /// - Parameters:
+    ///   - owner: The module that holds the parameters.
+    ///   - splits: The split of each key; see ``split(of:in:)``.
+    ///   - group: The group to split across.
+    public static func shardAxes(
+        of owner: Module, _ splits: [String: Split], group: MLXDistributed.Group
+    ) throws {
         try shardInPlace(
             owner,
             predicate: { path, _ in
-                segments.first { key, _ in path == key || path.hasPrefix("\(key).") }
-                    .map { (axis: 0, segments: $0.value) }
+                split(of: path, in: splits).map { (axis: $0.axis, segments: $0.segments) }
             },
             group: group)
     }

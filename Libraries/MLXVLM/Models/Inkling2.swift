@@ -241,9 +241,10 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
 
     public var reasoningConfig: ReasoningConfig? { InklingReasoningProtocol.inkling2 }
 
+    /// The key and value heads of each layer visit: after ``shard(group:)``, the share of this
+    /// process.
     public var kvHeads: [Int] {
-        let text = config.textConfiguration
-        return text.layerVisits.map { text.isSliding($0) ? text.slidingKVHeads : text.kvHeads }
+        config.textConfiguration.layerVisits.map { languageModel.layers[$0].attention.kvHeads }
     }
 
     public init(_ config: Inkling2Configuration) {
@@ -483,6 +484,37 @@ extension Inkling2: SpeculativeCacheRewindModel {
     /// A verify pass keeps the convolution windows of up to ``speculativeVerifyPositions`` tokens
     /// and rewinds every token but its first, the bonus token.
     public var maximumNativeTargetCacheRewind: Int { Self.speculativeVerifyPositions - 1 }
+}
+
+extension Inkling2: TensorParallelShardable {
+    /// Splits the attention heads and the inner width of every expert of the text stack
+    /// across `group`. The embedding, the LM head, the router, the loop gates and the vision
+    /// tower stay whole. The projections fuse again over the shards, and every compiled trace
+    /// drops.
+    ///
+    /// - Parameter group: The group to split across.
+    public func shard(group: MLXDistributed.Group) throws {
+        guard try group.size > 1 else { return }
+        try languageModel.shard(group: group)
+        try prepare()
+        invalidateCompiledTraces()
+    }
+}
+
+extension Inkling2TextModel: TensorParallelShardable {
+    /// Keeps the share of one process of `group` of every distinct layer. The layers of the
+    /// loop core run in every pass, so each splits once. ``Inkling2/shard(group:)`` then fuses
+    /// the projections again.
+    ///
+    /// - Parameter group: The group to split across.
+    func shard(group: MLXDistributed.Group) throws {
+        let plan = try Inkling2TensorParallelPlan(configuration: config, groupSize: try group.size)
+        guard plan.groupSize > 1 else { return }
+        let shards = try layers.map { try $0.makeShards(plan, group: group) }
+        for (layer, layerShards) in zip(layers, shards) {
+            try layer.shard(plan, with: layerShards, group: group)
+        }
+    }
 }
 
 extension Inkling2: LoRAModel {

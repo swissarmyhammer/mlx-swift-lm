@@ -299,7 +299,7 @@ final class Inkling2DynamicShortConvolution: Module {
     @ModuleInfo(key: "weight_proj") var weightProj: Linear
 
     let kernelSize: Int
-    let heads: Int
+    private(set) var heads: Int
 
     init(channels: Int, inputDims: Int, heads: Int, kernelSize: Int) {
         self.kernelSize = kernelSize
@@ -307,6 +307,11 @@ final class Inkling2DynamicShortConvolution: Module {
         self._staticWeight.wrappedValue = MLXArray.zeros([kernelSize, channels])
         self._weightProj.wrappedValue = Linear(inputDims, heads * kernelSize, bias: false)
         super.init()
+    }
+
+    /// Takes the head count of one process of a tensor parallel group.
+    func adoptShardedHeads(_ heads: Int) {
+        self.heads = heads
     }
 
     /// - Parameters:

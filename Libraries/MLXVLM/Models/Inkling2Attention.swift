@@ -96,8 +96,8 @@ final class Inkling2Attention: Module {
     @ModuleInfo(key: "k_sconv") var keyConvolution: Module
     @ModuleInfo(key: "v_sconv") var valueConvolution: Module
 
-    let heads: Int
-    let kvHeads: Int
+    private(set) var heads: Int
+    private(set) var kvHeads: Int
     let headDim: Int
     let window: Int
     let scale: Float
@@ -179,6 +179,14 @@ final class Inkling2Attention: Module {
                 channels: kvDim, inputDims: dims, heads: kvHeads, kernelSize: k)
         }
         super.init()
+    }
+
+    /// Takes the head counts of one process of a tensor parallel group.
+    func adoptShardedHeads(heads: Int, kvHeads: Int) {
+        self.heads = heads
+        self.kvHeads = kvHeads
+        dynamicKeyConvolution?.adoptShardedHeads(kvHeads)
+        dynamicValueConvolution?.adoptShardedHeads(kvHeads)
     }
 
     private var dynamicKeyConvolution: Inkling2DynamicShortConvolution? {

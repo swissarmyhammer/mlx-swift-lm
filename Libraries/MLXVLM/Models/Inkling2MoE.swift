@@ -302,15 +302,25 @@ final class Inkling2SparseMoE: Module {
     @ModuleInfo(key: "gate") fileprivate var router: Inkling2Router
     @ModuleInfo var experts: Inkling2Experts
 
+    /// The group whose processes each hold a slice of every expert, or nil for whole experts.
+    private(set) var group: MLXDistributed.Group?
+
     init(_ config: Inkling2TextConfiguration) {
         _router.wrappedValue = Inkling2Router(config)
         _experts.wrappedValue = Inkling2Experts(config, gateUp: .nvfp4, down: .nvfp4)
         super.init()
     }
 
+    /// Sums the partial expert outputs across `group`, whose processes each hold a slice of
+    /// the inner width of every expert.
+    func adoptShardedExperts(group: MLXDistributed.Group) {
+        self.group = group
+    }
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, weights) = router(x)
-        return weightedExperts(experts(x, indices), weights[.ellipsis, .newAxis])
+        let sum = weightedExperts(experts(x, indices), weights[.ellipsis, .newAxis])
+        return group.map { MLXDistributed.allSum(sum, group: $0) } ?? sum
     }
 
     /// The layer output `residual + convolution(self(x))` of a prefill chunk and the window of
@@ -320,7 +330,7 @@ final class Inkling2SparseMoE: Module {
         _ x: MLXArray, residual: MLXArray, convolution: Inkling2ShortConvolution,
         state: MLXArray?, mask: MLXArray?, keepsWindow: Bool = false
     ) -> (MLXArray, MLXArray) {
-        guard convolution.usesKernel(mask: mask), !keepsWindow else {
+        guard group == nil, convolution.usesKernel(mask: mask), !keepsWindow else {
             let (output, window) = convolution(
                 self(x), state: state, mask: mask, keepsWindow: keepsWindow)
             return (residualAdd(residual, output), window)
@@ -334,7 +344,30 @@ final class Inkling2SparseMoE: Module {
 
     /// ``Inkling2Experts/decode(_:indices:weights:residual:state:convolutionWeight:)``, routed
     /// from the float32 copy of the input.
+    ///
+    /// Sharded experts sum their partial outputs across the group before the convolution.
     func decode(
+        _ x: MLXArray, routerInput: MLXArray, residual: MLXArray, state: MLXArray,
+        convolutionWeight: MLXArray
+    ) -> (MLXArray, MLXArray) {
+        guard let group else {
+            return localDecode(
+                x, routerInput: routerInput, residual: residual, state: state,
+                convolutionWeight: convolutionWeight)
+        }
+        // Over zero residuals and states, the newest state row is the expert sum itself.
+        let partial = localDecode(
+            x, routerInput: routerInput, residual: MLXArray.zeros(like: residual),
+            state: MLXArray.zeros(like: state), convolutionWeight: convolutionWeight
+        ).1[0..., state.dim(1) - 1, 0...]
+        return inkling2ExpertConvolution(
+            sums: MLXDistributed.allSum(partial, group: group), residual: residual, state: state,
+            convolutionWeight: convolutionWeight)
+    }
+
+    /// ``decode(_:routerInput:residual:state:convolutionWeight:)`` of the experts this process
+    /// holds.
+    private func localDecode(
         _ x: MLXArray, routerInput: MLXArray, residual: MLXArray, state: MLXArray,
         convolutionWeight: MLXArray
     ) -> (MLXArray, MLXArray) {
