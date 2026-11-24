@@ -181,14 +181,14 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
 
 final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     let hiddenSize: Int
-    let numVHeads: Int
-    let numKHeads: Int
+    private(set) var numVHeads: Int
+    private(set) var numKHeads: Int
     let headKDim: Int
     let headVDim: Int
-    let keyDim: Int
-    let valueDim: Int
+    private(set) var keyDim: Int
+    private(set) var valueDim: Int
     let convKernelSize: Int
-    let convDim: Int
+    private(set) var convDim: Int
 
     @ModuleInfo(key: "conv1d") var conv1d: Conv1d
     @ModuleInfo(key: "in_proj_qkv") var inProjQKV: Linear
@@ -274,6 +274,15 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
 
     /// Whether one matmul computes the four input projections.
     var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
+
+    /// Takes the head counts of one process of a tensor parallel group.
+    func adoptShardedHeads(from plan: Qwen35TensorParallelPlan) {
+        numKHeads = plan.linearKeyHeads
+        numVHeads = plan.linearValueHeads
+        keyDim = headKDim * numKHeads
+        valueDim = headVDim * numVHeads
+        convDim = keyDim * 2 + valueDim
+    }
 
     /// The fused input projection as compile state of `trace`; see
     /// ``FusedQuantizedProjectionGroup/traceState(of:)``.
@@ -499,8 +508,8 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
 // MARK: - Attention
 
 final class Qwen35Attention: Module {
-    let attentionHeads: Int
-    let kvHeads: Int
+    private(set) var attentionHeads: Int
+    private(set) var kvHeads: Int
     let scale: Float
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
@@ -573,6 +582,12 @@ final class Qwen35Attention: Module {
 
     /// Whether one matmul computes the query, key and value projections.
     var hasFusedProjection: Bool { fusedQKV.isPrepared }
+
+    /// Takes the head counts of one process of a tensor parallel group.
+    func adoptShardedHeads(from plan: Qwen35TensorParallelPlan) {
+        attentionHeads = plan.attentionHeads
+        kvHeads = plan.kvHeads
+    }
 
     /// Fuses the query, key and value projections; see
     /// ``FusedQuantizedProjectionGroup``. The model loader calls this before
@@ -1208,7 +1223,7 @@ public class Qwen35TextModelInner: Module {
 
 public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
-    public let kvHeads: [Int]
+    public private(set) var kvHeads: [Int]
 
     public let model: Qwen35TextModelInner
     /// The text model's geometry.
@@ -1478,11 +1493,31 @@ extension Qwen35TextModel: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { GatedDeltaDecodeKernel.mostRewoundTokens }
 }
 
+extension Qwen35TextModel: TensorParallelShardable {
+    /// Splits the attention, gated delta and MLP layers by head across `group`. The embedding
+    /// and the LM head stay whole. The projections fuse again over the shards, and every
+    /// compiled trace drops.
+    ///
+    /// - Parameter group: The group to split across.
+    public func shard(group: MLXDistributed.Group) throws {
+        let plan = try Qwen35TensorParallelPlan(
+            configuration: configuration, groupSize: try group.size)
+        guard plan.groupSize > 1 else { return }
+        let shards = try model.layers.map { try $0.makeShards(plan, group: group) }
+        for (layer, layerShards) in zip(model.layers, shards) {
+            try layer.shard(plan, with: layerShards, group: group)
+        }
+        kvHeads = kvHeads.map { _ in plan.kvHeads }
+        try prepare()
+        invalidateCompiledTraces()
+    }
+}
+
 // MARK: - Top-level Model
 
 public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
-    public let kvHeads: [Int]
+    public private(set) var kvHeads: [Int]
 
     @ModuleInfo(key: "language_model") var languageModel: Qwen35TextModel
 
@@ -1579,6 +1614,16 @@ extension Qwen35Model: ModelComponentsProviding {
 extension Qwen35Model: SpeculativeCacheRewindModel {
     /// The drafts of the longest verify whose snapshot slots a GDN layer keeps.
     public var maximumNativeTargetCacheRewind: Int { GatedDeltaDecodeKernel.mostRewoundTokens }
+}
+
+extension Qwen35Model: TensorParallelShardable {
+    /// Splits the text model across `group`; see ``Qwen35TextModel/shard(group:)``.
+    ///
+    /// - Parameter group: The group to split across.
+    public func shard(group: MLXDistributed.Group) throws {
+        try languageModel.shard(group: group)
+        kvHeads = languageModel.kvHeads
+    }
 }
 
 // MARK: - Chat conventions
