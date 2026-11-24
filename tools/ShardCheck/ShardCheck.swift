@@ -5,6 +5,7 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXScriptedLM
+import MLXVLM
 
 /// Runs a prefill and greedy decode steps, and writes the last-position logits of each step.
 ///
@@ -33,8 +34,7 @@ struct ShardCheck {
         let clock = ContinuousClock()
 
         let loadStart = clock.now
-        let context = try await LLMModelFactory.shared.load(
-            from: arguments.modelDirectory, using: PseudoWordTokenizerLoader())
+        let context = try await loadContext(arguments.modelDirectory)
         let loadTime = clock.now - loadStart
 
         let shardStart = clock.now
@@ -58,6 +58,18 @@ struct ShardCheck {
             decodeSecondsPerToken: run.decodeTime.seconds / Double(arguments.decodeSteps))
         try report.write(besides: arguments.output)
         print(report.summary)
+    }
+
+    /// The model of `directory` from the LLM factory, or from the VLM factory for a model type
+    /// only it knows, such as Inkling 2. The check feeds token ids, so it runs text only.
+    private static func loadContext(_ directory: URL) async throws -> ModelContext {
+        do {
+            return try await LLMModelFactory.shared.load(
+                from: directory, using: PseudoWordTokenizerLoader())
+        } catch ModelFactoryError.unsupportedModelType {
+            return try await VLMModelFactory.shared.load(
+                from: directory, using: PseudoWordTokenizerLoader())
+        }
     }
 
     /// The group named by the environment, or nil when `MLX_RANK` is not set: JACCL when

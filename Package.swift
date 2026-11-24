@@ -251,6 +251,7 @@ let package = Package(
             dependencies: [
                 "MLXLMCommon",
                 "MLXLLM",
+                "MLXVLM",
                 "MLXScriptedLM",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
