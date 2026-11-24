@@ -2,20 +2,20 @@
 # Checks tensor-parallel sharding on one Mac: runs ShardCheck as two ring processes on
 # localhost, then unsharded, and compares the greedy tokens and logits.
 #
-# Usage: scripts/shard-check.sh <model-directory> [tolerance]
+# Usage: scripts/shard-check.sh <model-directory> [max-kl]
 # Env: SHARD_CHECK_WORK (output directory), SHARD_CHECK_PORT (first ring port),
 #      SHARD_CHECK_TOKENS (comma-separated prompt ids), SHARD_CHECK_SKIP_BUILD=1.
 
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-    echo "usage: $0 <model-directory> [tolerance]" >&2
+    echo "usage: $0 <model-directory> [max-kl]" >&2
     exit 2
 fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL="$1"
-TOLERANCE="${2:-0.5}"
+MAX_KL="${2:-0.05}"
 WORK="${SHARD_CHECK_WORK:-$(mktemp -d -t shard-check)}"
 PORT="${SHARD_CHECK_PORT:-50211}"
 DERIVED="$ROOT/.build/shard-check"
@@ -64,4 +64,4 @@ echo "== unsharded reference"
 
 echo "== compare"
 python3 -I "$ROOT/scripts/shard_check_compare.py" \
-    "$WORK/reference.npy" "$WORK/sharded.npy" "$TOLERANCE"
+    "$WORK/reference.npy" "$WORK/sharded.npy" "$MAX_KL"
