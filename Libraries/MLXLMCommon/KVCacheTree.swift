@@ -15,6 +15,7 @@ struct KVCacheLeaf {
         case affine(QuantizedKVCache)
         case turboQuant(TurboQuantKVCache)
         case varianceNormalized(VarianceNormalizedKVCache)
+        case remote(RemoteKVCache)
         case unsupported
     }
 
@@ -29,6 +30,7 @@ struct KVCacheLeaf {
         case let cache as VarianceNormalizedKVCache: .varianceNormalized(cache)
         case let cache as QuantizedKVCache: .affine(cache)
         case let cache as KVCacheSimple: .simple(cache)
+        case let cache as RemoteKVCache: .remote(cache)
         default: .unsupported
         }
     }
@@ -44,6 +46,7 @@ struct KVCacheLeaf {
         case .varianceNormalized: .varianceNormalized
         case .simple where cache is ChunkedKVCache: .unsupported
         case .simple, .affine, .turboQuant: .trim
+        case .remote(let remote): remote.status.canLoseRewind ? .copy : .trim
         case .unsupported:
             cache is any AuxiliaryKVCache && cache.isTrimmable ? .trim : .unsupported
         }
@@ -66,7 +69,7 @@ struct KVCacheLeaf {
     var participatesInTurboQuantBoundaryProtection: Bool {
         switch kind {
         case .simple, .affine, .turboQuant: true
-        case .recurrent, .rotating, .varianceNormalized, .unsupported: false
+        case .recurrent, .rotating, .varianceNormalized, .remote, .unsupported: false
         }
     }
 
@@ -80,7 +83,7 @@ struct KVCacheLeaf {
         switch kind {
         case .recurrent:
             return nil
-        case .rotating, .unsupported:
+        case .rotating, .remote, .unsupported:
             return strategy == .fullPrecision
         case .simple(let simple):
             let state = simple.innerState()

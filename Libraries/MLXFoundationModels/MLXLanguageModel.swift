@@ -183,12 +183,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///
     /// - Parameter container: the loaded target, from ``loadContainer()``.
     /// - Returns: the speculation, or `nil`.
-    /// - Throws: the error of the drafter load, and `SpeculativeDecodingMemoryError` when the
-    ///   memory policy does not admit the drafter and its action is `.fail`.
+    /// - Throws: the error of the drafter load, `SpeculativeDecodingMemoryError` when the
+    ///   memory policy does not admit the drafter and its action is `.fail`, and
+    ///   `ClusterModelError.unsupported(.speculativeDecoding)` for a target whose forward runs in
+    ///   a cluster worker.
     func loadMTPSpeculation(for container: ModelContainer) async throws -> MTPSpeculation? {
         guard let speculativeDecoding else { return nil }
         let (loadDrafter, admitsDrafter) = try await container.perform { context in
-            (
+            try ClusterModelError.refuseSpeculativeDecoding(on: context.model)
+            return (
                 speculativeDecoding.drafterLoader(for: context.model),
                 try speculativeDecoding.admitsDrafterBeforeLoading(beside: context.model)
             )

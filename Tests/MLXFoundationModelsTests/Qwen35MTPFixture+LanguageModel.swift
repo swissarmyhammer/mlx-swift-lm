@@ -40,6 +40,42 @@ extension Qwen35MTPFixture {
         eosTokenIds: Set<Int> = [], tokenizer: (any Tokenizer)? = nil,
         toolCallFormat: ToolCallFormat? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil
     ) -> MLXLanguageModel {
+        Self.makeLanguageModel(
+            serving: makeLanguageContext(
+                eosTokenIds: eosTokenIds, tokenizer: tokenizer, toolCallFormat: toolCallFormat),
+            weights: weights, capabilities: capabilities, resolver: resolver,
+            speculativeDecoding: speculativeDecoding)
+    }
+
+    /// A FoundationModels language model whose target runs in an in-process worker, behind a
+    /// `ClusterLanguageModel`, with the tokenizer and the configuration of
+    /// ``makeLanguageModel(weights:capabilities:resolver:eosTokenIds:tokenizer:toolCallFormat:speculativeDecoding:)``.
+    ///
+    /// - Parameters:
+    ///   - weights: The directory that makes the model available.
+    ///   - capabilities: The capabilities the model declares.
+    ///   - tokenizer: The tokenizer that renders the prompts and decodes the replies, or `nil`
+    ///     for the fixture's own.
+    ///   - speculativeDecoding: The MTP drafter of the model, or `nil` for plain decode.
+    /// - Returns: The model, and the worker that runs its target.
+    /// - Throws: The error of the worker handshake.
+    func makeClusteredLanguageModel(
+        weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
+        tokenizer: (any Tokenizer)? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil
+    ) throws -> (model: MLXLanguageModel, worker: InProcessRemoteModelWorker) {
+        let worker = makeWorker()
+        var context = makeLanguageContext(eosTokenIds: [], tokenizer: tokenizer, toolCallFormat: nil)
+        context.model = try ClusterLanguageModel.connect(over: worker)
+        let model = Self.makeLanguageModel(
+            serving: context, weights: weights, capabilities: capabilities,
+            resolver: DefaultConfigurationResolver(), speculativeDecoding: speculativeDecoding)
+        return (model, worker)
+    }
+
+    /// The model context of the fixture with `tokenizer` and `toolCallFormat`.
+    private func makeLanguageContext(
+        eosTokenIds: Set<Int>, tokenizer: (any Tokenizer)?, toolCallFormat: ToolCallFormat?
+    ) -> ModelContext {
         var context = makeModelContext(eosTokenIds: eosTokenIds)
         context.configuration.toolCallFormat = toolCallFormat
         if let tokenizer {
@@ -47,6 +83,16 @@ extension Qwen35MTPFixture {
             context.processor = ScalarTokenizerInputProcessor(
                 tokenizer: tokenizer, configuration: context.configuration)
         }
+        return context
+    }
+
+    /// A FoundationModels language model under a fresh identity, whose load gives a container
+    /// of `context`.
+    private static func makeLanguageModel(
+        serving context: ModelContext, weights: URL,
+        capabilities: [LanguageModelCapabilities.Capability],
+        resolver: any ModelConfigurationResolver, speculativeDecoding: MLXSpeculativeDecoding?
+    ) -> MLXLanguageModel {
         let container = ModelContainer(context: context)
         return MLXLanguageModel(
             configuration: ModelConfiguration(id: "probe/qwen35-mtp-fixture-\(UUID().uuidString)"),

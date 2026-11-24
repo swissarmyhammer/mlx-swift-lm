@@ -1859,6 +1859,11 @@ public final class ChatSession {
                             configuration: modelConfiguration,
                             primedInside: reasoningPrimedInside)
 
+                        // A model whose forward runs in a worker cannot verify drafts.
+                        if speculativeDecoding != nil {
+                            try ClusterModelError.refuseSpeculativeDecoding(on: model)
+                        }
+
                         // The memory policy's verdict on a deferred draft model, from its byte
                         // estimate before it loads. The error of a fail action is kept until
                         // the draft-model branch is taken.

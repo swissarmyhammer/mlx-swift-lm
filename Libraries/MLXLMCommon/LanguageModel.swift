@@ -397,6 +397,10 @@ public struct LMModelCapabilities: OptionSet, Sendable {
     }
 
     public static let blockDiffusion = Self(rawValue: 1 << 0)
+
+    /// The forward pass and the caches run in a worker process, as ``ClusterLanguageModel``
+    /// runs them.
+    public static let remoteForward = Self(rawValue: 1 << 1)
 }
 
 /// Interface for all Language Models (e.g. LLM, VLM).

@@ -785,6 +785,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProcessing {
             throw GenerateError.unsupportedSpeculativeDecoding(
                 String(describing: type(of: mainModel)))
         }
+        try ClusterModelError.refuseSpeculativeDecoding(on: mainModel)
         guard !draftModel.capabilities.contains(.blockDiffusion) else {
             throw GenerateError.unsupportedSpeculativeDecoding(
                 String(describing: type(of: draftModel)))

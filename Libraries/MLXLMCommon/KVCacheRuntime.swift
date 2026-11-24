@@ -284,7 +284,7 @@ extension KVCacheLeaf {
                 state: compressionPending ? .pending : .skipped,
                 resolvedStrategy: .fullPrecision,
                 reason: compressionPending ? .awaitingCompressionStart : .unsupportedShape)
-        case .unsupported:
+        case .remote, .unsupported:
             return status(
                 state: .skipped,
                 resolvedStrategy: nil,

@@ -312,6 +312,12 @@ public enum WeightFileSelection: Sendable, Equatable {
     /// is loaded silently rather than reported, so prefer a model that declares its own
     /// extra files (see ``AdditionalWeightFilesProviding``) where that is possible.
     case allFilesPresent
+
+    /// Load no weights: the model keeps the parameters its initializer made, unevaluated.
+    ///
+    /// For a context whose forward pass runs elsewhere, such as a ``ClusterLanguageModel``:
+    /// the load reads the configuration, the tokenizer and the processor, and no weight file.
+    case skipped
 }
 
 /// The safetensors files in `modelDirectory` that hold the model's weights.
@@ -363,6 +369,8 @@ package func safetensorWeightURLs(
 
     let selected: [URL]
     switch selection {
+    case .skipped:
+        return []
     case .allFilesPresent:
         selected = present
     case .automatic:
@@ -510,7 +518,8 @@ package func weightFileBytes(of weightURLs: [URL]) -> Int {
 /// The weight files are chosen from `model.safetensors.index.json` when it names files that
 /// exist, and otherwise by the conventional `model*.safetensors` names. A model can name extra
 /// files it needs by conforming to ``AdditionalWeightFilesProviding``, and a caller can override
-/// the choice with ``ModelConfiguration/weightFileSelection``.
+/// the choice with ``ModelConfiguration/weightFileSelection``. With
+/// ``WeightFileSelection/skipped`` the function reads no file and returns at once.
 ///
 /// The model loads without the `excludedComponents` it supports, see
 /// ``ModelComponentsProviding``. Its on-demand components load the first time an input
@@ -529,6 +538,7 @@ public func loadWeights(
     excludedComponents: Set<ModelComponent> = [],
     componentLoading: ComponentLoading = .onFirstUse
 ) async throws {
+    guard weightFileSelection != .skipped else { return }
     let additionalFiles = (model as? any AdditionalWeightFilesProviding)?.additionalWeightFiles
     let weightURLs = try safetensorWeightURLs(
         in: modelDirectory,

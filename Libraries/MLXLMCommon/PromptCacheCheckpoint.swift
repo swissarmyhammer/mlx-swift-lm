@@ -165,9 +165,14 @@ package struct PromptCacheCheckpoint {
 
     /// Whether `cache` cannot rewind now or can stop being able to: a fresh
     /// rotating cache rewinds until its window wraps, and a variance-normalized
-    /// cache rewinds exactly only inside its raw tail.
+    /// cache rewinds exactly only inside its raw tail. A remote cache answers
+    /// for the layers it holds on its worker.
     private static func canLoseRewind(_ cache: KVCache) -> Bool {
-        !cache.isTrimmable || cache is RotatingKVCache || cache is VarianceNormalizedKVCache
+        if let remote = cache as? RemoteKVCache {
+            return remote.status.canLoseRewind
+        }
+        return !cache.isTrimmable || cache is RotatingKVCache
+            || cache is VarianceNormalizedKVCache
     }
 
     /// What a restore of `cache` needs.
@@ -254,7 +259,9 @@ package struct PromptCacheCheckpoint {
         let forward = { (range: Range<Int>) in
             let chunk = MLXArray(Array(tokens[range])).expandedDimensions(axis: 0)
             let chunkState = drafterFeed.map { (state ?? LMOutput.State()).feeding($0) } ?? state
-            let output = model(LMInput.Text(tokens: chunk), cache: caches, state: chunkState)
+            // The logits are never read, thus the model may skip all but the last row.
+            let output = model.nextTokenLogits(
+                LMInput.Text(tokens: chunk), cache: caches, state: chunkState)
             chunkState?.feedMTPPrefillChunk(tokens: chunk, output: output)
             state = drafterFeed == nil ? output.state : output.state?.withoutMTPExchange
             asyncEval(caches.flatMap(\.state))

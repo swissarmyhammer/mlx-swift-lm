@@ -109,6 +109,9 @@ package struct MTPSpeculation {
                 input: input, model: diffusionModel, cache: cache, parameters: parameters,
                 components: components)
         }
+        if speculation != nil {
+            try ClusterModelError.refuseSpeculativeDecoding(on: model)
+        }
         var fallback = speculation.flatMap {
             MTPDrafterFallback.incompatibility(of: $0.drafter, with: model)
         }

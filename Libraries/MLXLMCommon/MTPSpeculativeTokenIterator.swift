@@ -367,9 +367,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
     ///   - minimumDraftProbability: The drafter top-1 probability below which a chaining
     ///     drafter stops a round's chain, from 0 (draft every step) to 1.
     ///   - components: Optional behavioral components, e.g. a custom ``LogitProcessor``.
-    /// - Throws: An ``MTPDrafterCompatibilityError`` when `drafter` cannot draft for
-    ///   `mainModel`, a ``SpeculativeDecodingConfigurationError`` for a floor outside 0 to 1, or
-    ///   the error of the prefill.
+    /// - Throws: ``ClusterModelError/unsupported(_:)`` when `mainModel` runs its forward pass
+    ///   in a cluster worker, an ``MTPDrafterCompatibilityError`` when `drafter` cannot draft
+    ///   for `mainModel`, a ``SpeculativeDecodingConfigurationError`` for a floor outside 0 to
+    ///   1, or the error of the prefill.
     public init(
         input: LMInput,
         mainModel: any LanguageModel,
@@ -382,7 +383,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         minimumDraftProbability: Float = 0,
         components: GenerationComponents = .init()
     ) throws {
-        try drafter.validateCompatibility(with: mainModel)
+        try Self.validate(drafter, for: mainModel)
 
         let kvCachePlan = try parameters.kvCachePlan()
         try self.init(
@@ -420,7 +421,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         minimumDraftProbability: Float = 0,
         components: GenerationComponents = .init()
     ) throws {
-        try drafter.validateCompatibility(with: mainModel)
+        try Self.validate(drafter, for: mainModel)
         try self.init(
             input: input,
             mainModel: mainModel,
@@ -432,6 +433,21 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
             blockSize: blockSize,
             minimumDraftProbability: minimumDraftProbability,
             components: components)
+    }
+
+    /// Checks that `drafter` can draft for `mainModel`, and that `mainModel` runs its forward
+    /// pass in this process, which a verify needs.
+    ///
+    /// - Parameters:
+    ///   - drafter: The MTP drafter.
+    ///   - mainModel: The target model.
+    /// - Throws: ``ClusterModelError/unsupported(_:)`` for a target whose forward runs in a
+    ///   cluster worker, or the ``MTPDrafterCompatibilityError`` of the drafter.
+    private static func validate(
+        _ drafter: any MTPDrafterModel, for mainModel: any LanguageModel
+    ) throws {
+        try ClusterModelError.refuseSpeculativeDecoding(on: mainModel)
+        try drafter.validateCompatibility(with: mainModel)
     }
 
     /// The initializer the two other initializers delegate to, after each has checked
