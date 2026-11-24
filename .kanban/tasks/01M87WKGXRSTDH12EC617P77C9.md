@@ -1,6 +1,15 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m87y1a07fzqvr1q1nskhv8vs
+  text: |-
+    Input from the 32-step 2-Mac runs:
+    - Qwen3.8-27B: KL < 0.002 at every step except step 31 (0.025).
+    - Inkling Mini: KL ≤ 0.005, but the top-10 logprob diff grows steadily, ~0.07 → ~0.51 over 32 steps.
+    - Both suggest slow drift. Check 256 and 1024 steps.
+  timestamp: 2026-11-24T23:25:11.047074+00:00
 depends_on:
 - 01M87HW2SS24TQTQ9HFE8SMZKZ
 position_column: todo

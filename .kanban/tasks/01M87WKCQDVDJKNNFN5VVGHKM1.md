@@ -1,8 +1,7 @@
 ---
 assignees:
 - claude-code
-depends_on:
-- 01M87HW2SS24TQTQ9HFE8SMZKZ
+depends_on: []
 position_column: todo
 position_ordinal: '8380'
 title: Review + docs for tensor-parallel sharding (Qwen35, Inkling2)

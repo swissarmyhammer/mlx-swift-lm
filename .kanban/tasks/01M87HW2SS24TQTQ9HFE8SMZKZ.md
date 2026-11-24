@@ -52,8 +52,17 @@ comments:
     - Open: not run on 2 real Macs over JACCL yet. Unit tests cover only groups of one; the shard-sum tests check the split math in one process.
     - next: review
   timestamp: 2026-11-24T23:21:51.193631+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m87y183egxmrmpypph909a8r
+  text: |-
+    ### 2-Mac JACCL check — PASS
+    - ShardCheck at a1aa97cf (mlx-swift 6eb4ccc); rank 0 on m5u2 rdma_en6, rank 1 on m5u1 rdma_en5; MLX_METAL_FAST_SYNCH=1; 32 decode steps.
+    - 33/33 tokens and argmax match. Max KL 0.00484 at prefill. Decode 1–13: 0.0010–0.0029. Decode 14–32: 0.0002–0.0016.
+    - Top-10 logprob diff rises from ~0.07 to ~0.51 by step 32, and max abs logit diff stays ≤ 1.48. Watch this in 17p77c9.
+    - Speed, warm: 11.0 ms/token on one Mac, 11.4 on two. The MoE's small active compute means the allSums cost about what the split saves. Inkling Mini runs local unless it doesn't fit (the planner's head-fits rule).
+  timestamp: 2026-11-24T23:25:09.102815+00:00
+position_column: done
+position_ordinal: ffffee80
 title: Tensor-parallel sharding for Inkling 2 + ShardCheck VLM load
 ---
 Shard the Inkling 2 text stack (mlx-community/Inkling-2-Mini-4bit, `inkling2_loop`) across a distributed group, as Qwen35 does.

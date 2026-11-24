@@ -93,8 +93,8 @@ comments:
       7. Should `InProcessRemoteModelWorker`'s op dispatch move into the library as a reusable worker-side executor? It is test support today.
     - next: /review
   timestamp: 2026-11-24T23:54:39.985301+00:00
-position_column: doing
-position_ordinal: '8280'
+position_column: done
+position_ordinal: ffffef80
 title: 'ClusterLanguageModel seam: remote forward and cache ops'
 ---
 Let a `ModelContainer` hold a model whose forward pass and KV/recurrent cache operations run in a remote worker process (the rank-0 worker in FoundationModelsCluster). Everything around them stays in-process and unchanged: sampling, logit processors, grammar, stop strings, tool and reasoning parsing, and prompt-cache policy in `MLXLanguageModel`. Design: `cluster.md` in swissarmyhammer/FoundationModelsCluster (Architecture § "The app drives; workers replay").
