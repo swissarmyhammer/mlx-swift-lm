@@ -244,6 +244,18 @@ let package = Package(
             path: "Libraries/MLXScriptedLM",
             exclude: ["README.md"]
         ),
+        // Compares tensor-parallel logits with unsharded ones; scripts/shard-check.sh runs it.
+        // Not a product, so packages that depend on this one do not get it.
+        .executableTarget(
+            name: "ShardCheck",
+            dependencies: [
+                "MLXLMCommon",
+                "MLXLLM",
+                "MLXScriptedLM",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/ShardCheck"
+        ),
         .testTarget(
             name: "MLXLMTests",
             dependencies: [
