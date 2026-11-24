@@ -8,8 +8,9 @@ import MLXScriptedLM
 
 /// Runs a prefill and greedy decode steps, and writes the last-position logits of each step.
 ///
-/// Launched with `MLX_RANK` and `MLX_HOSTFILE`, it joins a ring group and shards the model
-/// first; otherwise it runs the whole model. `scripts/shard-check.sh` compares the two.
+/// Launched with `MLX_RANK` (plus `MLX_HOSTFILE` for ring, or `MLX_IBV_DEVICES` and
+/// `MLX_JACCL_COORDINATOR` for JACCL), it joins that group and shards the model first;
+/// otherwise it runs the whole model. `scripts/shard-check.sh` compares the two.
 ///
 /// Usage: `ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8]`
 @main
@@ -59,13 +60,16 @@ struct ShardCheck {
         print(report.summary)
     }
 
-    /// The ring group named by `MLX_RANK` and `MLX_HOSTFILE`, or nil when neither is set.
+    /// The group named by the environment, or nil when `MLX_RANK` is not set: JACCL when
+    /// `MLX_IBV_DEVICES` is set (with `MLX_JACCL_COORDINATOR`), otherwise ring (`MLX_HOSTFILE`).
     private static func joinGroup() throws -> MLXDistributed.Group? {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MLX_RANK"] != nil || environment["MLX_HOSTFILE"] != nil else {
             return nil
         }
-        return try MLXDistributed.initialize(backend: .ring, strict: true)
+        let backend: MLXDistributed.Backend =
+            environment["MLX_IBV_DEVICES"] != nil ? .jaccl : .ring
+        return try MLXDistributed.initialize(backend: backend, strict: true)
     }
 }
 
