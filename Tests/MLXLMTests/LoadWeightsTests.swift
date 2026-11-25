@@ -541,15 +541,21 @@ final class LoadWeightsTests: XCTestCase {
     // MARK: - loadWeights end to end
 
     func testLoadWeightsReadsSidecarWeightsDeclaredByTheModel() async throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        // Lazy weights read the checkpoint when they evaluate, so a deferred load installs the
+        // same values.
+        for evaluation in [WeightEvaluation.atLoad, .deferred] {
+            let directory = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
 
-        try writeSidecarCheckpoint(in: directory)
+            try writeSidecarCheckpoint(in: directory)
 
-        let model = SidecarDeclaringModel()
-        try await loadWeights(modelDirectory: directory, model: model)
+            let model = SidecarDeclaringModel()
+            try await loadWeights(
+                modelDirectory: directory, model: model, weightEvaluation: evaluation)
 
-        XCTAssertEqual(model.projector.weight.asArray(Float.self), [1, 2, 3, 4])
+            XCTAssertEqual(
+                model.projector.weight.asArray(Float.self), [1, 2, 3, 4], "\(evaluation)")
+        }
     }
 
     func testLoadWeightsPreparesInferenceStateAfterInstallingParameters() async throws {
@@ -576,19 +582,6 @@ final class LoadWeightsTests: XCTestCase {
         try await loadWeights(modelDirectory: directory, model: model, weightEvaluation: .deferred)
 
         XCTAssertEqual(model.preparationCount, 0)
-    }
-
-    func testDeferredLoadInstallsTheCheckpointValues() async throws {
-        let directory = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        try writeSidecarCheckpoint(in: directory)
-
-        // The lazy weights read the checkpoint when they evaluate.
-        let model = SidecarDeclaringModel()
-        try await loadWeights(modelDirectory: directory, model: model, weightEvaluation: .deferred)
-
-        XCTAssertEqual(model.projector.weight.asArray(Float.self), [1, 2, 3, 4])
     }
 
     func testLoadWeightsFailsWhenTheSidecarIsNotDeclared() async throws {

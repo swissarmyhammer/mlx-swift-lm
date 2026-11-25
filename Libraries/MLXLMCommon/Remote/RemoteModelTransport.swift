@@ -171,8 +171,9 @@ final class RemoteModelSession: @unchecked Sendable {
     ///
     /// - Parameter op: The op.
     /// - Returns: The reply of the worker, never ``RemoteModelReply/failed(_:)``.
-    /// - Throws: ``ClusterModelError/transportFailed(_:)`` for a failure of the transport or of
-    ///   an earlier op, and ``ClusterModelError/workerFailed(_:)`` for a failed reply.
+    /// - Throws: The failure of an earlier op, or ``ClusterModelError/closed`` after
+    ///   ``close()``, without sending; ``ClusterModelError/transportFailed(_:)`` for a failure of
+    ///   the transport; ``ClusterModelError/workerFailed(_:)`` for a failed reply.
     func perform(_ op: RemoteModelOp) throws -> RemoteModelReply {
         try lock.withLock { try send(op) }
     }

@@ -20,6 +20,9 @@ public enum RemoteRewindLimit: Codable, Sendable, Hashable {
     /// positions rewinds after any count.
     static let probeLimit = Int(Int32.max)
 
+    /// Each step of the binary search halves the counts still open.
+    private static let bisection = 2
+
     /// The answer of ``KVCache/isTrimmable(after:)`` for `positions`.
     ///
     /// - Parameter positions: The positions the cache would append.
@@ -51,7 +54,7 @@ public enum RemoteRewindLimit: Codable, Sendable, Hashable {
         }
         var (accepted, refused) = (0, Self.probeLimit)
         while refused - accepted > 1 {
-            let middle = accepted + (refused - accepted) / 2
+            let middle = accepted + (refused - accepted) / Self.bisection
             if accepts(middle) {
                 accepted = middle
             } else {

@@ -135,17 +135,24 @@ func loadWeightArrays(urls: [URL]) throws -> (
 
 /// Tensors under `excludedNamespaces` are never read. A file that holds only excluded tensors
 /// still supplies its metadata.
-func loadModelCheckpoint(urls: [URL], excludedNamespaces: [String] = []) throws
-    -> ModelCheckpoint
-{
+///
+/// With ``WeightEvaluation/deferred`` every tensor stays lazy: it reads its bytes when it
+/// evaluates.
+func loadModelCheckpoint(
+    urls: [URL], excludedNamespaces: [String] = [], evaluation: WeightEvaluation = .atLoad
+) throws -> ModelCheckpoint {
     let exclusions = CheckpointNameMapping(excludedNamespaces.map { .excludePrefix($0) })
-    return try loadModelCheckpoint(urls: urls) { exclusions.mapName($0) != nil }
+    return try loadModelCheckpoint(urls: urls, evaluation: evaluation) {
+        exclusions.mapName($0) != nil
+    }
 }
 
-/// Only tensors whose names pass `isRead` are read.
-func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bool) throws
-    -> ModelCheckpoint
-{
+/// Only tensors whose names pass `isRead` are read. With ``WeightEvaluation/atLoad`` each work
+/// item evaluates its tensors; with ``WeightEvaluation/deferred`` they stay lazy.
+func loadModelCheckpoint(
+    urls: [URL], evaluation: WeightEvaluation = .atLoad,
+    isRead: @escaping @Sendable (String) -> Bool
+) throws -> ModelCheckpoint {
     struct WorkItem {
         let file: Int
         let url: URL
@@ -185,7 +192,8 @@ func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bo
     }()
 
     let state = ConcurrentLoadState(fileCount: urls.count)
-    let progress = ModelLoadProgressScope.reporter
+    // A lazy tensor reads its bytes after the load returns, outside the scope of the reporter.
+    let progress = evaluation == .atLoad ? ModelLoadProgressScope.reporter : nil
     DispatchQueue.concurrentPerform(iterations: items.count) { index in
         let item = items[index]
         do {
@@ -215,29 +223,12 @@ func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bo
                 }
 
                 // force this range's I/O here, on this stream, in file-offset order
-                if !selected.isEmpty { eval(Array(selected.values)) }
+                if evaluation == .atLoad, !selected.isEmpty { eval(Array(selected.values)) }
                 state.merge(file: item.file, weights: selected, metadata: metadata)
             }
         } catch {
             state.record(error: error)
         }
-    }
-    return try state.result()
-}
-
-/// The checkpoint of the files in `urls` with every tensor still lazy: each tensor reads its
-/// bytes when it evaluates. Tensors under `excludedNamespaces` are left out. Later files win,
-/// as in ``loadModelCheckpoint(urls:isRead:)``.
-func loadLazyModelCheckpoint(urls: [URL], excludedNamespaces: [String] = []) throws
-    -> ModelCheckpoint
-{
-    let exclusions = CheckpointNameMapping(excludedNamespaces.map { .excludePrefix($0) })
-    let state = ConcurrentLoadState(fileCount: urls.count)
-    for (file, url) in urls.enumerated() {
-        let (all, metadata) = try loadArraysAndMetadata(url: url, stream: .cpu)
-        state.merge(
-            file: file, weights: all.filter { exclusions.mapName($0.key) != nil },
-            metadata: metadata)
     }
     return try state.result()
 }
@@ -633,14 +624,8 @@ private func installWeights(
     // replaces are freed by then. The prepared tensors evaluate in groups first, so the
     // results of preparation never all stand beside the tensors they replace.
     do {
-        var checkpoint =
-            switch evaluation {
-            case .atLoad:
-                try loadModelCheckpoint(urls: weightURLs, excludedNamespaces: excludedNamespaces)
-            case .deferred:
-                try loadLazyModelCheckpoint(
-                    urls: weightURLs, excludedNamespaces: excludedNamespaces)
-            }
+        var checkpoint = try loadModelCheckpoint(
+            urls: weightURLs, excludedNamespaces: excludedNamespaces, evaluation: evaluation)
         checkpoint.perLayerQuantization = perLayerQuantization
         checkpoint = try model.prepareCheckpoint(checkpoint)
         if evaluation == .atLoad {

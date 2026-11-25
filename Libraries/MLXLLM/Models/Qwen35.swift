@@ -180,6 +180,10 @@ public struct Qwen35TextConfiguration: Codable, Sendable {
 // MARK: - GatedDeltaNet
 
 final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
+    /// The query and the key each take `keyDim` channels of the fused input projection and of
+    /// the conv, ahead of the `valueDim` channels of the value.
+    static let queryKeyParts = 2
+
     let hiddenSize: Int
     private(set) var numVHeads: Int
     private(set) var numKHeads: Int
@@ -222,7 +226,7 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         self.keyDim = headKDim * numKHeads
         self.valueDim = headVDim * numVHeads
         self.convKernelSize = args.linearConvKernelDim
-        self.convDim = keyDim * 2 + valueDim
+        self.convDim = keyDim * Self.queryKeyParts + valueDim
 
         precondition(
             numVHeads % numKHeads == 0,
@@ -240,7 +244,8 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
             bias: false
         )
 
-        _inProjQKV.wrappedValue = Linear(hiddenSize, keyDim * 2 + valueDim, bias: false)
+        _inProjQKV.wrappedValue = Linear(
+            hiddenSize, keyDim * Self.queryKeyParts + valueDim, bias: false)
         _inProjZ.wrappedValue = Linear(hiddenSize, valueDim, bias: false)
         _inProjB.wrappedValue = Linear(hiddenSize, numVHeads, bias: false)
         _inProjA.wrappedValue = Linear(hiddenSize, numVHeads, bias: false)
@@ -281,7 +286,7 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
         numVHeads = plan.linearValueHeads
         keyDim = headKDim * numKHeads
         valueDim = headVDim * numVHeads
-        convDim = keyDim * 2 + valueDim
+        convDim = keyDim * Self.queryKeyParts + valueDim
     }
 
     /// The fused input projection as compile state of `trace`; see
@@ -433,7 +438,8 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
             : generalConv(convState: convState, qkv: qkv)
         let convOut = silu(convPre)
 
-        let convSplit = MLX.split(convOut, indices: [keyDim, 2 * keyDim], axis: -1)
+        let convSplit = MLX.split(
+            convOut, indices: [keyDim, Self.queryKeyParts * keyDim], axis: -1)
         let q = convSplit[0].reshaped(B, S, numKHeads, headKDim)
         let k = convSplit[1].reshaped(B, S, numKHeads, headKDim)
         let v = convSplit[2].reshaped(B, S, numVHeads, headVDim)
@@ -1223,6 +1229,8 @@ public class Qwen35TextModelInner: Module {
 
 public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
+    /// The key and value heads of each layer: after ``shardLayers(group:hooks:)``, the share of
+    /// this process.
     public private(set) var kvHeads: [Int]
 
     public let model: Qwen35TextModelInner
@@ -1518,6 +1526,8 @@ extension Qwen35TextModel: TensorParallelShardable {
 
 public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
+    /// The key and value heads of each layer: after ``shardLayers(group:hooks:)``, the share of
+    /// this process.
     public private(set) var kvHeads: [Int]
 
     @ModuleInfo(key: "language_model") var languageModel: Qwen35TextModel

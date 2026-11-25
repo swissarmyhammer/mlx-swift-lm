@@ -109,29 +109,61 @@ struct PromptCacheCheckpointCompositeTests {
         #expect(PromptCacheCheckpoint.applies(to: try model.newCache(parameters: nil)))
     }
 
+    /// The prompt of the Inkling 2 restore tests: the checkpoint tokens, then the later ones.
+    private static let restoreTokens = (0 ..< checkpointTokenCount + laterTokenCount).map {
+        $0 % vocabularySize
+    }
+
+    /// The largest logit difference a restored continuation may show beside a cold prefill of
+    /// the same tokens, in float32.
+    private static let restoreTolerance: Float = 1e-4
+
+    /// The caches of `model` restored from a checkpoint of the first ``checkpointTokenCount``
+    /// tokens of ``restoreTokens``, after the live caches took every later token, so the
+    /// sliding window wrapped past the checkpoint.
+    private static func restoredAfterWrap(_ model: Inkling2) throws -> [KVCache]? {
+        let caches = try model.newCache(parameters: nil)
+        let prefill = PrefillParameters(stepSize: checkpointTokenCount)
+        let checkpointTokens = Array(restoreTokens.prefix(checkpointTokenCount))
+        _ = try PromptCacheCheckpoint.prefill(
+            checkpointTokens, into: caches, state: nil, model: model, prefill: prefill)
+        let checkpoint = try #require(
+            PromptCacheCheckpoint(caches: caches, tokens: checkpointTokens, state: nil))
+        _ = try PromptCacheCheckpoint.prefill(
+            Array(restoreTokens.dropFirst(checkpointTokenCount)), into: caches, state: nil,
+            model: model, prefill: prefill)
+        return checkpoint.restored(onto: caches)
+    }
+
+    /// The last-position logits of `tokens` run through `model` into `caches` in one forward.
+    private static func lastLogits(
+        of tokens: [Int], model: Inkling2, caches: [KVCache]
+    ) -> MLXArray {
+        let input = LMInput.Text(tokens: MLXArray(tokens.map(Int32.init))[.newAxis])
+        return model(input, cache: caches, state: nil).logits[0, -1].asType(.float32)
+    }
+
     @Test("an Inkling 2 checkpoint restores after the sliding window wraps")
     func anInklingCheckpointRestoresAfterTheSlidingWindowWraps() throws {
         let model = try Self.inklingTarget()
-        let caches = try model.newCache(parameters: nil)
-        let tokens = (0 ..< Self.checkpointTokenCount + Self.laterTokenCount).map {
-            $0 % Self.vocabularySize
-        }
-        let prefill = PrefillParameters(stepSize: Self.checkpointTokenCount)
-        _ = try PromptCacheCheckpoint.prefill(
-            Array(tokens.prefix(Self.checkpointTokenCount)), into: caches, state: nil,
-            model: model, prefill: prefill)
-        let checkpoint = try #require(
-            PromptCacheCheckpoint(
-                caches: caches, tokens: Array(tokens.prefix(Self.checkpointTokenCount)),
-                state: nil))
-        _ = try PromptCacheCheckpoint.prefill(
-            Array(tokens.dropFirst(Self.checkpointTokenCount)), into: caches, state: nil,
-            model: model, prefill: prefill)
 
-        let restored = checkpoint.restored(onto: caches)
+        let restored = try Self.restoredAfterWrap(model)
 
         #expect(
             restored?.map(\.offset)
-                == Array(repeating: Self.checkpointTokenCount, count: caches.count))
+                == Array(repeating: Self.checkpointTokenCount, count: restored?.count ?? 0))
+    }
+
+    @Test("an Inkling 2 cache restored after the window wraps continues as a cold prefill does")
+    func anInklingRestoreContinuesAsAColdPrefill() throws {
+        let model = try Self.inklingTarget()
+        let restored = try #require(try Self.restoredAfterWrap(model))
+        let later = Array(Self.restoreTokens.dropFirst(Self.checkpointTokenCount))
+
+        let warm = Self.lastLogits(of: later, model: model, caches: restored)
+        let cold = Self.lastLogits(
+            of: Self.restoreTokens, model: model, caches: try model.newCache(parameters: nil))
+
+        #expect(allClose(warm, cold, atol: Double(Self.restoreTolerance)).item(Bool.self))
     }
 }

@@ -13,6 +13,8 @@ public struct InProcessWorkerFault: Error, Equatable, CustomStringConvertible {
     public var description: String { "the in-process worker is down" }
 }
 
+// The directive sits above the documentation, which must stay next to the declaration.
+// swiftlint:disable no_unchecked_sendable every access to a stored var holds `lock`
 /// A worker that runs a real local model in this process, behind the ``RemoteModelTransport``
 /// a ``ClusterLanguageModel`` drives.
 ///
@@ -20,8 +22,8 @@ public struct InProcessWorkerFault: Error, Equatable, CustomStringConvertible {
 /// other ranks, so a value the words cannot carry fails the test. A ``RemoteModelExecutor``
 /// runs the decoded request, as a cluster worker runs it. The worker records every request it
 /// received.
-// swiftlint:disable:next no_unchecked_sendable every access to a stored var holds `lock`
 public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked Sendable {
+    // swiftlint:enable no_unchecked_sendable
 
     /// The executor that runs each op.
     private let executor: RemoteModelExecutor

@@ -128,7 +128,7 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
             throw ClusterModelError.unsupported(.mediaInput)
         }
         let text = input.text
-        guard text.tokens.ndim < 2 || text.tokens.dim(0) == 1 else {
+        guard Self.holdsOneSequence(text.tokens) else {
             throw ClusterModelError.unsupported(.batchedInput)
         }
         let remote = try remoteCache(of: cache)
@@ -195,8 +195,7 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     private func forward(
         _ tokens: MLXArray, cache: [KVCache]?, logits scope: RemoteLogitsScope
     ) -> LMOutput {
-        precondition(
-            tokens.ndim < 2 || tokens.dim(0) == 1, "A cluster model runs one sequence at a time")
+        precondition(Self.holdsOneSequence(tokens), "A cluster model runs one sequence at a time")
         let tokenIDs = Self.tokenIDs(of: tokens)
         do {
             let remote = try remoteCache(of: cache ?? [])
@@ -224,6 +223,14 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
             throw ClusterModelError.foreignCache
         }
         return remote
+    }
+
+    /// The rank of a batch of tokens, `[sequences, tokens]`. A lower rank holds one sequence.
+    private static let batchRank = 2
+
+    /// Whether `tokens` hold one sequence: a rank below ``batchRank``, or a batch of one.
+    private static func holdsOneSequence(_ tokens: MLXArray) -> Bool {
+        tokens.ndim < batchRank || tokens.dim(0) == 1
     }
 
     /// The token ids of `tokens`, one sequence of any rank.

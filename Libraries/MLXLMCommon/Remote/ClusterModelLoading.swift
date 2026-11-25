@@ -13,6 +13,9 @@ import Foundation
 ///
 /// A model factory must be linked, as for ``loadModel(from:using:progress:)``.
 ///
+/// The returned model owns `transport` and closes it in ``ClusterLanguageModel/close()``. When
+/// the function throws, no model owns it, and the caller closes it.
+///
 /// - Parameters:
 ///   - directory: The local checkpoint directory, the one the workers load.
 ///   - tokenizerLoader: The loader of the tokenizer.

@@ -53,7 +53,7 @@ struct Qwen35TensorParallelPlan: Equatable {
             of: configuration.intermediateSize, named: "intermediateSize", across: groupSize)
 
         let keyDim = configuration.linearNumKeyHeads * configuration.linearKeyHeadDim
-        gatedDeltaInputSegments = .indices([keyDim, 2 * keyDim])
+        gatedDeltaInputSegments = .indices([keyDim, Qwen35GatedDeltaNet.queryKeyParts * keyDim])
     }
 }
 

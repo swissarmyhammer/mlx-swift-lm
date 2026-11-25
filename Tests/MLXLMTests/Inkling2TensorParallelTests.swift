@@ -14,6 +14,27 @@ import Testing
 @testable import MLXLMCommon
 @testable import MLXVLM
 
+/// The text configurations and plans that the suites of this file shard.
+enum Inkling2ShardFixture {
+
+    /// The text stack of the Inkling 2 configuration `json`.
+    static func textConfiguration(_ json: String) throws -> Inkling2TextConfiguration {
+        try JSONDecoder().decode(Inkling2Configuration.self, from: Data(json.utf8))
+            .textConfiguration
+    }
+
+    /// The text stack of the tiny model of ``Inkling2ModelTests``.
+    static func tinyTextConfiguration() throws -> Inkling2TextConfiguration {
+        try textConfiguration(Inkling2ModelTests.tinyJSON)
+    }
+
+    /// The plan of the tiny model across `groupSize` processes.
+    static func tinyPlan(groupSize: Int) throws -> Inkling2TensorParallelPlan {
+        try Inkling2TensorParallelPlan(
+            configuration: tinyTextConfiguration(), groupSize: groupSize)
+    }
+}
+
 struct Inkling2TensorParallelPlanTests {
 
     /// The group size of the plans.
@@ -36,8 +57,7 @@ struct Inkling2TensorParallelPlanTests {
             .replacingOccurrences(
                 of: "\"swa_num_key_value_heads\": 8",
                 with: "\"swa_num_key_value_heads\": \(slidingKVHeads)")
-        return try JSONDecoder().decode(Inkling2Configuration.self, from: Data(json.utf8))
-            .textConfiguration
+        return try Inkling2ShardFixture.textConfiguration(json)
     }
 
     private static func makePlan(groupSize: Int = groupSize) throws -> Inkling2TensorParallelPlan {
@@ -163,13 +183,6 @@ struct Inkling2WholeShareTests {
     private static let wideExpertFormat = Inkling2ExpertFormat(
         mode: .affine, bits: 4, groupSize: 32, hasGlobalScale: false)
 
-    /// The text stack of the tiny model.
-    private static func makeConfiguration() throws -> Inkling2TextConfiguration {
-        try JSONDecoder().decode(
-            Inkling2Configuration.self, from: Data(Inkling2ModelTests.tinyJSON.utf8)
-        ).textConfiguration
-    }
-
     /// The decoder layers of a tiny model, with NVFP4 experts in groups of 16, and every
     /// attention projection whose inputs `groupSize` divides quantized to 8-bit affine.
     private static func makeLayers(attentionGroupSize groupSize: Int) throws
@@ -188,7 +201,7 @@ struct Inkling2WholeShareTests {
     }
 
     private static func makePlan() throws -> Inkling2TensorParallelPlan {
-        try Inkling2TensorParallelPlan(configuration: makeConfiguration(), groupSize: groupSize)
+        try Inkling2ShardFixture.tinyPlan(groupSize: groupSize)
     }
 
     @Test("8-bit affine attention beside nvfp4 experts splits across two processes")
@@ -220,7 +233,7 @@ struct Inkling2WholeShareTests {
         let layer = try #require(
             try Self.makeLayers(attentionGroupSize: Self.attentionGroupSize).first)
         let experts = Inkling2Experts(
-            try Self.makeConfiguration(), gateUp: Self.wideExpertFormat,
+            try Inkling2ShardFixture.tinyTextConfiguration(), gateUp: Self.wideExpertFormat,
             down: Self.wideExpertFormat)
         try layer.mlp.update(
             modules: ModuleChildren(values: ["experts": .value(experts)]), verify: [])
@@ -259,6 +272,26 @@ struct TensorParallelSplitTests {
     func unnamedParameterStaysWhole() {
         #expect(TensorParallel.split(of: "q_proj_extra.weight", in: Self.splits) == nil)
     }
+
+    /// The depth of the nested keys of ``nestedSplits``, so an arbitrary pick of a matching key
+    /// finds the deepest one rarely.
+    private static let nestingDepth = 8
+
+    /// Keys `a`, `a.b`, `a.b.b`, ..., each splitting on the axis of its depth.
+    private static let nestedSplits = Dictionary(
+        uniqueKeysWithValues: (0 ..< nestingDepth).map { depth in
+            (
+                (["a"] + Array(repeating: "b", count: depth)).joined(separator: "."),
+                TensorParallel.Split(axis: depth, segments: .count(1))
+            )
+        })
+
+    @Test("of keys that nest, the deepest that names the parameter decides its split")
+    func deepestNestedKeyDecides() {
+        let path = (["a"] + Array(repeating: "b", count: Self.nestingDepth)).joined(separator: ".")
+        #expect(
+            TensorParallel.split(of: path, in: Self.nestedSplits)?.axis == Self.nestingDepth - 1)
+    }
 }
 
 struct Inkling2SingleProcessShardTests {
@@ -286,9 +319,7 @@ struct Inkling2SingleProcessShardTests {
                 heads: layer.attention.heads / groupSize,
                 kvHeads: layer.attention.kvHeads / groupSize)
         }
-        let text = try JSONDecoder().decode(
-            Inkling2Configuration.self, from: Data(Inkling2ModelTests.tinyJSON.utf8)
-        ).textConfiguration
+        let text = try Inkling2ShardFixture.tinyTextConfiguration()
 
         #expect(
             model.kvHeads
@@ -330,10 +361,7 @@ struct Inkling2ShareSumTests {
     }
 
     private static func makePlan() throws -> Inkling2TensorParallelPlan {
-        let configuration = try JSONDecoder().decode(
-            Inkling2Configuration.self, from: Data(Inkling2ModelTests.tinyJSON.utf8))
-        return try Inkling2TensorParallelPlan(
-            configuration: configuration.textConfiguration, groupSize: groupSize)
+        try Inkling2ShardFixture.tinyPlan(groupSize: groupSize)
     }
 
     /// Keeps part `rank` of each parameter of `module` that `splits` names.

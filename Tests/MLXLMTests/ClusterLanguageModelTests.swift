@@ -485,13 +485,16 @@ private enum AttentionOnlyTarget {
     /// The seed of the weights.
     private static let seed: UInt64 = 21
 
+    /// The decoder layers, every one full attention.
+    private static let layerCount = 2
+
     /// Makes the target.
     static func make() throws -> Qwen35TextModel {
         let configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
             from: Data(
                 Qwen35FixtureJSON.text(
-                    mtpLayers: 0, hiddenLayers: 2, fullAttentionInterval: 1,
+                    mtpLayers: 0, hiddenLayers: layerCount, fullAttentionInterval: 1,
                     hiddenSize: Qwen35MTPFixture.hiddenSize,
                     vocabularySize: Qwen35MTPFixture.vocabularySize, tieWordEmbeddings: false
                 ).utf8))

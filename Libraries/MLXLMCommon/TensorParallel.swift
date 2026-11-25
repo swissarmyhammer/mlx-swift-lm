@@ -88,6 +88,7 @@ public enum TensorParallelShardingError: Error, Equatable, CustomStringConvertib
     /// The model, of the named type, does not conform to ``TensorParallelShardable``.
     case notShardable(modelType: String)
 
+    /// The reason in words, naming the count, the feature or the model type.
     public var description: String {
         switch self {
         case .notShardable(let modelType):
@@ -403,13 +404,15 @@ public enum TensorParallel {
 
     /// The split of the parameter at `path`, or nil when it stays whole.
     ///
-    /// A key names a parameter, or a child module whose parameters all split.
+    /// A key names a parameter, or a child module whose parameters all split. When several
+    /// keys name the parameter, as `conv` and `conv.weight` do, the longest one decides.
     ///
     /// - Parameters:
     ///   - path: The path of the parameter in the owner, such as `q_proj.weight`.
     ///   - splits: The split of each key.
     public static func split(of path: String, in splits: [String: Split]) -> Split? {
-        splits.first { key, _ in path == key || path.hasPrefix("\(key).") }?.value
+        splits.filter { key, _ in path == key || path.hasPrefix("\(key).") }
+            .max { $0.key.count < $1.key.count }?.value
     }
 
     /// Splits the named parameters of `owner` across `group` on their own axes, in place.

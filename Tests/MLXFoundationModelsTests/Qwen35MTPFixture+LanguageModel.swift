@@ -64,7 +64,8 @@ extension Qwen35MTPFixture {
         tokenizer: (any Tokenizer)? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil
     ) throws -> (model: MLXLanguageModel, worker: InProcessRemoteModelWorker) {
         let worker = makeWorker()
-        var context = makeLanguageContext(eosTokenIds: [], tokenizer: tokenizer, toolCallFormat: nil)
+        var context = makeLanguageContext(
+            eosTokenIds: [], tokenizer: tokenizer, toolCallFormat: nil)
         context.model = try ClusterLanguageModel.connect(over: worker)
         let model = Self.makeLanguageModel(
             serving: context, weights: weights, capabilities: capabilities,

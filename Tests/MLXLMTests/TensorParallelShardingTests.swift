@@ -60,10 +60,23 @@ struct Qwen35TensorParallelPlanTests {
     private static let linearKeyHeadDim = 16
 
     /// A dense configuration with head counts a group of two divides.
-    private static func makeConfiguration() throws -> Qwen35TextConfiguration {
+    ///
+    /// - Parameters:
+    ///   - fullAttentionInterval: One layer of each interval is full attention.
+    ///   - hiddenSize: The width of the residual stream.
+    ///   - intermediateSize: The MLP width, or nil for the width of the fixture.
+    static func makeConfiguration(
+        fullAttentionInterval: Int = 1, hiddenSize: Int = Qwen35FixtureJSON.defaultHiddenSize,
+        intermediateSize: Int? = nil
+    ) throws -> Qwen35TextConfiguration {
         var configuration = try JSONDecoder().decode(
             Qwen35TextConfiguration.self,
-            from: Data(Qwen35FixtureJSON.text(mtpLayers: 0).utf8))
+            from: Data(
+                Qwen35FixtureJSON.text(
+                    mtpLayers: 0, fullAttentionInterval: fullAttentionInterval,
+                    hiddenSize: hiddenSize
+                ).utf8))
+        configuration.intermediateSize = intermediateSize ?? configuration.intermediateSize
         configuration.attentionHeads = attentionHeads
         configuration.kvHeads = kvHeads
         configuration.linearNumKeyHeads = linearKeyHeads
@@ -279,19 +292,9 @@ struct Qwen35WholeShareTests {
     private static func makeConfiguration(intermediateSize: Int, fullAttentionInterval: Int)
         throws -> Qwen35TextConfiguration
     {
-        var configuration = try JSONDecoder().decode(
-            Qwen35TextConfiguration.self,
-            from: Data(
-                Qwen35FixtureJSON.text(
-                    mtpLayers: 0, fullAttentionInterval: fullAttentionInterval,
-                    hiddenSize: hiddenSize
-                ).utf8))
-        configuration.attentionHeads = 8
-        configuration.kvHeads = 2
-        configuration.linearNumKeyHeads = 4
-        configuration.linearNumValueHeads = 8
-        configuration.intermediateSize = intermediateSize
-        return configuration
+        try Qwen35TensorParallelPlanTests.makeConfiguration(
+            fullAttentionInterval: fullAttentionInterval, hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize)
     }
 
     /// Layer 0 of `configuration`, with every projection quantized to mxfp4.

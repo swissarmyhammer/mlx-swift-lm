@@ -575,8 +575,7 @@ public func loadModelContainer(
 /// - Parameter loader: Loads the model with one factory.
 /// - Returns: The result of the first factory that does not throw.
 /// - Throws: The error of the last factory, or ``ModelFactoryError/noModelFactoryAvailable``.
-func load<R>(loader: (any ModelFactory) async throws -> sending R) async throws -> sending R
-{
+func load<R>(loader: (any ModelFactory) async throws -> sending R) async throws -> sending R {
     let factories = ModelFactoryRegistry.shared.modelFactories()
     var lastError: Error?
     for factory in factories {
