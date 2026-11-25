@@ -87,6 +87,117 @@ class GateTests(unittest.TestCase):
         self.assertTrue(compare.gate_passes(steps, MAX_KL))
 
 
+# A long run: the prefill plus 1024 decode steps, as in ^17p77c9.
+LONG_RUN = 1025
+# A short run at the largest length that keeps the strict gate.
+SHORT_RUN = 64
+# The steady KL of a healthy sharded run.
+QUIET_KL = 0.001
+# The isolated Inkling outlier of ^17p77c9: above 0.05, below the 0.2 maximum.
+OUTLIER_KL = 0.0764
+# The KL of the Qwen 3-ulp argmax flip of ^17p77c9: below the 0.02 mismatch floor.
+NOISE_FLIP_KL = 0.017
+# A KL above the 0.02 floor, so a mismatch at it is confident.
+CONFIDENT_KL = 0.03
+# A margin outside the tie rule at small logits.
+CLEAR_MARGIN = 1.0
+
+
+def run_of(length: int, changes: dict[int, compare.Step] | None = None) -> list[compare.Step]:
+    """A run of quiet agreeing steps, with the given steps replaced."""
+    quiet = compare.Step(
+        kl=QUIET_KL,
+        top_logprob_diff=0.0,
+        max_logit_diff=0.0,
+        margin=CLEAR_MARGIN,
+        verdict=compare.Verdict.AGREE,
+    )
+    steps = [quiet] * length
+    for index, step in (changes or {}).items():
+        steps[index] = step
+    return steps
+
+
+def step_with(kl: float, verdict: compare.Verdict = compare.Verdict.AGREE) -> compare.Step:
+    """One step at `kl` with the given argmax verdict."""
+    return compare.Step(
+        kl=kl, top_logprob_diff=0.0, max_logit_diff=0.0, margin=CLEAR_MARGIN, verdict=verdict
+    )
+
+
+def flips_at(count: int, kl: float) -> dict[int, compare.Step]:
+    """`count` argmax mismatches at `kl`, spread over a long run."""
+    return {index * 100 + 1: step_with(kl, compare.Verdict.MISMATCH) for index in range(count)}
+
+
+class LongRunGateTests(unittest.TestCase):
+    """Runs over 64 steps pass on statistics, so one isolated outlier does not fail them."""
+
+    def test_isolated_outlier_passes_a_long_run(self) -> None:
+        """One step of 1025 at KL 0.0764 is noise, not drift (the Inkling run of ^17p77c9)."""
+        steps = run_of(LONG_RUN, {500: step_with(OUTLIER_KL)})
+        self.assertTrue(compare.run_passes(steps, MAX_KL))
+
+    def test_isolated_outlier_fails_a_short_run(self) -> None:
+        """A short run keeps the strict per-step gate, so the same outlier fails it."""
+        steps = run_of(SHORT_RUN, {30: step_with(OUTLIER_KL)})
+        self.assertFalse(compare.run_passes(steps, MAX_KL))
+
+    def test_steady_rise_fails(self) -> None:
+        """KL that climbs to 0.02 over the run is drift: its mean exceeds 0.005."""
+        steps = [step_with(float(kl)) for kl in np.linspace(0.0, 0.02, LONG_RUN)]
+        self.assertFalse(compare.run_passes(steps, MAX_KL))
+
+    def test_one_step_above_the_maximum_fails(self) -> None:
+        """A single step above KL 0.2 is a defect however quiet the rest is."""
+        steps = run_of(LONG_RUN, {500: step_with(0.3)})
+        self.assertFalse(compare.run_passes(steps, MAX_KL))
+
+    def test_too_many_steps_above_the_outlier_limit_fail(self) -> None:
+        """Six steps above 0.05 in 1025 exceed the 0.5% allowance."""
+        steps = run_of(LONG_RUN, {index * 100: step_with(OUTLIER_KL) for index in range(6)})
+        self.assertFalse(compare.run_passes(steps, MAX_KL))
+
+    def test_confident_mismatch_fails(self) -> None:
+        """A mismatch clear of a tie, at KL above 0.02, is a defect even in a long run."""
+        steps = run_of(LONG_RUN, flips_at(1, CONFIDENT_KL))
+        self.assertFalse(compare.run_passes(steps, MAX_KL))
+
+    def test_noise_flip_passes(self) -> None:
+        """A mismatch at KL 0.017 is a noise flip (the Qwen 3-ulp flip of ^17p77c9)."""
+        steps = run_of(LONG_RUN, flips_at(1, NOISE_FLIP_KL))
+        self.assertTrue(compare.run_passes(steps, MAX_KL))
+
+    def test_low_kl_mismatch_is_a_noise_flip(self) -> None:
+        """The output labels the uncounted mismatch, so a reader sees why it did not fail."""
+        self.assertTrue(compare.is_noise_flip(step_with(NOISE_FLIP_KL, compare.Verdict.MISMATCH)))
+
+    def test_too_many_noise_flips_fail(self) -> None:
+        """Six noise flips in 1025 steps exceed the 0.5% allowance."""
+        steps = run_of(LONG_RUN, flips_at(6, NOISE_FLIP_KL))
+        self.assertFalse(compare.run_passes(steps, MAX_KL))
+
+
+class WindowTests(unittest.TestCase):
+    """Per-window statistics make drift visible across a long run."""
+
+    def test_windows_of_a_1025_step_run(self) -> None:
+        """The prefill and 1024 decode steps fall in the five windows the task names."""
+        windows = compare.window_stats(run_of(LONG_RUN))
+        bounds = [(window.first, window.last) for window in windows]
+        self.assertEqual(bounds, [(0, 32), (33, 128), (129, 256), (257, 512), (513, 1024)])
+
+    def test_window_reports_its_max(self) -> None:
+        """The outlier shows as the max of the window that holds it."""
+        windows = compare.window_stats(run_of(LONG_RUN, {200: step_with(OUTLIER_KL)}))
+        self.assertEqual(windows[2].max_kl, OUTLIER_KL)
+
+    def test_short_run_stops_at_its_last_step(self) -> None:
+        """A 40-step run ends inside the second window, which ends at its last step."""
+        windows = compare.window_stats(run_of(40))
+        self.assertEqual([(window.first, window.last) for window in windows], [(0, 32), (33, 39)])
+
+
 class ForcedInputTests(unittest.TestCase):
     """A teacher-forced run must have been fed the tokens of this reference."""
 
