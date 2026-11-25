@@ -17,7 +17,8 @@
 # Usage: scripts/shard-check.sh [--free-running | --announce] <model-directory> [max-kl]
 # Env: SHARD_CHECK_WORK (output directory), SHARD_CHECK_PORT (first ring port),
 #      SHARD_CHECK_TOKENS (comma-separated prompt ids; default: an English sentence
-#      pre-tokenized per model family), SHARD_CHECK_SKIP_BUILD=1.
+#      pre-tokenized per model family), SHARD_CHECK_DECODE_STEPS (decode steps after the
+#      prefill; default: ShardCheck's 8), SHARD_CHECK_SKIP_BUILD=1.
 
 set -euo pipefail
 
@@ -62,6 +63,9 @@ if [[ "$MODE" == announce ]]; then
 fi
 if [[ -n "${SHARD_CHECK_TOKENS:-}" ]]; then
     COMMON_ARGS+=(--tokens "$SHARD_CHECK_TOKENS")
+fi
+if [[ -n "${SHARD_CHECK_DECODE_STEPS:-}" ]]; then
+    COMMON_ARGS+=(--decode-steps "$SHARD_CHECK_DECODE_STEPS")
 fi
 SHARDED_ARGS=("${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"}")
 if [[ "$MODE" == teacher-forced ]]; then
