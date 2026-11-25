@@ -28,8 +28,8 @@ comments:
       - Real 2-Mac JACCL (m5u2 rdma_en6 ↔ m5u1 rdma_en5): 27B 33/33 tokens, max KL 0.025 (at step 31), every other step < 0.002. 14.3 ms/token with MLX_METAL_FAST_SYNCH=1, vs 18.7 on one Mac and 58 without FAST_SYNCH.
     - Open: Qwen35 MoE throws `.unsupported`. verify-docs, DocC/skill pages and a swift-format pass are still to do (covered by the review task).
   timestamp: 2026-11-24T22:59:43.757928+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: fffff380
 title: Tensor-parallel sharding for Qwen35 + 2-process ShardCheck harness
 ---
 Add a TensorParallelShardable protocol in MLXLMCommon (shard(group:) with typed divisibility errors). Conform Qwen35 (full attention fused q/gate, GatedDeltaNet segments + conv1d + per-head params, dense MLP, MoE if cheap), handling fused decode projections and compiled traces. Build a ShardCheck executable + scripts/shard-check.sh that runs 2 local ring processes and compares logits against the unsharded reference. Validate with Qwen3.5-2B-mxfp4 and Qwen3.8-27B-4bit.

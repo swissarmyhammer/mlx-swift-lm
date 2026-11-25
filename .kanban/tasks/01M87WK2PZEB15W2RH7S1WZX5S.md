@@ -23,6 +23,10 @@ comments:
   id: 01m884wpa9m6qqn01wwh46dtej
   text: 'Follow-up in the same commit: tools/ShardCheck''s `AnnouncingTransport` already had a `close() throws` (sends `end` so the other ranks leave the loop). With the new non-throwing `RemoteModelTransport.close()` requirement it no longer witnessed the requirement and only shadowed it, so `ClusterLanguageModel.close()` would silently hit the no-op default. Renamed it to `endRun()` (ShardCheck.swift calls it after the run), so the name no longer suggests it is the protocol teardown.'
   timestamp: 2026-11-25T01:24:59.849682+00:00
+- actor: claude-code
+  id: 01m885y6jnrpf8zxkk0e5ch9se
+  text: 'Regression found in the full MLXFoundationModelsTests run: MLXLanguageModelEvictionPoolTests (evict / evictAll leave no buffer in the pool) failed, because evict() held the removed container across releasePromptCaches, whose MLX.Memory.clearCache ran while the weights were still referenced. Fixed: teardown now runs first, on containers passed straight into `tearDown(_: [ModelContainer])` with no other reference, so they are freed before the prompt-cache release and pool clear. Folded into the task commit (now 6fc24c79). EvictionPool (2) and FoundationModelsCacheTests (31) pass.'
+  timestamp: 2026-11-25T01:43:17.845291+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Model cache key: discriminate clustered vs local loads'

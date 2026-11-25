@@ -43,8 +43,8 @@ comments:
     - evidence: 97f9ad18, 07a1d3ec; 4 files: scripts/shard_check_compare.py, scripts/test_shard_check_compare.py, tools/ShardCheck/ShardCheck.swift, scripts/shard-check.sh
     - next: /review
   timestamp: 2026-11-25T01:14:59.610348+00:00
-position_column: doing
-position_ordinal: '8280'
+position_column: done
+position_ordinal: fffff280
 title: 'ShardCheck: teacher-force reference tokens and tie-aware argmax gate'
 ---
 Qwen3.8-27B-mxfp4 "failed" the shard check on the default prompt because of a near-exact tie: top-2 logits of 6.59375 vs 6.5625 (one bf16 step apart, KL 0.0003). Sharding flipped the winner, and every later step then compared different contexts (KL 1.8). That isn't a sharding defect (zyx7p8z bisect). Make the check robust:
