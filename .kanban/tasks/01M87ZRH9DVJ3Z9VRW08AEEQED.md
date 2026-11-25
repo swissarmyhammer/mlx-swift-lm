@@ -32,8 +32,8 @@ comments:
   timestamp: 2026-11-25T00:30:47.862674+00:00
 depends_on:
 - 01M87WJZQS8TVVF0QD9RPAFC4Q
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fffff080
 title: Library worker-side executor for the remote model op set
 ---
 The FoundationModelsCluster worker needs exactly what the test-support `InProcessRemoteModelWorker` (Tests/MLXLMTestSupport) does: take a `RemoteModelRequest`, run it against a loaded (and sharded) model, and return a `RemoteModelReply`. Move that dispatch into the library as a public, networking-free executor (e.g. `RemoteModelExecutor` in MLXLMCommon/Remote), so the worker only adds transport, JACCL and the allSum announce.
