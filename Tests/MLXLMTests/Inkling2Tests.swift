@@ -581,6 +581,14 @@ struct Inkling2ModelTests {
         try Inkling2TinyModels.target(json: json, bfloat16: bfloat16)
     }
 
+    /// A cluster worker and a prompt checkpoint chunk the prompt by the default step size, so
+    /// it must be the step size `prepare` chunks by, or their logits differ from a local run.
+    @Test("The default prefill step size is the step size prepare chunks by")
+    func defaultPrefillStepSizeIsThePrepareStep() throws {
+        let model = try Self.makeModel()
+        #expect(model.defaultPrefillStepSize == Inkling2.prefillStepSize)
+    }
+
     @Test("Pinned keys keep their positions in the reference distances")
     func pinnedDistances() {
         let masks = Inkling2DecodeMasks()

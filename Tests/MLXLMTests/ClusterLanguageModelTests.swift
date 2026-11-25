@@ -81,6 +81,34 @@ struct ClusterLanguageModelTests {
         #expect(clustered.tokens == local.tokens)
     }
 
+    /// An input processor may give the prompt as `[1, tokens]` (Inkling's does). The tail
+    /// that `prepare` leaves must be the last tokens of the prompt, not an empty slice of
+    /// the batch axis.
+    @Test("a long prompt of shape [1, tokens] sends every prompt token and writes the local tokens")
+    func aLongBatchShapedPromptSendsEveryToken() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let prompt = (0 ..< 700).map { $0 % Qwen35MTPFixture.vocabularySize }
+        var parameters = Self.greedy
+        parameters.prefill = PrefillParameters(stepSize: 256)
+        let worker = fixture.makeWorker()
+
+        let local = try await Self.decode(
+            prompt, context: fixture.makeModelContext(), parameters: parameters)
+        let input = LMInput(tokens: MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count))
+        let clustered = try await Qwen35MTPFixture.collect(
+            try generateTokens(
+                input: input, cache: nil, parameters: parameters,
+                context: fixture.makeClusteredModelContext(worker: worker)))
+
+        let forwards = worker.requests.compactMap { request -> [Int]? in
+            guard case .forward(let tokens, _, _) = request.op else { return nil }
+            return tokens.map(Int.init)
+        }
+        #expect(forwards.allSatisfy { !$0.isEmpty })
+        #expect(Array(forwards.joined().prefix(prompt.count)) == prompt)
+        #expect(clustered.tokens == local.tokens)
+    }
+
     @Test("a chat session reuses its prompt cache as the local session does")
     func aChatSessionReusesItsPromptCacheAsTheLocalSessionDoes() async throws {
         let fixture = try Qwen35MTPFixture()

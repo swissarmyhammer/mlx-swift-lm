@@ -227,6 +227,11 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
     /// prefills 4-7% faster than 2048 on an M5 Ultra for about 1 GiB more peak memory.
     static let prefillStepSize = 4096
 
+    /// ``prepare(_:cache:state:prefill:)`` chunks the prompt by ``prefillStepSize``. A cluster
+    /// worker and a prompt checkpoint read this value, so they chunk the prompt the same way
+    /// and their logits match a local run.
+    public var defaultPrefillStepSize: Int { Self.prefillStepSize }
+
     /// The most tokens of a speculative verify pass whose convolution windows each layer visit
     /// keeps, thus the pass rewinds in place: the bonus token and up to 15 drafts.
     static let speculativeVerifyPositions = 16

@@ -151,7 +151,8 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
             }
         }
         if let failure { throw failure }
-        return .tokens(text[processed...])
+        // Slice the token axis: an input processor may give the prompt as `[1, tokens]`.
+        return .tokens(text[.ellipsis, processed...])
     }
 
     /// Runs `input` on the worker, and returns the logits of every position.
