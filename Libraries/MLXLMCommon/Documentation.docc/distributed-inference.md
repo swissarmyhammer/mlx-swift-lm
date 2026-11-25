@@ -1,0 +1,231 @@
+# Distributed inference
+
+Split a model across the processes of a distributed group, and drive it from an app that
+holds no weights.
+
+## Overview
+
+A model too large for one Mac runs on several. Each Mac runs one worker process, and the
+workers join one `MLXDistributed.Group` (ring over TCP, or JACCL over Thunderbolt RDMA). Each
+worker keeps its share of every sharded layer, and the layers sum their partial results across
+the group inside the forward pass, so every worker computes the same logits. This is tensor
+parallelism, the scheme of `model.shard(group)` in Python mlx-lm.
+
+The app process stays out of the group. It loads the configuration and the tokenizer of the
+checkpoint, and runs a ``ClusterLanguageModel`` that sends each forward pass and each cache op
+to the rank-0 worker. Sampling, logit processors, grammar, stop strings, tool and reasoning
+parsing and the prompt-cache policy stay in the app, so ``ModelContainer``, ``ChatSession``
+and the FoundationModels adapter run on a cluster model unchanged.
+
+This package holds no networking and starts no process. A cluster package supplies the
+transport from the app to rank 0, starts the workers, and runs the announce loop that
+``RemoteModelExecutor`` describes.
+
+## Shard a model
+
+A model that can split conforms to ``TensorParallelShardable``. Each process loads the same
+checkpoint and calls ``TensorParallelShardable/shard(group:)`` with the same group:
+
+```swift
+let group = try MLXDistributed.initialize(backend: .ring, strict: true)
+let context = try await loadModel(from: directory, using: tokenizerLoader)
+try (context.model as? TensorParallelShardable)?.shard(group: group)
+```
+
+Each process keeps whole attention heads, and a slice of each MLP or expert width. The
+projections that read the residual stream split their rows; the output and down projections
+split their inputs and become sharded-to-all layers, which sum across the group. The embedding,
+the LM head and the norms stay whole. A group of one process leaves the model unchanged.
+
+Every share is checked before any layer changes. A model that cannot split evenly throws
+``TensorParallelShardingError`` and stays as it was:
+
+- ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)`` when the group size
+  does not divide a count, such as the key and value heads, or when a process would keep part
+  of a quantization group.
+- ``TensorParallelShardingError/unsupported(feature:)`` for a part the sharding does not handle,
+  such as a mixture-of-experts layer of Qwen 3.5, or a projection that is not a stock `Linear`
+  or `QuantizedLinear` (a LoRA adapter, a rotated projection).
+- ``TensorParallelShardingError/notShardable(modelType:)`` when the loaded model does not
+  conform at all.
+
+A conformance builds on the helpers of ``TensorParallel``: ``TensorParallel/share(of:named:across:)``
+for each count, ``TensorParallel/SplitProjections`` to check every projection of a layer,
+``TensorParallel/makeShardedToAll(_:at:group:)`` for the projections whose inputs split, and
+``TensorParallel/shardAxes(of:_:group:)`` for the parameters that split in place.
+``TensorParallel/shardLayers(_:hooks:makeShards:shard:)`` runs the two phases: it builds the
+replacements of every layer first, then splits the layers one at a time.
+
+### Which families shard
+
+| `model_type` | Model | What splits |
+|---|---|---|
+| `qwen3_5`, `qwen3_5_text`, `qwen3_8`, `qwen3_8_text` | Qwen 3.5 and Qwen 3.8, dense | Full-attention and gated delta heads, the gated delta conv, the MLP width |
+| `inkling2`, `inkling2_loop` | Inkling 2 Small and Mini, text stack | Attention heads of the sliding and full layers, their short convolutions, the inner width of every expert |
+
+``RemoteModelExecutor/shardableModelFamilies`` lists the same types for a planner. The text
+stack loads through the LLM factory for Qwen 3.5, or through the VLM factory for a type only it
+knows, such as Inkling 2. The vision tower of Inkling 2 stays whole, and a cluster model takes
+no image input.
+
+These are refused:
+
+- `qwen3_5_moe` and `qwen3_8_moe`: the mixture-of-experts layers do not shard yet.
+- `prism_hadamard_qwen35`: its rotated projections are not stock projections.
+- Any other model type, which does not conform to ``TensorParallelShardable``.
+
+## Load a share layer by layer
+
+``TensorParallelShardable/shard(group:)`` splits a model that is already in memory, so each
+process first holds the whole model. ``loadShardedModelContext(from:using:group:willShardLayer:)``
+instead keeps the weights lazy (``WeightEvaluation/deferred``) and splits the model one layer at
+a time through ``TensorParallelShardable/shardLayers(group:hooks:)``: it evaluates the full
+weights of one layer, splits the layer, evaluates the shares and frees the full weights. A
+process thus never holds more than one layer's full weights beside its shares.
+
+```swift
+let context = try await loadShardedModelContext(
+    from: directory, using: tokenizerLoader, group: group)
+```
+
+``TensorParallelLayerHooks`` carry the calls around the split of each layer. The
+`willShardLayer` hook runs on each layer before its full weights evaluate. A process that lacks
+the weight files loads with ``WeightFileSelection/skipped``, and the hook replaces the layer's
+parameters with their all-sum across the group, rank 0 contributing the tensors it read and
+every other process zeros, as `mlx_lm.share` does.
+
+## Drive a cluster from the app
+
+``loadClusterModelContext(from:using:transport:)`` reads the checkpoint with no weights and puts
+a ``ClusterLanguageModel`` in the place of its model:
+
+```swift
+let context = try await loadClusterModelContext(
+    from: directory, using: tokenizerLoader, transport: transport)
+let container = ModelContainer(context: context)
+let session = ChatSession(container)
+```
+
+The transport conforms to ``RemoteModelTransport``: ``RemoteModelTransport/send(_:)`` carries
+one ``RemoteModelRequest`` to rank 0 and blocks until its ``RemoteModelReply`` arrives. The model
+owns the transport, and ``ClusterLanguageModel/close()`` tears the workers down. The
+FoundationModels adapter closes it when it evicts the model.
+
+The model refuses, with a ``ClusterModelError``, what a worker cannot run: image, video and
+audio input, MTP and draft-model speculative decoding, a KV-cache configuration or `maxKVSize`,
+a batch of several sequences, and a worker of another protocol version or `model_type`. A
+prompt cache file cannot hold its cache.
+
+A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cache:state:)`` does
+not throw. The model then cancels the task that runs it, which ends the generation, and keeps
+the failure: every later op fails, and the next throwing op reports it.
+
+### The cache
+
+``ClusterLanguageModel/newCache(parameters:)`` makes one ``RemoteKVCache``, which names the
+caches of every layer on the worker by a ``RemoteCacheID`` the app allocates. Each op that
+changes a cache answers with a ``RemoteCacheStatus``, which the remote cache mirrors, so a read
+of its offset or of how far it can rewind costs no round trip. The prompt cache trims and copies
+it as it does a local cache, and the cache releases its handle on the worker when it goes away.
+
+## The remote op protocol
+
+``RemoteModelProtocol`` names the op set and its rules. Each ``RemoteModelOp`` travels in a
+``RemoteModelRequest``, whose sequence number grows by one for each request:
+
+| Op | What the worker does |
+|---|---|
+| ``RemoteModelOp/describe`` | Reports its ``RemoteModelCapabilities``. |
+| ``RemoteModelOp/begin``, ``RemoteModelOp/end`` | Opens and closes a generation request. |
+| ``RemoteModelOp/newCache(_:)`` | Makes an empty cache under a handle the app chose. |
+| ``RemoteModelOp/forward(tokens:cache:logits:)`` | Runs at most ``RemoteModelProtocol/maximumChunkTokenCount`` tokens into a cache, and returns the logits of a ``RemoteLogitsScope``. |
+| ``RemoteModelOp/trim(_:count:)`` | Drops the newest positions of a cache. |
+| ``RemoteModelOp/copy(_:into:)`` | Copies a cache under a second handle. |
+| ``RemoteModelOp/reset(_:)``, ``RemoteModelOp/release(_:)`` | Empties a cache, or frees it. |
+
+No op carries a path, a command or other text the worker would run. The logits come back as
+``RemoteLogits``, the bytes of the array in the element type the model computed, so the app
+samples the values a local model would give it.
+
+Rank 0 announces each request to every rank as ``RemoteOpAnnouncement`` words: a fixed-size
+`Int32` buffer that ``RemoteOpAnnouncement/exchange(_:group:)`` sums across the group, rank 0
+writing the op and every other rank zeros. Between turns rank 0 announces a park
+(``RemoteOpAnnouncement/park(requestID:)``), which lets the other ranks leave the all-sum loop
+and wait without polling.
+
+## Run the worker side
+
+``RemoteModelExecutor`` runs each request on a loaded model. Each rank holds its own executor
+over its own shard. Rank 0 announces each request, then calls ``RemoteModelExecutor/handle(_:)``
+and sends the reply to the app; every other rank calls
+``RemoteModelExecutor/apply(announcement:)`` with the words of the same exchange and drops the
+reply:
+
+```swift
+let executor = RemoteModelExecutor(
+    model: context.model,
+    configuration: try .init(modelDirectory: directory, rankCount: try group.size))
+
+if try group.rank == 0 {
+    // For each request from the app:
+    _ = try RemoteOpAnnouncement.exchange(RemoteOpAnnouncement.encode(request), group: group)
+    let reply = try executor.handle(request)
+} else {
+    while true {
+        let words = try RemoteOpAnnouncement.exchange(nil, group: group)
+        _ = try executor.apply(announcement: words)
+        if RemoteOpAnnouncement.stopsLoop(words) { break }
+    }
+}
+```
+
+Every rank must apply the same ops in the same order: a forward that runs on one rank and not on
+another blocks both in the all-sum of a sharded layer. The executor checks the sequence and the
+request of each op, and answers one that breaks a rule with ``RemoteModelReply/failed(_:)``
+without changing anything. It is not thread-safe: call it from one thread, one request at a
+time.
+
+## Check a shard
+
+`scripts/shard-check.sh <model-directory>` runs the `ShardCheck` tool unsharded as the
+reference, then as two ring processes on one Mac, and compares the logits of each step by KL
+divergence and argmax. It also checks that the layer-by-layer load of rank 0 peaks at most 75%
+of the unsharded load. `--announce` instead generates through a ``ClusterLanguageModel`` whose
+transport announces each op to the other rank, and compares the tokens with a local generation.
+
+## Topics
+
+### Sharding
+
+- ``TensorParallelShardable``
+- ``TensorParallelLayerHooks``
+- ``TensorParallelShardingError``
+- ``TensorParallel``
+- ``loadShardedModelContext(from:using:group:willShardLayer:)``
+- ``WeightEvaluation``
+
+### The app side
+
+- ``ClusterLanguageModel``
+- ``loadClusterModelContext(from:using:transport:)``
+- ``RemoteModelTransport``
+- ``RemoteKVCache``
+- ``ClusterModelError``
+- ``ClusterModelFeature``
+
+### The protocol
+
+- ``RemoteModelProtocol``
+- ``RemoteModelRequest``
+- ``RemoteModelOp``
+- ``RemoteModelReply``
+- ``RemoteModelCapabilities``
+- ``RemoteWorkerCapabilities``
+- ``RemoteCacheStatus``
+- ``RemoteLogits``
+- ``RemoteOpAnnouncement``
+
+### The worker side
+
+- ``RemoteModelExecutor``
+- ``RemoteModelExecutorError``

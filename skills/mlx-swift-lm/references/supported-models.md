@@ -312,6 +312,19 @@ await LLMTypeRegistry.shared.registerModelType("custom_model") { configData in
 // "qwen2_vl", "paligemma", "gemma3", "smolvlm", ...
 ```
 
+## Distributed (Tensor Parallel) Support
+
+These types shard across the processes of a distributed group (`TensorParallelShardable`),
+and run on the workers of a `ClusterLanguageModel`:
+
+| `model_type` | Factory | Notes |
+|---|---|---|
+| `qwen3_5`, `qwen3_5_text`, `qwen3_8`, `qwen3_8_text` | LLM | Dense only |
+| `inkling2`, `inkling2_loop` | VLM | Text stack; the vision tower stays whole, a cluster model takes no image |
+
+`qwen3_5_moe`, `qwen3_8_moe` and `prism_hadamard_qwen35` are refused, as is every other type.
+See [distributed-inference.md](distributed-inference.md).
+
 ## Memory Requirements
 
 Approximate VRAM/RAM usage for quantized models:
@@ -330,3 +343,4 @@ Approximate VRAM/RAM usage for quantized models:
 - Check source files for latest supported types
 - MLX community models are pre-quantized and optimized
 - Local models must have proper config.json and weights
+- Only the types in "Distributed (Tensor Parallel) Support" shard across several Macs

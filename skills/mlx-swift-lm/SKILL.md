@@ -14,6 +14,9 @@ triggers:
   - wired memory ticket
   - model porting
   - add model support
+  - tensor parallel
+  - distributed inference
+  - cluster
 ---
 
 # mlx-swift-lm Skill
@@ -30,6 +33,7 @@ mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vis
 - LoRA adapter training and fine-tuning
 - Text embeddings for RAG/semantic search
 - Porting model architectures from Python MLX-LM to Swift
+- Sharding a model across several Macs (tensor parallel) and driving it from an app
 
 ### Architecture Overview
 ```
@@ -57,6 +61,8 @@ MLXEmbedders    - Embedding models and pooling utilities
 | VLM factory & registry | `Libraries/MLXVLM/VLMModelFactory.swift` |
 | LoRA configuration | `Libraries/MLXLMCommon/Adapters/LoRA/LoRAContainer.swift` |
 | LoRA training | `Libraries/MLXLLM/LoraTrain.swift` |
+| Tensor parallel sharding | `Libraries/MLXLMCommon/TensorParallel.swift`, `TensorParallelLoading.swift` |
+| Cluster model, remote op protocol, worker executor | `Libraries/MLXLMCommon/Remote/` |
 
 ## 3. Quick Start
 
@@ -423,6 +429,7 @@ await session.clear()
 | [references/training.md](references/training.md) | LoRATrain API, fine-tuning |
 | [references/embeddings.md](references/embeddings.md) | EmbeddingModel, pooling, use cases |
 | [references/model-porting.md](references/model-porting.md) | Porting models from Python MLX-LM to Swift |
+| [references/distributed-inference.md](references/distributed-inference.md) | Tensor parallel sharding, `ClusterLanguageModel`, the remote op protocol, `RemoteModelExecutor` |
 
 ## 8. Deprecated Patterns Summary
 
