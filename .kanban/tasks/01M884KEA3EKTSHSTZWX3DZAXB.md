@@ -13,6 +13,13 @@ comments:
     - evidence: 2 files — scripts/shard_check_compare.py, scripts/test_shard_check_compare.py; 23/23 self-tests OK
     - next: commit, then review
   timestamp: 2026-11-25T01:54:47.611711+00:00
+- actor: claude-code
+  id: 01m887qmswqxd8ysmds5ymbnq5
+  text: |-
+    ### commit — changed
+    - evidence: ad8ac35d feat(shard-check): statistical gate for runs over 64 steps (not pushed). Later commit f525bcc9 (^ffn1stg) adds a load-peak gate to the same script; the long-run gate is unchanged.
+    - next: review
+  timestamp: 2026-11-25T02:14:40.188303+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'ShardCheck comparator: statistical gate for long runs'

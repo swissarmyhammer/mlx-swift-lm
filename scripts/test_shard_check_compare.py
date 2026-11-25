@@ -172,6 +172,11 @@ class LongRunGateTests(unittest.TestCase):
         """The output labels the uncounted mismatch, so a reader sees why it did not fail."""
         self.assertTrue(compare.is_noise_flip(step_with(NOISE_FLIP_KL, compare.Verdict.MISMATCH)))
 
+    def test_ties_do_not_count_as_noise_flips(self) -> None:
+        """Ties stay skipped in a long run: six in 1025 steps still pass (^17p77c9 had five)."""
+        ties = {index * 100: step_with(NOISE_FLIP_KL, compare.Verdict.TIE) for index in range(6)}
+        self.assertTrue(compare.run_passes(run_of(LONG_RUN, ties), MAX_KL))
+
     def test_too_many_noise_flips_fail(self) -> None:
         """Six noise flips in 1025 steps exceed the 0.5% allowance."""
         steps = run_of(LONG_RUN, flips_at(6, NOISE_FLIP_KL))

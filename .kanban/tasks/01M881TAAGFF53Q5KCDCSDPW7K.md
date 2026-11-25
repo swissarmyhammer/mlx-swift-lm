@@ -17,8 +17,8 @@ comments:
     - evidence: 11 files — Libraries/MLXLMCommon/{BaseConfiguration.swift, Remote/RemoteModelProtocol.swift, Remote/RemoteOpAnnouncement.swift, Remote/RemoteModelExecutor.swift, Remote/RemoteModelTransport.swift, Remote/ClusterModelLoading.swift}, tools/ShardCheck/AnnounceLoop.swift, Tests/MLXLMTests/{RemoteModelExecutorTests,RemoteModelProtocolTests,ClusterLanguageModelTests}.swift, Tests/MLXLMTestSupport/InProcessRemoteModelWorker.swift
     - next: review
   timestamp: 2026-11-25T01:29:17.836747+00:00
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fffff680
 title: 'Executor follow-ups: park request-id check, loaded model_type in describe'
 ---
 Small follow-ups from 8aeeqed (RemoteModelExecutor, 38ff740d).

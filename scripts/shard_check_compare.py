@@ -18,8 +18,8 @@ That strict gate holds for runs of at most 64 steps. A longer run passes on stat
 isolated outlier among a thousand quiet steps does not fail it, while drift still does: mean KL
 at most 0.005, p99 KL at most 0.05, max KL at most 0.2, and at most 0.5% of steps above 0.05.
 In a long run an argmax mismatch fails only when it is clear of the tie rule and the step's KL
-exceeds 0.02. Every other argmax disagreement, a tie included, is a noise flip, and at most
-0.5% of steps may be noise flips. Per-window max and mean KL are printed so drift is visible.
+exceeds 0.02. Ties are skipped as in a short run. Every other argmax disagreement is a noise
+flip, and at most 0.5% of steps may be noise flips. Per-window max and mean KL are printed so drift is visible.
 
 The load of the sharded run must also peak at most 75% of the reference's load peak: each rank
 loads its share layer by layer, so it never holds the whole model.
@@ -153,7 +153,7 @@ def counts_as_mismatch(step: Step) -> bool:
 
 def is_noise_flip(step: Step) -> bool:
     """Whether the argmax disagrees at this step without counting as a long-run mismatch."""
-    return step.verdict is not Verdict.AGREE and not counts_as_mismatch(step)
+    return step.verdict is Verdict.MISMATCH and not counts_as_mismatch(step)
 
 
 def long_gate_failures(steps: list[Step]) -> list[str]:

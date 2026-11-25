@@ -31,6 +31,13 @@ comments:
     - evidence: Libraries/MLXLMCommon/{TensorParallel,TensorParallelLoading(new),Load,Downloader,ModelConversion,WeightResidency}.swift, Documentation.docc/porting.md, Libraries/MLXLLM/{LLMModelFactory,Models/Qwen35}.swift, Libraries/MLXVLM/{VLMModelFactory,Models/Inkling2}.swift, tools/ShardCheck/ShardCheck.swift, scripts/{shard-check.sh,shard_check_compare.py,test_shard_check_compare.py}, Tests/MLXLMTests/{LoadWeightsTests,TensorParallelLayerShardingTests(new)}.swift
     - next: review
   timestamp: 2026-11-25T02:14:28.982366+00:00
+- actor: claude-code
+  id: 01m887qnjd9zf4seawccr7aee7
+  text: |-
+    ### commit — changed
+    - evidence: f525bcc9 feat(cluster): load a sharded model layer by layer (not pushed)
+    - next: review
+  timestamp: 2026-11-25T02:14:40.973388+00:00
 depends_on:
 - 01M87HW2SS24TQTQ9HFE8SMZKZ
 position_column: doing

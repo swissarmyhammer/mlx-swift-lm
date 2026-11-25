@@ -27,8 +27,8 @@ comments:
   id: 01m885y6jnrpf8zxkk0e5ch9se
   text: 'Regression found in the full MLXFoundationModelsTests run: MLXLanguageModelEvictionPoolTests (evict / evictAll leave no buffer in the pool) failed, because evict() held the removed container across releasePromptCaches, whose MLX.Memory.clearCache ran while the weights were still referenced. Fixed: teardown now runs first, on containers passed straight into `tearDown(_: [ModelContainer])` with no other reference, so they are freed before the prompt-cache release and pool clear. Folded into the task commit (now 6fc24c79). EvictionPool (2) and FoundationModelsCacheTests (31) pass.'
   timestamp: 2026-11-25T01:43:17.845291+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: fffff580
 title: 'Model cache key: discriminate clustered vs local loads'
 ---
 The MLX model cache keys only on model identity, so a clustered load and a local load of the same model ID could collide. Add a load-identity discriminator to the cache key (e.g. `.local` vs `.clustered(planID)`), so they never share an entry. `evict()` must reach the clustered container, whose teardown kills its workers (via a teardown hook the transport provides).

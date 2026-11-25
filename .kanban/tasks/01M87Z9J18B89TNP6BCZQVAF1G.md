@@ -17,8 +17,8 @@ comments:
     - evidence: 2 files — Libraries/MLXLMCommon/PromptCacheCheckpoint.swift, Tests/MLXLMTests/PromptCacheCheckpointCompositeTests.swift (new)
     - next: review
   timestamp: 2026-11-25T01:51:58.336804+00:00
-position_column: doing
-position_ordinal: '8280'
+position_column: done
+position_ordinal: fffff780
 title: PromptCacheCheckpoint.canLoseRewind does not look inside CacheList
 ---
 Found while auditing cache access for ^rpafc4q.
