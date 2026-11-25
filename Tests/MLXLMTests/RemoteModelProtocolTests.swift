@@ -168,7 +168,8 @@ struct RemoteModelProtocolTests {
                 protocolVersion: RemoteModelProtocol.version, modelFamilies: ["qwen3_5"],
                 supportsSharding: true, rankCount: 2, vocabularySize: 64,
                 defaultPrefillStepSize: 512, maximumPrefillStepSize: 1024,
-                modelType: "qwen3_5", quantization: .init(groupSize: 64, bits: 4)))
+                preparesEveryPrompt: true, modelType: "qwen3_5",
+                quantization: .init(groupSize: 64, bits: 4)))
 
         let data = try JSONEncoder().encode(reply)
 

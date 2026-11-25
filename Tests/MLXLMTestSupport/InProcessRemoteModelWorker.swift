@@ -115,6 +115,7 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
                 rankCount: capabilities.rankCount, vocabularySize: capabilities.vocabularySize,
                 defaultPrefillStepSize: capabilities.defaultPrefillStepSize,
                 maximumPrefillStepSize: capabilities.maximumPrefillStepSize,
+                preparesEveryPrompt: capabilities.preparesEveryPrompt,
                 modelType: capabilities.modelType, quantization: capabilities.quantization))
     }
 }

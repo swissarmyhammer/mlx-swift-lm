@@ -473,6 +473,17 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// The default is nil.
     var maximumPrefillStepSize: Int? { get }
 
+    /// Whether ``prepare(_:cache:state:prefill:)`` prefills every prompt itself, all but
+    /// its last token, even a prompt that fits in one step.
+    ///
+    /// When false, `prepare` hands a prompt no longer than one step whole to the iterator, as
+    /// the generic chunked prefill does. A model whose forward passes run elsewhere, such as
+    /// a ``ClusterLanguageModel``, splits the prompt the same way, so its logits match a local
+    /// run bit for bit.
+    ///
+    /// The default is false.
+    var preparesEveryPrompt: Bool { get }
+
     /// Primary entry point to produce a step (single token) from the model
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
@@ -590,6 +601,9 @@ extension LanguageModel {
 
     /// Most language models cap no prefill step.
     public var maximumPrefillStepSize: Int? { nil }
+
+    /// Most language models hand a prompt that fits in one step whole to the iterator.
+    public var preparesEveryPrompt: Bool { false }
 
     public var capabilities: LMModelCapabilities {
         var capabilities: LMModelCapabilities = []

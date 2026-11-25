@@ -88,6 +88,7 @@ public final class RemoteModelExecutor {
             rankCount: configuration.rankCount, vocabularySize: configuration.vocabularySize,
             defaultPrefillStepSize: model.defaultPrefillStepSize,
             maximumPrefillStepSize: model.maximumPrefillStepSize,
+            preparesEveryPrompt: model.preparesEveryPrompt,
             modelType: configuration.modelType, quantization: configuration.quantization)
     }
 

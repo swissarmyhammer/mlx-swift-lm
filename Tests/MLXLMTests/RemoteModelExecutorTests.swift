@@ -156,6 +156,7 @@ struct RemoteModelExecutorTests {
                         vocabularySize: Qwen35MTPFixture.vocabularySize,
                         defaultPrefillStepSize: target.defaultPrefillStepSize,
                         maximumPrefillStepSize: target.maximumPrefillStepSize,
+                        preparesEveryPrompt: false,
                         modelType: Self.modelType, quantization: Self.quantization)))
     }
 

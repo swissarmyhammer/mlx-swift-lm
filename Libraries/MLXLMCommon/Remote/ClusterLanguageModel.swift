@@ -109,8 +109,11 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     /// Begins a request on the worker, prefills all but the tail of the prompt in chunks, and
     /// leaves the tail to the caller, as a local model does.
     ///
-    /// A prompt no longer than one step goes to the caller whole, so its one forward matches
-    /// the forward of a local model.
+    /// The prompt splits as the worker's model splits it locally, so every forward matches a
+    /// forward of a local model. A prompt no longer than one step goes to the caller whole,
+    /// unless the model prepares every prompt
+    /// (``RemoteModelCapabilities/preparesEveryPrompt``): then all but its last token runs
+    /// here, as Inkling 2 runs it.
     ///
     /// - Parameters:
     ///   - input: The prompt, text only.
@@ -135,12 +138,15 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
         try session.beginRequest()
         let stepSize = prefill.resolvedStepSize(
             defaultStepSize: defaultPrefillStepSize, maximumStepSize: maximumPrefillStepSize)
-        guard text.tokens.size > stepSize else { return .tokens(text) }
+        // Split the prompt as the worker's model splits it locally, so the logits match.
+        let preparesEveryPrompt = workerCapabilities.preparesEveryPrompt
+        guard preparesEveryPrompt || text.tokens.size > stepSize else { return .tokens(text) }
 
         let tokens = Self.tokenIDs(of: text.tokens)
         var failure: (any Error)?
         let processed = try prefill.forEachChunk(
-            total: tokens.count, reserving: prefill.chunking == .remainder ? stepSize : 1,
+            total: tokens.count,
+            reserving: prefill.chunking == .remainder && !preparesEveryPrompt ? stepSize : 1,
             defaultStepSize: defaultPrefillStepSize, maximumStepSize: maximumPrefillStepSize
         ) { range in
             guard failure == nil else { return }

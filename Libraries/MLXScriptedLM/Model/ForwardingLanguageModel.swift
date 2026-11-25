@@ -117,6 +117,9 @@ open class ForwardingLanguageModel: Module, LanguageModel, LoRAModel, Suppressed
     /// The largest prefill step of the wrapped model.
     open var maximumPrefillStepSize: Int? { wrapped.maximumPrefillStepSize }
 
+    /// Whether the wrapped model prefills every prompt itself.
+    open var preparesEveryPrompt: Bool { wrapped.preparesEveryPrompt }
+
     open func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
     {
