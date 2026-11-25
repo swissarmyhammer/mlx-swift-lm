@@ -1,25 +1,38 @@
 #!/bin/bash
-# Checks tensor-parallel sharding on one Mac: runs ShardCheck as two ring processes on
-# localhost, then unsharded, and compares the greedy tokens and logits.
+# Checks tensor-parallel sharding on one Mac: runs ShardCheck unsharded as the reference,
+# then as two ring processes on localhost, and compares the logits of each step.
+#
+# By default the sharded run is teacher-forced: it feeds the reference's greedy tokens as its
+# next inputs, so both runs see the same contexts and one flipped near tie cannot cascade.
+# With --free-running, the sharded run feeds its own argmax, and its tokens must equal those
+# of the reference.
 #
 # With --announce, rank 0 generates through a ClusterLanguageModel that announces each op to
 # rank 1 with an all-sum, as a cluster worker does, and the tokens must equal those of a local
 # generation.
 #
-# Usage: scripts/shard-check.sh [--announce] <model-directory> [max-kl]
+# Usage: scripts/shard-check.sh [--free-running | --announce] <model-directory> [max-kl]
 # Env: SHARD_CHECK_WORK (output directory), SHARD_CHECK_PORT (first ring port),
-#      SHARD_CHECK_TOKENS (comma-separated prompt ids), SHARD_CHECK_SKIP_BUILD=1.
+#      SHARD_CHECK_TOKENS (comma-separated prompt ids; default: an English sentence
+#      pre-tokenized per model family), SHARD_CHECK_SKIP_BUILD=1.
 
 set -euo pipefail
 
-MODE_ARGS=()
-if [[ "${1:-}" == "--announce" ]]; then
-    MODE_ARGS=(--announce)
+USAGE="usage: $0 [--free-running | --announce] <model-directory> [max-kl]"
+MODE=teacher-forced
+case "${1:-}" in
+--free-running)
+    MODE=free-running
     shift
-fi
+    ;;
+--announce)
+    MODE=announce
+    shift
+    ;;
+esac
 
 if [[ $# -lt 1 ]]; then
-    echo "usage: $0 [--announce] <model-directory> [max-kl]" >&2
+    echo "$USAGE" >&2
     exit 2
 fi
 
@@ -40,22 +53,32 @@ if [[ "${SHARD_CHECK_SKIP_BUILD:-0}" != "1" ]]; then
         -derivedDataPath "$DERIVED" -quiet
 fi
 
-TOKEN_ARGS=("${MODE_ARGS[@]+"${MODE_ARGS[@]}"}")
+COMMON_ARGS=()
+if [[ "$MODE" == announce ]]; then
+    COMMON_ARGS+=(--announce)
+fi
 if [[ -n "${SHARD_CHECK_TOKENS:-}" ]]; then
-    TOKEN_ARGS+=(--tokens "$SHARD_CHECK_TOKENS")
+    COMMON_ARGS+=(--tokens "$SHARD_CHECK_TOKENS")
+fi
+SHARDED_ARGS=("${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"}")
+if [[ "$MODE" == teacher-forced ]]; then
+    SHARDED_ARGS+=(--teacher-forcing "$WORK/reference.json")
 fi
 
 cat > "$WORK/hostfile.json" <<EOF
 [["127.0.0.1:$PORT"], ["127.0.0.1:$((PORT + 1))"]]
 EOF
 
-echo "== sharded: 2 ring processes on localhost"
+echo "== unsharded reference"
+"$BINARY" "$MODEL" "$WORK/reference.npy" "${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"}"
+
+echo "== sharded ($MODE): 2 ring processes on localhost"
 MLX_RANK=0 MLX_HOSTFILE="$WORK/hostfile.json" \
-    "$BINARY" "$MODEL" "$WORK/sharded.npy" "${TOKEN_ARGS[@]+"${TOKEN_ARGS[@]}"}" \
+    "$BINARY" "$MODEL" "$WORK/sharded.npy" "${SHARDED_ARGS[@]+"${SHARDED_ARGS[@]}"}" \
     > "$WORK/rank0.log" 2>&1 &
 RANK0=$!
 MLX_RANK=1 MLX_HOSTFILE="$WORK/hostfile.json" \
-    "$BINARY" "$MODEL" "$WORK/rank1.npy" "${TOKEN_ARGS[@]+"${TOKEN_ARGS[@]}"}" \
+    "$BINARY" "$MODEL" "$WORK/rank1.npy" "${SHARDED_ARGS[@]+"${SHARDED_ARGS[@]}"}" \
     > "$WORK/rank1.log" 2>&1 &
 RANK1=$!
 
@@ -63,7 +86,7 @@ STATUS=0
 wait "$RANK0" || STATUS=$?
 wait "$RANK1" || STATUS=$?
 cat "$WORK/rank0.log"
-if [[ ${#MODE_ARGS[@]} -gt 0 ]]; then
+if [[ "$MODE" == announce ]]; then
     cat "$WORK/rank1.log"
 fi
 if [[ $STATUS -ne 0 ]]; then
@@ -72,11 +95,8 @@ if [[ $STATUS -ne 0 ]]; then
     exit "$STATUS"
 fi
 
-echo "== unsharded reference"
-"$BINARY" "$MODEL" "$WORK/reference.npy" "${TOKEN_ARGS[@]+"${TOKEN_ARGS[@]}"}"
-
 echo "== compare"
-if [[ ${#MODE_ARGS[@]} -gt 0 ]]; then
+if [[ "$MODE" == announce ]]; then
     python3 -I "$ROOT/scripts/shard_check_compare.py" --tokens-only \
         "$WORK/reference.json" "$WORK/sharded.json"
 else
