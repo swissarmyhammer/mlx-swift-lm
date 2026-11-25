@@ -157,6 +157,31 @@ public struct RemoteModelRequest: Codable, Sendable, Hashable {
     }
 }
 
+/// What a worker can run before it loads a model, which a planner reads to place a model.
+public struct RemoteWorkerCapabilities: Codable, Sendable, Hashable {
+
+    /// The ``RemoteModelProtocol/version`` the worker speaks.
+    public let protocolVersion: Int32
+
+    /// The `model_type` values of the model families the worker can load and shard.
+    public let modelFamilies: [String]
+
+    /// Whether the worker can shard a model over several ranks.
+    public let supportsSharding: Bool
+
+    /// Makes the capabilities of a worker.
+    ///
+    /// - Parameters:
+    ///   - protocolVersion: The protocol version the worker speaks.
+    ///   - modelFamilies: The `model_type` values the worker can load and shard.
+    ///   - supportsSharding: Whether the worker can shard a model.
+    public init(protocolVersion: Int32, modelFamilies: [String], supportsSharding: Bool) {
+        self.protocolVersion = protocolVersion
+        self.modelFamilies = modelFamilies
+        self.supportsSharding = supportsSharding
+    }
+}
+
 /// What a worker can run.
 public struct RemoteModelCapabilities: Codable, Sendable, Hashable {
 
@@ -248,6 +273,9 @@ public enum RemoteModelProtocolError: Error, Hashable, LocalizedError {
     /// Logits whose bytes do not fill their shape.
     case logitsByteCount(expected: Int, found: Int)
 
+    /// A park announce, which carries no request.
+    case parkHasNoRequest
+
     /// A description of the error.
     public var errorDescription: String? {
         switch self {
@@ -264,6 +292,8 @@ public enum RemoteModelProtocolError: Error, Hashable, LocalizedError {
             "A remote op announce cannot carry the count \(count)."
         case .logitsByteCount(let expected, let found):
             "Remote logits need \(expected) bytes for their shape, but carry \(found)."
+        case .parkHasNoRequest:
+            "A remote park announce carries no op."
         }
     }
 }

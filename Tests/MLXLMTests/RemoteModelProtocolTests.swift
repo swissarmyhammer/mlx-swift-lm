@@ -80,6 +80,52 @@ struct RemoteModelProtocolTests {
         #expect(stops == Self.everyOp.map { $0 == .end })
     }
 
+    @Test("no op announces a park", arguments: everyOp)
+    func noOpAnnouncesAPark(op: RemoteModelOp) throws {
+        #expect(!RemoteOpAnnouncement.isPark(try RemoteOpAnnouncement.encode(Self.request(op))))
+    }
+
+    @Test("a park announces a park")
+    func aParkAnnouncesAPark() {
+        #expect(
+            RemoteOpAnnouncement.isPark(
+                RemoteOpAnnouncement.park(requestID: Self.request(.begin).requestID)))
+    }
+
+    @Test("a park has the words of every announce")
+    func aParkHasTheWordsOfEveryAnnounce() {
+        #expect(
+            RemoteOpAnnouncement.park(requestID: .none).count == RemoteOpAnnouncement.wordCount)
+    }
+
+    @Test("a park does not raise the stop flag")
+    func aParkDoesNotRaiseTheStopFlag() {
+        #expect(!RemoteOpAnnouncement.stopsLoop(RemoteOpAnnouncement.park(requestID: .none)))
+    }
+
+    @Test("a park decodes to no request")
+    func aParkDecodesToNoRequest() {
+        #expect(throws: RemoteModelProtocolError.parkHasNoRequest) {
+            try RemoteOpAnnouncement.decode(RemoteOpAnnouncement.park(requestID: .none))
+        }
+    }
+
+    @Test("rank 0 exchanges the words of its op with a group of one")
+    func rankZeroExchangesTheWordsOfItsOp() throws {
+        let words = try RemoteOpAnnouncement.encode(Self.request(.reset(Self.cache)))
+
+        let exchanged = try RemoteOpAnnouncement.exchange(words, group: MLXDistributed.initialize())
+
+        #expect(exchanged == words)
+    }
+
+    @Test("a member exchanges an announce of zeros with a group of one")
+    func aMemberExchangesAnAnnounceOfZeros() throws {
+        let exchanged = try RemoteOpAnnouncement.exchange(nil, group: MLXDistributed.initialize())
+
+        #expect(exchanged == [Int32](repeating: 0, count: RemoteOpAnnouncement.wordCount))
+    }
+
     @Test("words of the wrong length do not decode")
     func wordsOfTheWrongLengthDoNotDecode() {
         #expect(throws: RemoteModelProtocolError.announceLength(1)) {
