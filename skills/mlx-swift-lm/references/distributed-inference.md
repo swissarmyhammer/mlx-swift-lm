@@ -125,11 +125,13 @@ ranks can wait without polling. The executor is not thread-safe.
 ## Checking a Shard
 
 ```sh
-scripts/shard-check.sh <model-directory>              # teacher-forced logits, KL + argmax gate
+scripts/shard-check.sh <model-directory>              # teacher-forced logits, top-5 gate
 scripts/shard-check.sh --free-running <model-directory>
 scripts/shard-check.sh --announce <model-directory>   # generation through ClusterLanguageModel
 python3 -I scripts/test_shard_check_compare.py         # self-check of the comparator
 ```
+
+A step passes when each run's argmax is in the other run's top-5 tokens, or within 2 bf16 ulps of the other run's 5th-highest logit, as in vLLM's [`check_logprobs_close`](https://github.com/vllm-project/vllm/blob/main/tests/models/utils.py); KL is printed but not gated.
 
 ## DON'T
 

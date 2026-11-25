@@ -18,12 +18,18 @@ compare.__file__ = str(_MODULE_PATH)
 sys.modules[compare.__name__] = compare
 exec(compile(_MODULE_PATH.read_text(), _MODULE_PATH, "exec"), compare.__dict__)
 
-MAX_KL = 0.05
 VOCABULARY = 8
 
 # The Qwen3.8-27B-mxfp4 prefill tie of ^zyx7p8z: one bf16 step apart in [4, 8).
 TIE_TOP = 6.59375
 TIE_SECOND = 6.5625
+
+# A sharded row whose top-5 is tokens 0, 1, 2, 4 and 6, with the 5th-highest logit 6.0.
+# In [4, 8) a bf16 step is 2**-5, so the near-tie tolerance there is 2**-4.
+FIFTH = 6.0
+SHARDED_TOP5 = {0: 10.0, 1: 9.0, 2: 8.0, 4: 7.0, 6: FIFTH}
+# The reference argmax, token 3; the reference row also holds the sharded argmax in its top-5.
+REFERENCE_ROW = {3: 10.0, 0: 9.0}
 
 
 def logits_with(top: dict[int, float]) -> np.ndarray:
@@ -34,154 +40,135 @@ def logits_with(top: dict[int, float]) -> np.ndarray:
     return row
 
 
+def sharded_with_token_3_at(logit: float) -> np.ndarray:
+    """The sharded row of SHARDED_TOP5, with the reference argmax (token 3) at `logit`."""
+    return logits_with({**SHARDED_TOP5, 3: logit})
+
+
+def run_passes(reference: np.ndarray, sharded: np.ndarray) -> bool:
+    """Whether the run of these logits passes the gate."""
+    return compare.run_passes(compare.compare_steps(reference, sharded))
+
+
 class Bfloat16StepTests(unittest.TestCase):
-    """The tie limit rests on the bf16 spacing at the top logit."""
+    """The near-tie tolerance rests on the bf16 spacing at the other side's 5th logit."""
 
     def test_ulp_in_four_to_eight_is_one_thirty_second(self) -> None:
         """bf16 keeps 7 fraction bits, so in [4, 8) adjacent values are 2**-5 apart."""
         self.assertEqual(compare.bf16_ulp(TIE_TOP), 2.0**-5)
 
-    def test_limit_is_two_ulps_when_larger_than_the_floor(self) -> None:
-        """At 6.6 two ulps (0.0625) exceed the 0.05 floor, so two ulps decide."""
-        self.assertEqual(compare.tie_margin_limit(TIE_TOP), 2.0**-4)
+    def test_tolerance_is_two_ulps_at_the_fifth_logit(self) -> None:
+        """At a 5th logit of 6.0 two bf16 steps are 2**-4."""
+        self.assertEqual(compare.near_tie_tol(FIFTH), 2.0**-4)
 
-    def test_limit_is_the_floor_at_small_magnitudes(self) -> None:
-        """Near 1.0 two ulps are tiny, so the 0.05 floor keeps real ties skipped."""
-        self.assertEqual(compare.tie_margin_limit(1.0), 0.05)
+    def test_tolerance_scales_with_magnitude(self) -> None:
+        """At a 5th logit of 20.0, in [16, 32), two bf16 steps are 2**-2: no fixed constant."""
+        self.assertEqual(compare.near_tie_tol(20.0), 2.0**-2)
 
 
 class GateTests(unittest.TestCase):
-    """The per-step verdicts and the overall gate."""
+    """The top-5 check of vLLM's check_logprobs_close, applied at every step."""
 
-    def test_flipped_tie_is_skipped(self) -> None:
-        """A one-ulp near tie that sharding flips is noise, not a sharding defect (^zyx7p8z)."""
-        reference = logits_with({3: TIE_TOP, 5: TIE_SECOND})
-        sharded = logits_with({3: TIE_SECOND, 5: TIE_TOP})
+    def test_equal_argmax_passes(self) -> None:
+        """Equal argmax is the baseline: the step agrees."""
+        reference = logits_with({3: 8.0, 5: 6.0})
+        sharded = logits_with({3: 7.5, 5: 6.5})
         steps = compare.compare_steps(reference, sharded)
-        self.assertTrue(compare.gate_passes(steps, MAX_KL))
+        self.assertEqual(steps[0].verdict, compare.Verdict.AGREE)
+        self.assertTrue(compare.run_passes(steps))
 
-    def test_flipped_tie_reports_tie(self) -> None:
-        """The skipped step is labelled a tie, so the output says why it did not fail."""
-        reference = logits_with({3: TIE_TOP, 5: TIE_SECOND})
-        sharded = logits_with({3: TIE_SECOND, 5: TIE_TOP})
-        steps = compare.compare_steps(reference, sharded)
-        self.assertEqual(steps[0].verdict, compare.Verdict.TIE)
-
-    def test_clear_argmax_mismatch_fails(self) -> None:
-        """A flip against a clear reference margin fails even when KL is not gated."""
+    def test_differing_argmax_within_the_top5_passes(self) -> None:
+        """A flip whose argmaxes are each in the other's top-5 passes, even clear of a tie."""
         reference = logits_with({3: 8.0, 5: 6.0})
         sharded = logits_with({3: 6.0, 5: 8.0})
         steps = compare.compare_steps(reference, sharded)
-        self.assertFalse(compare.gate_passes(steps, float("inf")))
+        self.assertEqual(steps[0].verdict, compare.Verdict.IN_TOP_K)
+        self.assertTrue(compare.run_passes(steps))
 
-    def test_kl_breach_fails_with_argmax_agreeing(self) -> None:
-        """A distribution that drifts beyond the KL limit fails though the argmax holds."""
+    def test_flipped_bf16_tie_passes(self) -> None:
+        """A one-ulp near tie that sharding flips is in the top-5 of both (^zyx7p8z)."""
+        reference = logits_with({3: TIE_TOP, 5: TIE_SECOND})
+        sharded = logits_with({3: TIE_SECOND, 5: TIE_TOP})
+        self.assertTrue(run_passes(reference, sharded))
+
+    def test_outside_the_top5_within_the_near_tie_tolerance_passes(self) -> None:
+        """The reference argmax one bf16 step below the sharded 5th logit is a near tie."""
+        reference = logits_with(REFERENCE_ROW)
+        sharded = sharded_with_token_3_at(FIFTH - 2.0**-5)
+        steps = compare.compare_steps(reference, sharded)
+        self.assertEqual(steps[0].verdict, compare.Verdict.NEAR_TIE)
+        self.assertTrue(compare.run_passes(steps))
+
+    def test_tie_with_the_fifth_logit_passes(self) -> None:
+        """Equal to the 5th logit but sorted after it into 6th place, the token is a near tie."""
+        # Token 7 sorts after token 6, the 5th, at the same logit.
+        reference = logits_with({7: 10.0, 0: 9.0})
+        sharded = logits_with({**SHARDED_TOP5, 7: FIFTH})
+        self.assertEqual(
+            compare.compare_steps(reference, sharded)[0].verdict, compare.Verdict.NEAR_TIE
+        )
+
+    def test_just_beyond_the_near_tie_tolerance_fails(self) -> None:
+        """Three bf16 steps below the 5th logit is beyond the two-step tolerance."""
+        reference = logits_with(REFERENCE_ROW)
+        sharded = sharded_with_token_3_at(FIFTH - 3 * 2.0**-5)
+        self.assertFalse(run_passes(reference, sharded))
+
+    def test_clearly_outside_the_top5_fails(self) -> None:
+        """The reference argmax far below the sharded top-5 is a mismatch."""
+        reference = logits_with(REFERENCE_ROW)
+        sharded = sharded_with_token_3_at(1.0)
+        steps = compare.compare_steps(reference, sharded)
+        self.assertEqual(steps[0].verdict, compare.Verdict.MISMATCH)
+        self.assertFalse(compare.run_passes(steps))
+
+    def test_sharded_argmax_outside_the_reference_top5_fails(self) -> None:
+        """The check runs both ways: the sharded argmax must be in the reference's top-5."""
+        reference = logits_with({3: 10.0, 0: 9.0, 1: 8.0, 2: 7.0, 4: 6.0})
+        sharded = logits_with({7: 10.0, 3: 9.0})
+        self.assertFalse(run_passes(reference, sharded))
+
+    def test_large_kl_with_equal_argmax_passes(self) -> None:
+        """KL is reported, not gated: an agreeing step at KL far above 0.05 passes."""
         reference = logits_with({3: 5.0})
         sharded = logits_with({3: 5.0, 5: 4.0, 6: 4.0})
         steps = compare.compare_steps(reference, sharded)
-        self.assertFalse(compare.gate_passes(steps, MAX_KL))
+        self.assertGreater(steps[0].kl, 0.4)
+        self.assertTrue(compare.run_passes(steps))
 
-    def test_identical_logits_pass(self) -> None:
-        """Equal logits are the baseline: zero KL and agreeing argmax pass."""
-        reference = logits_with({3: 8.0, 5: 6.0})
-        steps = compare.compare_steps(reference, reference.copy())
-        self.assertTrue(compare.gate_passes(steps, MAX_KL))
+    def test_one_failing_step_fails_the_run(self) -> None:
+        """The run passes only when every step passes."""
+        reference = np.vstack([logits_with({3: 8.0}), logits_with(REFERENCE_ROW)])
+        sharded = np.vstack([logits_with({3: 8.0}), sharded_with_token_3_at(1.0)])
+        self.assertFalse(run_passes(reference, sharded))
 
 
 # A long run: the prefill plus 1024 decode steps, as in ^17p77c9.
 LONG_RUN = 1025
-# A short run at the largest length that keeps the strict gate.
-SHORT_RUN = 64
 # The steady KL of a healthy sharded run.
 QUIET_KL = 0.001
-# The isolated Inkling outlier of ^17p77c9: above 0.05, below the 0.2 maximum.
+# The isolated Inkling outlier of ^17p77c9.
 OUTLIER_KL = 0.0764
-# The KL of the Qwen 3-ulp argmax flip of ^17p77c9: below the 0.02 mismatch floor.
-NOISE_FLIP_KL = 0.017
-# A KL above the 0.02 floor, so a mismatch at it is confident.
-CONFIDENT_KL = 0.03
-# A margin outside the tie rule at small logits.
-CLEAR_MARGIN = 1.0
 
 
 def run_of(length: int, changes: dict[int, compare.Step] | None = None) -> list[compare.Step]:
     """A run of quiet agreeing steps, with the given steps replaced."""
-    quiet = compare.Step(
-        kl=QUIET_KL,
-        top_logprob_diff=0.0,
-        max_logit_diff=0.0,
-        margin=CLEAR_MARGIN,
-        verdict=compare.Verdict.AGREE,
-    )
-    steps = [quiet] * length
+    steps = [step_with(QUIET_KL)] * length
     for index, step in (changes or {}).items():
         steps[index] = step
     return steps
 
 
-def step_with(kl: float, verdict: compare.Verdict = compare.Verdict.AGREE) -> compare.Step:
-    """One step at `kl` with the given argmax verdict."""
+def step_with(kl: float) -> compare.Step:
+    """One agreeing step at `kl`."""
     return compare.Step(
-        kl=kl, top_logprob_diff=0.0, max_logit_diff=0.0, margin=CLEAR_MARGIN, verdict=verdict
+        kl=kl,
+        top_logprob_diff=0.0,
+        max_logit_diff=0.0,
+        reference_argmax=0,
+        sharded_argmax=0,
+        verdict=compare.Verdict.AGREE,
     )
-
-
-def flips_at(count: int, kl: float) -> dict[int, compare.Step]:
-    """`count` argmax mismatches at `kl`, spread over a long run."""
-    return {index * 100 + 1: step_with(kl, compare.Verdict.MISMATCH) for index in range(count)}
-
-
-class LongRunGateTests(unittest.TestCase):
-    """Runs over 64 steps pass on statistics, so one isolated outlier does not fail them."""
-
-    def test_isolated_outlier_passes_a_long_run(self) -> None:
-        """One step of 1025 at KL 0.0764 is noise, not drift (the Inkling run of ^17p77c9)."""
-        steps = run_of(LONG_RUN, {500: step_with(OUTLIER_KL)})
-        self.assertTrue(compare.run_passes(steps, MAX_KL))
-
-    def test_isolated_outlier_fails_a_short_run(self) -> None:
-        """A short run keeps the strict per-step gate, so the same outlier fails it."""
-        steps = run_of(SHORT_RUN, {30: step_with(OUTLIER_KL)})
-        self.assertFalse(compare.run_passes(steps, MAX_KL))
-
-    def test_steady_rise_fails(self) -> None:
-        """KL that climbs to 0.02 over the run is drift: its mean exceeds 0.005."""
-        steps = [step_with(float(kl)) for kl in np.linspace(0.0, 0.02, LONG_RUN)]
-        self.assertFalse(compare.run_passes(steps, MAX_KL))
-
-    def test_one_step_above_the_maximum_fails(self) -> None:
-        """A single step above KL 0.2 is a defect however quiet the rest is."""
-        steps = run_of(LONG_RUN, {500: step_with(0.3)})
-        self.assertFalse(compare.run_passes(steps, MAX_KL))
-
-    def test_too_many_steps_above_the_outlier_limit_fail(self) -> None:
-        """Six steps above 0.05 in 1025 exceed the 0.5% allowance."""
-        steps = run_of(LONG_RUN, {index * 100: step_with(OUTLIER_KL) for index in range(6)})
-        self.assertFalse(compare.run_passes(steps, MAX_KL))
-
-    def test_confident_mismatch_fails(self) -> None:
-        """A mismatch clear of a tie, at KL above 0.02, is a defect even in a long run."""
-        steps = run_of(LONG_RUN, flips_at(1, CONFIDENT_KL))
-        self.assertFalse(compare.run_passes(steps, MAX_KL))
-
-    def test_noise_flip_passes(self) -> None:
-        """A mismatch at KL 0.017 is a noise flip (the Qwen 3-ulp flip of ^17p77c9)."""
-        steps = run_of(LONG_RUN, flips_at(1, NOISE_FLIP_KL))
-        self.assertTrue(compare.run_passes(steps, MAX_KL))
-
-    def test_low_kl_mismatch_is_a_noise_flip(self) -> None:
-        """The output labels the uncounted mismatch, so a reader sees why it did not fail."""
-        self.assertTrue(compare.is_noise_flip(step_with(NOISE_FLIP_KL, compare.Verdict.MISMATCH)))
-
-    def test_ties_do_not_count_as_noise_flips(self) -> None:
-        """Ties stay skipped in a long run: six in 1025 steps still pass (^17p77c9 had five)."""
-        ties = {index * 100: step_with(NOISE_FLIP_KL, compare.Verdict.TIE) for index in range(6)}
-        self.assertTrue(compare.run_passes(run_of(LONG_RUN, ties), MAX_KL))
-
-    def test_too_many_noise_flips_fail(self) -> None:
-        """Six noise flips in 1025 steps exceed the 0.5% allowance."""
-        steps = run_of(LONG_RUN, flips_at(6, NOISE_FLIP_KL))
-        self.assertFalse(compare.run_passes(steps, MAX_KL))
 
 
 class WindowTests(unittest.TestCase):

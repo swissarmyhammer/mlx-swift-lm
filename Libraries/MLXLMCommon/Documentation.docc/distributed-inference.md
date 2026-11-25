@@ -188,8 +188,11 @@ time.
 ## Check a shard
 
 `scripts/shard-check.sh <model-directory>` runs the `ShardCheck` tool unsharded as the
-reference, then as two ring processes on one Mac, and compares the logits of each step by KL
-divergence and argmax. It also checks that the layer-by-layer load of rank 0 peaks at most 75%
+reference, then as two ring processes on one Mac, and compares the logits of each step. A step
+passes when each run's argmax is in the other run's top-5 tokens, or within 2 bf16 ulps of the
+other run's 5th-highest logit, as in vLLM's
+[`check_logprobs_close`](https://github.com/vllm-project/vllm/blob/main/tests/models/utils.py);
+KL divergence is printed but not gated. It also checks that the layer-by-layer load of rank 0 peaks at most 75%
 of the unsharded load. `--announce` instead generates through a ``ClusterLanguageModel`` whose
 transport announces each op to the other rank, and compares the tokens with a local generation.
 

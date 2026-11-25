@@ -2,6 +2,10 @@
 # Checks tensor-parallel sharding on one Mac: runs ShardCheck unsharded as the reference,
 # then as two ring processes on localhost, and compares the logits of each step.
 #
+# A step passes when each run's argmax is in the other's top-5 tokens, or within 2 bf16 ulps of
+# the other's 5th-highest logit: the top-k check of vLLM's check_logprobs_close
+# (https://github.com/vllm-project/vllm/blob/main/tests/models/utils.py). KL is printed, not gated.
+#
 # By default the sharded run is teacher-forced: it feeds the reference's greedy tokens as its
 # next inputs, so both runs see the same contexts and one flipped near tie cannot cascade.
 # With --free-running, the sharded run feeds its own argmax, and its tokens must equal those
@@ -14,7 +18,7 @@
 # rank 1 with an all-sum, as a cluster worker does, and the tokens must equal those of a local
 # generation.
 #
-# Usage: scripts/shard-check.sh [--free-running | --announce] <model-directory> [max-kl]
+# Usage: scripts/shard-check.sh [--free-running | --announce] <model-directory>
 # Env: SHARD_CHECK_WORK (output directory), SHARD_CHECK_PORT (first ring port),
 #      SHARD_CHECK_TOKENS (comma-separated prompt ids; default: an English sentence
 #      pre-tokenized per model family), SHARD_CHECK_DECODE_STEPS (decode steps after the
@@ -22,7 +26,7 @@
 
 set -euo pipefail
 
-USAGE="usage: $0 [--free-running | --announce] <model-directory> [max-kl]"
+USAGE="usage: $0 [--free-running | --announce] <model-directory>"
 MODE=teacher-forced
 case "${1:-}" in
 --free-running)
@@ -35,14 +39,13 @@ case "${1:-}" in
     ;;
 esac
 
-if [[ $# -lt 1 ]]; then
+if [[ $# -ne 1 ]]; then
     echo "$USAGE" >&2
     exit 2
 fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL="$1"
-MAX_KL="${2:-0.05}"
 WORK="${SHARD_CHECK_WORK:-$(mktemp -d -t shard-check)}"
 PORT="${SHARD_CHECK_PORT:-50211}"
 DERIVED="$ROOT/.build/shard-check"
@@ -112,5 +115,5 @@ if [[ "$MODE" == announce ]]; then
         "$WORK/reference.json" "$WORK/sharded.json"
 else
     python3 -I "$ROOT/scripts/shard_check_compare.py" \
-        "$WORK/reference.npy" "$WORK/sharded.npy" "$MAX_KL"
+        "$WORK/reference.npy" "$WORK/sharded.npy"
 fi
