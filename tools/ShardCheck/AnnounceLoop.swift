@@ -27,7 +27,7 @@ final class AnnouncingTransport: RemoteModelTransport, @unchecked Sendable {
     /// Whether the park of the run is still to announce.
     private var parkIsPending = true
 
-    /// Whether ``close()`` ran, so no rank listens any more.
+    /// Whether ``endRun()`` ran, so no rank listens any more.
     private var isClosed = false
 
     /// Makes the transport of rank 0.
@@ -44,7 +44,7 @@ final class AnnouncingTransport: RemoteModelTransport, @unchecked Sendable {
     ///
     /// - Parameter request: The request.
     /// - Returns: The reply of rank 0.
-    /// - Throws: ``AnnounceLoopError/closed`` after ``close()``, or the error of the exchange.
+    /// - Throws: ``AnnounceLoopError/closed`` after ``endRun()``, or the error of the exchange.
     func send(_ request: RemoteModelRequest) throws -> RemoteModelReply {
         try lock.withLock {
             guard !isClosed else { throw AnnounceLoopError.closed }
@@ -65,7 +65,7 @@ final class AnnouncingTransport: RemoteModelTransport, @unchecked Sendable {
     ///
     /// - Throws: ``AnnounceLoopError/noOpenRequest`` before any request, or the error of the
     ///   exchange.
-    func close() throws {
+    func endRun() throws {
         try lock.withLock {
             guard let lastRequest else { throw AnnounceLoopError.noOpenRequest }
             let end = RemoteModelRequest(
@@ -121,9 +121,9 @@ enum AnnounceFollower {
 
 /// A failure of the announce check.
 enum AnnounceLoopError: Error, CustomStringConvertible {
-    /// A request arrived after ``AnnouncingTransport/close()``.
+    /// A request arrived after ``AnnouncingTransport/endRun()``.
     case closed
-    /// ``AnnouncingTransport/close()`` ran before any request.
+    /// ``AnnouncingTransport/endRun()`` ran before any request.
     case noOpenRequest
 
     var description: String {

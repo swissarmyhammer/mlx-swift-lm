@@ -38,6 +38,9 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// The requests the worker still runs before each op fails, or nil for no limit.
     private var remainingSuccesses: Int?
 
+    /// The number of times the transport was closed.
+    private var closes = 0
+
     /// Makes a worker over `model`.
     ///
     /// - Parameters:
@@ -61,6 +64,16 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// The handles whose caches the worker holds.
     public var liveCacheCount: Int {
         lock.withLock { executor.cacheCount }
+    }
+
+    /// The number of times ``close()`` ran.
+    public var closeCount: Int {
+        lock.withLock { closes }
+    }
+
+    /// Records the teardown of the transport.
+    public func close() {
+        lock.withLock { closes += 1 }
     }
 
     /// Makes every op after the next `count` throw ``InProcessWorkerFault``.

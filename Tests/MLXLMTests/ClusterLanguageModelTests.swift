@@ -392,6 +392,32 @@ struct ClusterLanguageModelTests {
         }
     }
 
+    // MARK: - Teardown
+
+    @Test("closing a cluster model closes its transport one time")
+    func closingAClusterModelClosesItsTransportOneTime() throws {
+        let fixture = try Qwen35MTPFixture()
+        let worker = fixture.makeWorker()
+        let model = try ClusterLanguageModel.connect(over: worker)
+
+        model.close()
+        model.close()
+
+        #expect(worker.closeCount == 1)
+    }
+
+    @Test("an op after close throws closed")
+    func anOpAfterCloseThrowsClosed() throws {
+        let fixture = try Qwen35MTPFixture()
+        let model = try ClusterLanguageModel.connect(over: fixture.makeWorker())
+
+        model.close()
+
+        #expect(throws: ClusterModelError.closed) {
+            try model.newCache(parameters: nil)
+        }
+    }
+
     @Test("a forward that fails mid-decode cancels the generation")
     func aForwardThatFailsMidDecodeCancelsTheGeneration() async throws {
         let fixture = try Qwen35MTPFixture()

@@ -19,6 +19,16 @@ public protocol RemoteModelTransport: Sendable {
     /// - Returns: The reply of the worker.
     /// - Throws: The error of the transport when the request or the reply did not arrive.
     func send(_ request: RemoteModelRequest) throws -> RemoteModelReply
+
+    /// Tears down the workers behind the transport. ``ClusterLanguageModel/close()`` calls it
+    /// one time, and sends nothing after it.
+    func close()
+}
+
+extension RemoteModelTransport {
+
+    /// Does nothing: a transport with no workers to tear down needs no teardown.
+    public func close() {}
 }
 
 /// A feature a ``ClusterLanguageModel`` does not run.
@@ -58,6 +68,10 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
     /// The caches given to the model are not the one ``RemoteKVCache`` it made.
     case foreignCache
 
+    /// ``ClusterLanguageModel/close()`` tore down the workers. Every later op fails with this
+    /// error.
+    case closed
+
     /// A description of the error.
     public var errorDescription: String? {
         switch self {
@@ -74,6 +88,8 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
             "The cluster worker answered \(op) with \(reply)."
         case .foreignCache:
             "A cluster model runs only on the one remote cache its newCache made."
+        case .closed:
+            "The cluster model was closed, and its workers are gone."
         }
     }
 
@@ -82,7 +98,8 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
         switch feature {
         case .mediaInput: "image, video or audio input"
         case .speculativeDecoding: "speculative decoding"
-        case .cacheConfiguration: "a KV-cache configuration or maxKVSize; the worker sets its caches"
+        case .cacheConfiguration:
+            "a KV-cache configuration or maxKVSize; the worker sets its caches"
         case .batchedInput: "a batch of more than one sequence"
         }
     }
@@ -178,6 +195,16 @@ final class RemoteModelSession: @unchecked Sendable {
     func recordFailure(_ error: any Error) {
         lock.withLock {
             failure = failure ?? Self.clusterError(error)
+        }
+    }
+
+    /// Tears down the transport one time, and fails every later op with
+    /// ``ClusterModelError/closed``. A second call does nothing.
+    func close() {
+        lock.withLock {
+            guard failure != .closed else { return }
+            failure = .closed
+            transport.close()
         }
     }
 

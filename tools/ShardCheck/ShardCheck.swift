@@ -126,7 +126,7 @@ struct ShardCheck {
             run = try GenerationRun(
                 model: ClusterLanguageModel.connect(over: transport), prompt: prompt,
                 decodeSteps: arguments.decodeSteps)
-            try transport.close()
+            try transport.endRun()
         } else {
             run = try GenerationRun(
                 model: model, prompt: prompt, decodeSteps: arguments.decodeSteps)

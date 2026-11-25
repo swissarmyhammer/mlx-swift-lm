@@ -325,7 +325,10 @@ actor ModelCache {
     /// registered load task, as `remove(modelID:)` does for a single model. No
     /// GPU-stream synchronization is required — in-flight callers retain their
     /// own `ModelContainer` and drafter and free them via ARC on completion.
-    func evictAll() {
+    ///
+    /// - Returns: The containers the cache held, for the caller to tear down.
+    func evictAll() -> [ModelContainer] {
+        let evicted = Array(containers.values)
         containers.removeAll()
         for loadTask in loadingTasks.values {
             loadTask.task.cancel()
@@ -341,6 +344,7 @@ actor ModelCache {
         constraintTemplates.removeAll()
         tokenizerBiases.removeAll()
         lastErrors.removeAll()
+        return evicted
     }
 
     /// Evicts a single model's state across every per-model cache: its container,
@@ -352,12 +356,15 @@ actor ModelCache {
     /// cancellation stops early. The load-completion guards in `load()` and
     /// `loadDrafter()` are what prevent any superseded load from re-populating
     /// after removal.
-    func remove(modelID: String) {
+    ///
+    /// - Parameter modelID: The model to evict.
+    /// - Returns: The container the cache held, for the caller to tear down, or `nil`.
+    func remove(modelID: String) -> ModelContainer? {
         // `loadingTasks` holds a `LoadTask` box; cancel the wrapped `Task`.
         loadingTasks[modelID]?.task.cancel()
         loadingTasks.removeValue(forKey: modelID)
         suppressedLoadIDs.remove(modelID)
-        containers.removeValue(forKey: modelID)
+        let evicted = containers.removeValue(forKey: modelID)
         drafters = drafters.filter { $0.key.modelID != modelID }
         for (key, loadTask) in drafterLoadingTasks where key.modelID == modelID {
             loadTask.task.cancel()
@@ -369,6 +376,7 @@ actor ModelCache {
         }
         tokenizerBiases.removeValue(forKey: modelID)
         lastErrors.removeValue(forKey: modelID)
+        return evicted
     }
 }
 

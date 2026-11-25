@@ -66,6 +66,15 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
         return ClusterLanguageModel(session: session, capabilities: capabilities)
     }
 
+    /// Tears down the workers through ``RemoteModelTransport/close()``, one time. Every later op
+    /// fails with ``ClusterModelError/closed``.
+    ///
+    /// Call it when no generation runs on the model, for example from the eviction of the model
+    /// container, which waits for the generation that holds the container.
+    public func close() {
+        session.close()
+    }
+
     /// The forward pass runs in a worker: ``LMModelCapabilities/remoteForward``.
     public var capabilities: LMModelCapabilities { [.remoteForward] }
 

@@ -77,6 +77,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// The configuration identifying and parameterizing the model to load.
     public let configuration: ModelConfiguration
 
+    /// Where the forward pass of the model runs: in this process, or in the workers of a
+    /// cluster. Part of ``modelID``, thus a local and a clustered load of one checkpoint hold
+    /// two cache entries.
+    public let loadIdentity: ModelLoadIdentity
+
     /// Resolves a model identifier to its on-disk weights directory. Used by
     /// the availability checks (`modelExistsOnDisk()`, `freeDiskSpaceBytes`),
     /// not by the load path. The checks pass `configuration.name` (the
@@ -126,10 +131,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// cache entries and load two containers. A Hub model at the default
     /// revision, and a directory-backed model, keep `configuration.name`.
     ///
+    /// A clustered ``loadIdentity`` adds its plan to the identity, thus a local and a
+    /// clustered load of one checkpoint never share a cache entry. A local load adds nothing.
+    ///
     /// On-disk resolution (`weightsLocation`) and download progress use
     /// `configuration.name`, not this value: both want a path-shaped id.
     public var modelID: String {
-        Self.cacheIdentity(of: configuration)
+        loadIdentity.cacheIdentity(of: Self.cacheIdentity(of: configuration))
     }
 
     /// The identity of a checkpoint in the model cache: `"\(id)@\(revision)"` for a Hub
@@ -311,9 +319,27 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// concurrent callers for one model onto a single load task, so one such
     /// failure reaches every caller waiting on that load, including callers that
     /// never asked for an eviction.
+    ///
+    /// A container whose model runs in cluster workers tears its workers down, after the
+    /// generation that holds it ends.
     public static func evictAll() async {
-        await cache.evictAll()
+        await tearDown(await cache.evictAll())
         await releasePromptCaches(of: nil)
+    }
+
+    /// Closes the transport of each model of `containers` whose forward pass runs in cluster
+    /// workers, which tears the workers down. Waits for the generation that holds a container.
+    ///
+    /// The caller passes the evicted containers straight in and keeps no reference, thus they
+    /// are freed when this returns, before the buffer pool is cleared.
+    ///
+    /// - Parameter containers: The evicted containers.
+    private static func tearDown(_ containers: [ModelContainer]) async {
+        for container in containers {
+            await container.perform { context in
+                (context.model as? ClusterLanguageModel)?.close()
+            }
+        }
     }
 
     /// Releases the prompt cache entries of `modelID`, or of every model when `modelID` is nil,
@@ -344,8 +370,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// If the loader honors cancellation, the awaiting `preload()` or `respond()`
     /// call fails instead of completing. The loader decides the error type, so it
     /// may not be `CancellationError`.
+    ///
+    /// A model whose forward pass runs in cluster workers tears its workers down, after the
+    /// generation that holds its container ends. A local load of the same checkpoint stays.
     public func evict() async {
-        await Self.cache.remove(modelID: modelID)
+        await Self.tearDown(await Self.cache.remove(modelID: modelID).map { [$0] } ?? [])
         await Self.releasePromptCaches(of: .init(modelID))
     }
 
@@ -433,7 +462,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// and reasoning (chain-of-thought) routing.
     ///
     /// Capabilities are declared explicitly by the caller at
-    /// ``init(configuration:capabilities:configurationResolver:speculativeDecoding:prefillStepSize:weightsLocation:progress:load:)``
+    /// ``init(configuration:capabilities:configurationResolver:speculativeDecoding:prefillStepSize:kvCache:loadIdentity:weightsLocation:progress:load:)``
     /// and stored verbatim. The caller includes
     /// `.guidedGeneration`/`.toolCalling`/`.reasoning` as appropriate; the
     /// adapter does not consult `ReasoningHeuristics` (which remains a
@@ -538,6 +567,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///     default step size.
     ///   - kvCache: The KV-cache configuration every generation of this model runs under, for
     ///     example affine 8-bit compression. `nil` keeps full-precision caches.
+    ///   - loadIdentity: Where the forward pass of the model runs. `load` must give a container
+    ///     that runs there.
     ///   - weightsLocation: Resolves a model identifier to its on-disk weights directory, for
     ///     the availability checks.
     ///   - progress: Receives the download and weight-loading progress of each load.
@@ -550,11 +581,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         speculativeDecoding: MLXSpeculativeDecoding? = nil,
         prefillStepSize: Int? = nil,
         kvCache: KVCacheConfiguration? = nil,
+        loadIdentity: ModelLoadIdentity = .local,
         weightsLocation: @Sendable @escaping (String) -> URL,
         progress: LoadProgressHandlers = .init(),
         load: @escaping ProgressContainerLoader
     ) {
         self.configuration = configuration
+        self.loadIdentity = loadIdentity
         self.capabilities = LanguageModelCapabilities(capabilities)
         self.configurationResolver = configurationResolver
         self.speculativeDecoding = speculativeDecoding
