@@ -4,11 +4,14 @@ Run: python3 -I scripts/test_shard_check_compare.py
 """
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
 
+# Keep the self-check from leaving scripts/__pycache__ behind.
+sys.dont_write_bytecode = True
 _MODULE_PATH = Path(__file__).resolve().parent / "shard_check_compare.py"
 _SPEC = importlib.util.spec_from_file_location("shard_check_compare", _MODULE_PATH)
 compare = importlib.util.module_from_spec(_SPEC)
