@@ -132,19 +132,9 @@ struct ClusterLanguageModelTests {
 
     @Test("a cluster context loads a checkpoint directory without its weights")
     func aClusterContextLoadsACheckpointDirectoryWithoutItsWeights() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cluster-checkpoint-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let directory = try Self.makeCheckpointDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let suppressed = 5
-        try Data(
-            Qwen35FixtureJSON.text(
-                mtpLayers: 0, hiddenLayers: Qwen35MTPFixture.hiddenLayers,
-                fullAttentionInterval: Qwen35MTPFixture.fullAttentionInterval,
-                hiddenSize: Qwen35MTPFixture.hiddenSize,
-                vocabularySize: Qwen35MTPFixture.vocabularySize, tieWordEmbeddings: false
-            ).utf8
-        ).write(to: directory.appendingPathComponent("config.json"))
         try Data(#"{"suppress_tokens": [\#(suppressed)]}"#.utf8)
             .write(to: directory.appendingPathComponent("generation_config.json"))
         let fixture = try Qwen35MTPFixture()
@@ -154,6 +144,39 @@ struct ClusterLanguageModelTests {
 
         let model = try #require(context.model as? ClusterLanguageModel)
         #expect(model.suppressedTokenIds == [suppressed])
+    }
+
+    @Test("a cluster context refuses a worker that runs another model type")
+    func aClusterContextRefusesAWorkerOfAnotherModelType() async throws {
+        let directory = try Self.makeCheckpointDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try Qwen35MTPFixture()
+        let worker = InProcessRemoteModelWorker(
+            model: fixture.target, vocabularySize: Qwen35MTPFixture.vocabularySize,
+            modelType: "inkling2")
+
+        await #expect(
+            throws: ClusterModelError.modelTypeMismatch(expected: "qwen3_5_text", found: "inkling2")
+        ) {
+            try await loadClusterModelContext(
+                from: directory, using: PseudoWordTokenizerLoader(), transport: worker)
+        }
+    }
+
+    /// A checkpoint directory of the text configuration of the fixture, with no weights.
+    private static func makeCheckpointDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cluster-checkpoint-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(
+            Qwen35FixtureJSON.text(
+                mtpLayers: 0, hiddenLayers: Qwen35MTPFixture.hiddenLayers,
+                fullAttentionInterval: Qwen35MTPFixture.fullAttentionInterval,
+                hiddenSize: Qwen35MTPFixture.hiddenSize,
+                vocabularySize: Qwen35MTPFixture.vocabularySize, tieWordEmbeddings: false
+            ).utf8
+        ).write(to: directory.appendingPathComponent("config.json"))
+        return directory
     }
 
     // MARK: - The op stream

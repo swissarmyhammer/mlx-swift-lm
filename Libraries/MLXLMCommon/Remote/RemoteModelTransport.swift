@@ -53,6 +53,9 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
     /// The worker speaks another version of the op set.
     case protocolVersionMismatch(expected: Int32, found: Int32)
 
+    /// The worker runs a model of another `model_type` than the checkpoint the app loaded.
+    case modelTypeMismatch(expected: String, found: String)
+
     /// The model does not run `feature`.
     case unsupported(ClusterModelFeature)
 
@@ -78,6 +81,8 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
         case .protocolVersionMismatch(let expected, let found):
             "The cluster worker speaks remote model protocol version \(found), "
                 + "but this app speaks version \(expected)."
+        case .modelTypeMismatch(let expected, let found):
+            "The cluster worker runs a \(found) model, but the checkpoint is a \(expected) model."
         case .unsupported(let feature):
             "A cluster model does not run \(Self.describe(feature))."
         case .transportFailed(let reason):

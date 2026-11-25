@@ -132,10 +132,7 @@ public enum RemoteOpAnnouncement {
             throw RemoteModelProtocolError.announceLength(words.count)
         }
         let word = { (word: Word) in words[word.rawValue] }
-        let joined = { (low: Word, high: Word) in
-            UInt64(UInt32(bitPattern: word(low)))
-                | UInt64(UInt32(bitPattern: word(high))) << halfWidth
-        }
+        let joined = { (low: Word, high: Word) in read(words, low: low, high: high) }
         guard let opcode = Opcode(rawValue: word(.opcode)) else {
             throw RemoteModelProtocolError.unknownOpcode(word(.opcode))
         }
@@ -186,6 +183,21 @@ public enum RemoteOpAnnouncement {
     private static func write(_ value: UInt64, into words: inout [Int32], low: Word, high: Word) {
         words[low.rawValue] = Int32(bitPattern: UInt32(truncatingIfNeeded: value))
         words[high.rawValue] = Int32(bitPattern: UInt32(truncatingIfNeeded: value >> halfWidth))
+    }
+
+    /// The request a park names, or nil when `words` are no park.
+    ///
+    /// - Parameter words: The words of one announce.
+    /// - Returns: The request id of a park, else nil.
+    public static func parkedRequestID(_ words: [Int32]) -> RemoteRequestID? {
+        guard isPark(words), words.count == wordCount else { return nil }
+        return RemoteRequestID(rawValue: read(words, low: .requestLow, high: .requestHigh))
+    }
+
+    /// The 64-bit value whose halves the words `low` and `high` hold.
+    private static func read(_ words: [Int32], low: Word, high: Word) -> UInt64 {
+        UInt64(UInt32(bitPattern: words[low.rawValue]))
+            | UInt64(UInt32(bitPattern: words[high.rawValue])) << halfWidth
     }
 
     /// Whether announce `words` are a park, which tells each rank other than rank 0 to leave

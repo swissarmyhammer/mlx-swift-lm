@@ -47,12 +47,14 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     ///   - model: The local model the worker runs.
     ///   - vocabularySize: The last dimension of the logits of `model`.
     ///   - protocolVersion: The protocol version the worker reports.
+    ///   - modelType: The `model_type` the worker reports, or nil for none.
     public init(
         model: any LanguageModel, vocabularySize: Int,
-        protocolVersion: Int32 = RemoteModelProtocol.version
+        protocolVersion: Int32 = RemoteModelProtocol.version, modelType: String? = nil
     ) {
         self.executor = RemoteModelExecutor(
-            model: model, configuration: .init(vocabularySize: vocabularySize))
+            model: model,
+            configuration: .init(vocabularySize: vocabularySize, modelType: modelType))
         self.protocolVersion = protocolVersion
     }
 
@@ -110,7 +112,8 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
                 supportsSharding: capabilities.supportsSharding,
                 rankCount: capabilities.rankCount, vocabularySize: capabilities.vocabularySize,
                 defaultPrefillStepSize: capabilities.defaultPrefillStepSize,
-                maximumPrefillStepSize: capabilities.maximumPrefillStepSize))
+                maximumPrefillStepSize: capabilities.maximumPrefillStepSize,
+                modelType: capabilities.modelType, quantization: capabilities.quantization))
     }
 }
 

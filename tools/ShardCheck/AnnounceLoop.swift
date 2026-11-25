@@ -48,10 +48,12 @@ final class AnnouncingTransport: RemoteModelTransport, @unchecked Sendable {
     func send(_ request: RemoteModelRequest) throws -> RemoteModelReply {
         try lock.withLock {
             guard !isClosed else { throw AnnounceLoopError.closed }
-            if parkIsPending, case .forward = lastRequest?.op {
+            if parkIsPending, let last = lastRequest, case .forward = last.op {
                 parkIsPending = false
+                let parked = executor.handlePark(requestID: last.requestID)
+                guard parked == .done else { return parked }
                 _ = try RemoteOpAnnouncement.exchange(
-                    RemoteOpAnnouncement.park(requestID: request.requestID), group: group)
+                    RemoteOpAnnouncement.park(requestID: last.requestID), group: group)
             }
             _ = try RemoteOpAnnouncement.exchange(
                 RemoteOpAnnouncement.encode(request), group: group)
@@ -96,7 +98,8 @@ enum AnnounceFollower {
     ///   - executor: The executor over the shard of this rank.
     ///   - group: The group of every rank.
     /// - Returns: What the rank applied.
-    /// - Throws: The error of an exchange, or of words that name no op.
+    /// - Throws: The error of an exchange, of words that name no op, or of a park of another
+    ///   request than the open one.
     static func follow(
         _ executor: RemoteModelExecutor, group: MLXDistributed.Group
     ) throws -> Summary {

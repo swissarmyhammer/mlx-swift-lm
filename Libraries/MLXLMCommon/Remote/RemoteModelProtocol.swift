@@ -14,7 +14,7 @@ import Foundation
 ///
 /// | Op | Reply | What the worker does |
 /// |---|---|---|
-/// | ``RemoteModelOp/describe`` | ``RemoteModelReply/capabilities(_:)`` | Names its protocol version, model families and sharding. |
+/// | ``RemoteModelOp/describe`` | ``RemoteModelReply/capabilities(_:)`` | Names its protocol version, model families, sharding, and the `model_type` and quantization of the loaded model. |
 /// | ``RemoteModelOp/begin`` | ``RemoteModelReply/done`` | Starts the request that ``RemoteModelRequest/requestID`` names. |
 /// | ``RemoteModelOp/end`` | ``RemoteModelReply/done`` | Ends that request. Its announce raises the stop flag. |
 /// | ``RemoteModelOp/newCache(_:)`` | ``RemoteModelReply/cache(_:)`` | Makes an empty cache under the handle the app chose. |
@@ -42,10 +42,22 @@ import Foundation
 /// Each op that changes a cache answers with a ``RemoteCacheStatus``. The app mirrors it, so a
 /// read of ``KVCache/offset`` or ``KVCache/maxTrimCount`` costs no round trip. A worker builds
 /// it with ``RemoteCacheStatus/init(describing:)``.
+///
+/// ## Between turns
+///
+/// ``ClusterLanguageModel`` sends ``RemoteModelOp/end`` only when the next
+/// ``LanguageModel/prepare(_:cache:state:prefill:)`` begins a new request, so the request of a
+/// turn stays open while the app waits for the next turn. Rank 0 of the worker announces a park
+/// (``RemoteOpAnnouncement/park(requestID:)``) after about 250 ms with no op, and the park is
+/// what lets the other ranks leave the all-sum loop and wait without polling between turns. A
+/// worker that announces no park keeps the other ranks in the loop until the next turn.
 public enum RemoteModelProtocol {
 
     /// The version of the op set. A worker that names another version is refused.
-    public static let version: Int32 = 1
+    ///
+    /// Version 2 adds the `model_type` and the quantization of the loaded model to
+    /// ``RemoteModelCapabilities``.
+    public static let version: Int32 = 2
 
     /// The most tokens one forward carries. A prefill longer than this goes in several forwards.
     public static let maximumChunkTokenCount = 1024
@@ -206,6 +218,12 @@ public struct RemoteModelCapabilities: Codable, Sendable, Hashable {
     /// The largest prefill step of the model, or nil when it has none.
     public let maximumPrefillStepSize: Int?
 
+    /// The `model_type` of the loaded model, or nil when the worker was given none.
+    public let modelType: String?
+
+    /// The default quantization of the loaded model, or nil for a model with no quantization.
+    public let quantization: BaseConfiguration.Quantization?
+
     /// Makes the capabilities of a worker.
     ///
     /// - Parameters:
@@ -216,9 +234,12 @@ public struct RemoteModelCapabilities: Codable, Sendable, Hashable {
     ///   - vocabularySize: The last dimension of the logits.
     ///   - defaultPrefillStepSize: The prefill step of the model when the caller sets none.
     ///   - maximumPrefillStepSize: The largest prefill step of the model, or nil.
+    ///   - modelType: The `model_type` of the loaded model, or nil.
+    ///   - quantization: The default quantization of the loaded model, or nil.
     public init(
         protocolVersion: Int32, modelFamilies: [String], supportsSharding: Bool, rankCount: Int,
-        vocabularySize: Int, defaultPrefillStepSize: Int, maximumPrefillStepSize: Int?
+        vocabularySize: Int, defaultPrefillStepSize: Int, maximumPrefillStepSize: Int?,
+        modelType: String?, quantization: BaseConfiguration.Quantization?
     ) {
         self.protocolVersion = protocolVersion
         self.modelFamilies = modelFamilies
@@ -227,6 +248,8 @@ public struct RemoteModelCapabilities: Codable, Sendable, Hashable {
         self.vocabularySize = vocabularySize
         self.defaultPrefillStepSize = defaultPrefillStepSize
         self.maximumPrefillStepSize = maximumPrefillStepSize
+        self.modelType = modelType
+        self.quantization = quantization
     }
 }
 

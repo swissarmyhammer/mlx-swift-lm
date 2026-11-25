@@ -33,8 +33,11 @@ import MLX
 /// handle the executor does not hold (or, for a new cache, does hold), gets a failed reply and
 /// changes nothing.
 ///
-/// A park (see ``RemoteOpAnnouncement/park(requestID:)``) changes nothing either: the op after
-/// it carries the same request id and the next sequence number.
+/// A park (see ``RemoteOpAnnouncement/park(requestID:)``) takes no sequence number and changes
+/// nothing: the op after it carries the same request id and the next sequence number. It must
+/// carry the id of the open request, or of the last request when none is open, as an op does.
+/// A park of another request means the ranks are out of step: rank 0 gets a failed reply from
+/// ``handlePark(requestID:)``, and ``apply(announcement:)`` throws on every other rank.
 ///
 /// ## Threads
 ///
@@ -46,8 +49,9 @@ public final class RemoteModelExecutor {
     /// with no error, as the LLM factory loads them, or the VLM factory for a type only it
     /// knows.
     ///
-    /// `qwen3_5_moe` is not here: its mixture-of-experts layers do not shard.
+    /// `qwen3_5_moe` is not here: its mixture-of-experts layers do not shard yet.
     /// `prism_hadamard_qwen35` is not either: its rotated projections are not stock projections.
+    /// Both wait for the larger-models phase of the cluster work.
     public static let shardableModelFamilies = [
         "inkling2", "inkling2_loop", "qwen3_5", "qwen3_5_text", "qwen3_8", "qwen3_8_text",
     ]
@@ -83,7 +87,8 @@ public final class RemoteModelExecutor {
                 && model is TensorParallelShardable,
             rankCount: configuration.rankCount, vocabularySize: configuration.vocabularySize,
             defaultPrefillStepSize: model.defaultPrefillStepSize,
-            maximumPrefillStepSize: model.maximumPrefillStepSize)
+            maximumPrefillStepSize: model.maximumPrefillStepSize,
+            modelType: configuration.modelType, quantization: configuration.quantization)
     }
 
     /// The cache handles the executor holds.
@@ -106,6 +111,20 @@ public final class RemoteModelExecutor {
         }
     }
 
+    /// Checks a park of `requestID` on rank 0, before rank 0 announces it.
+    ///
+    /// - Parameter requestID: The request the park names.
+    /// - Returns: ``RemoteModelReply/done``, or ``RemoteModelReply/failed(_:)`` when the park
+    ///   names another request than the open one (or the last one, when none is open).
+    public func handlePark(requestID: RemoteRequestID) -> RemoteModelReply {
+        do {
+            try stream.admitPark(requestID)
+            return .done
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
     /// Runs the op of announce `words` on this rank, as ``handle(_:)`` runs it on rank 0.
     ///
     /// A rank other than 0 calls this with the words of each exchange, and drops the reply.
@@ -113,10 +132,14 @@ public final class RemoteModelExecutor {
     /// - Parameter words: The words of one announce, from
     ///   ``RemoteOpAnnouncement/exchange(_:group:)``.
     /// - Returns: The reply of ``handle(_:)``, or nil for a park.
-    /// - Throws: ``RemoteModelProtocolError`` when the words name no op, or the error of
+    /// - Throws: ``RemoteModelExecutorError/requestMismatch(expected:found:)`` for a park of
+    ///   another request, ``RemoteModelProtocolError`` when the words name no op, or the error of
     ///   ``handle(_:)``.
     public func apply(announcement words: [Int32]) throws -> RemoteModelReply? {
-        guard !RemoteOpAnnouncement.isPark(words) else { return nil }
+        if let parked = RemoteOpAnnouncement.parkedRequestID(words) {
+            try stream.admitPark(parked)
+            return nil
+        }
         return try handle(RemoteOpAnnouncement.decode(words))
     }
 
@@ -211,18 +234,31 @@ extension RemoteModelExecutor {
         /// The number of ranks the model runs on.
         public var rankCount: Int
 
+        /// The `model_type` of the loaded model, or nil when the worker names none.
+        public var modelType: String?
+
+        /// The default quantization of the loaded model, or nil for none.
+        public var quantization: BaseConfiguration.Quantization?
+
         /// Makes a configuration.
         ///
         /// - Parameters:
         ///   - vocabularySize: The last dimension of the logits.
         ///   - rankCount: The number of ranks the model runs on.
-        public init(vocabularySize: Int, rankCount: Int = 1) {
+        ///   - modelType: The `model_type` of the loaded model, or nil.
+        ///   - quantization: The default quantization of the loaded model, or nil.
+        public init(
+            vocabularySize: Int, rankCount: Int = 1, modelType: String? = nil,
+            quantization: BaseConfiguration.Quantization? = nil
+        ) {
             self.vocabularySize = vocabularySize
             self.rankCount = rankCount
+            self.modelType = modelType
+            self.quantization = quantization
         }
 
-        /// Reads the vocabulary from the `config.json` of `modelDirectory`: its `vocab_size`,
-        /// or the `vocab_size` of its `text_config`.
+        /// Reads the `config.json` of `modelDirectory`: the vocabulary from its `vocab_size`, or
+        /// the `vocab_size` of its `text_config`, and its `model_type` and `quantization`.
         ///
         /// - Parameters:
         ///   - modelDirectory: The checkpoint directory the model loaded from.
@@ -230,22 +266,39 @@ extension RemoteModelExecutor {
         /// - Throws: ``RemoteModelExecutorError/missingVocabularySize`` when neither field is
         ///   there, or the error of the read.
         public init(modelDirectory: URL, rankCount: Int = 1) throws {
-            let data = try Data(contentsOf: modelDirectory.appending(component: "config.json"))
-            let fields = try JSONDecoder.json5().decode(VocabularyFields.self, from: data)
+            let fields = try CheckpointFields(modelDirectory: modelDirectory)
             guard let vocabularySize = fields.vocabularySize ?? fields.textConfig?.vocabularySize
             else {
                 throw RemoteModelExecutorError.missingVocabularySize
             }
-            self.init(vocabularySize: vocabularySize, rankCount: rankCount)
+            self.init(
+                vocabularySize: vocabularySize, rankCount: rankCount, modelType: fields.modelType,
+                quantization: fields.quantization)
         }
     }
 }
 
-/// The fields of a `config.json` that name the vocabulary.
-private struct VocabularyFields: Decodable {
+/// The fields of a `config.json` that a worker reports: the vocabulary, the `model_type` and the
+/// quantization.
+struct CheckpointFields: Decodable {
 
     /// The `vocab_size` of the configuration.
     let vocabularySize: Int?
+
+    /// The `model_type` of the configuration.
+    let modelType: String?
+
+    /// The default quantization of the configuration. Its per-layer entries are not read.
+    let quantization: BaseConfiguration.Quantization?
+
+    /// Reads the `config.json` of `modelDirectory`.
+    ///
+    /// - Parameter modelDirectory: The checkpoint directory.
+    /// - Throws: The error of the read or of the decode.
+    init(modelDirectory: URL) throws {
+        let data = try Data(contentsOf: modelDirectory.appending(component: "config.json"))
+        self = try JSONDecoder.json5().decode(Self.self, from: data)
+    }
 
     /// The text configuration of a vision-language model.
     let textConfig: TextFields?
@@ -263,6 +316,8 @@ private struct VocabularyFields: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case vocabularySize = "vocab_size"
+        case modelType = "model_type"
+        case quantization
         case textConfig = "text_config"
     }
 }
@@ -324,17 +379,30 @@ private struct RemoteRequestStream {
         case (.end, .closed):
             throw RemoteModelExecutorError.noOpenRequest
         case (.end, .open(let open)):
-            try Self.expect(open, in: request)
+            try Self.expect(open, found: request.requestID)
             state = .closed(open)
         case (_, .open(let current)), (_, .closed(let current)):
-            try Self.expect(current, in: request)
+            try Self.expect(current, found: request.requestID)
         }
     }
 
-    /// Throws unless `request` carries `id`.
-    private static func expect(_ id: RemoteRequestID, in request: RemoteModelRequest) throws {
-        guard request.requestID == id else {
-            throw RemoteModelExecutorError.requestMismatch(expected: id, found: request.requestID)
+    /// Takes a park of `requestID`, which must name the open request, or the last request when
+    /// none is open. A park takes no sequence number and moves no state.
+    ///
+    /// - Parameter requestID: The request the park names.
+    /// - Throws: ``RemoteModelExecutorError/requestMismatch(expected:found:)`` for another
+    ///   request.
+    func admitPark(_ requestID: RemoteRequestID) throws {
+        switch state {
+        case .open(let current), .closed(let current):
+            try Self.expect(current, found: requestID)
+        }
+    }
+
+    /// Throws unless `found` is `id`.
+    private static func expect(_ id: RemoteRequestID, found: RemoteRequestID) throws {
+        guard found == id else {
+            throw RemoteModelExecutorError.requestMismatch(expected: id, found: found)
         }
     }
 }

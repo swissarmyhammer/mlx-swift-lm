@@ -33,6 +33,15 @@ struct RemoteModelExecutorTests {
     /// The request every test begins.
     private static let request = RemoteRequestID(rawValue: 1)
 
+    /// A request no test begins.
+    private static let otherRequest = RemoteRequestID(rawValue: 2)
+
+    /// The `model_type` the configuration of a test executor names.
+    private static let modelType = "qwen3_5_text"
+
+    /// The quantization the configuration of a test executor names.
+    private static let quantization = BaseConfiguration.Quantization(groupSize: 64, bits: 4)
+
     /// An executor over the target of a new fixture, in `dtype` when one is given.
     private static func makeExecutor(
         rankCount: Int = 1, dtype: DType? = nil
@@ -44,7 +53,8 @@ struct RemoteModelExecutorTests {
         return RemoteModelExecutor(
             model: target,
             configuration: .init(
-                vocabularySize: Qwen35MTPFixture.vocabularySize, rankCount: rankCount))
+                vocabularySize: Qwen35MTPFixture.vocabularySize, rankCount: rankCount,
+                modelType: modelType, quantization: quantization))
     }
 
     /// The text of the failed reply of `error`.
@@ -145,7 +155,8 @@ struct RemoteModelExecutorTests {
                         supportsSharding: true, rankCount: Self.shardedRankCount,
                         vocabularySize: Qwen35MTPFixture.vocabularySize,
                         defaultPrefillStepSize: target.defaultPrefillStepSize,
-                        maximumPrefillStepSize: target.maximumPrefillStepSize)))
+                        maximumPrefillStepSize: target.maximumPrefillStepSize,
+                        modelType: Self.modelType, quantization: Self.quantization)))
     }
 
     @Test("describe of a model that cannot shard reports no sharding")
@@ -180,6 +191,23 @@ struct RemoteModelExecutorTests {
         let configuration = try RemoteModelExecutor.Configuration(modelDirectory: directory.url)
 
         #expect(configuration.vocabularySize == 201_024)
+    }
+
+    @Test("a configuration reads the model type and the quantization")
+    func aConfigurationReadsTheModelTypeAndTheQuantization() throws {
+        let directory = try ConfigurationDirectory(
+            json: #"""
+                {"model_type": "qwen3_5_text", "vocab_size": 64,
+                 "quantization": {"group_size": 64, "bits": 4, "model.embed_tokens": false}}
+                """#)
+
+        let configuration = try RemoteModelExecutor.Configuration(modelDirectory: directory.url)
+
+        #expect(
+            configuration
+                == .init(
+                    vocabularySize: Qwen35MTPFixture.vocabularySize, modelType: Self.modelType,
+                    quantization: Self.quantization))
     }
 
     @Test("a configuration without a vocabulary is refused")
@@ -457,6 +485,42 @@ struct RemoteModelExecutorTests {
             announcement: RemoteOpAnnouncement.park(requestID: Self.request))
 
         #expect(reply == nil)
+    }
+
+    @Test("a park of another request fails on a member")
+    func aParkOfAnotherRequestFailsOnAMember() throws {
+        let executor = try Self.makeExecutor()
+        _ = try Self.run([.begin], on: executor)
+
+        #expect(
+            throws: RemoteModelExecutorError.requestMismatch(
+                expected: Self.request, found: Self.otherRequest)
+        ) {
+            try executor.apply(
+                announcement: RemoteOpAnnouncement.park(requestID: Self.otherRequest))
+        }
+    }
+
+    @Test("a park of another request gets a failed reply on rank 0")
+    func aParkOfAnotherRequestGetsAFailedReplyOnRankZero() throws {
+        let executor = try Self.makeExecutor()
+        _ = try Self.run([.begin], on: executor)
+
+        let reply = executor.handlePark(requestID: Self.otherRequest)
+
+        #expect(
+            reply
+                == .failed(
+                    Self.text(
+                        of: .requestMismatch(expected: Self.request, found: Self.otherRequest))))
+    }
+
+    @Test("a park of the open request is done on rank 0")
+    func aParkOfTheOpenRequestIsDoneOnRankZero() throws {
+        let executor = try Self.makeExecutor()
+        _ = try Self.run([.begin], on: executor)
+
+        #expect(executor.handlePark(requestID: Self.request) == .done)
     }
 
     @Test("a park leaves the cache and the sequence of the request as they were")

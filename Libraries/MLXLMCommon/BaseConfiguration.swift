@@ -19,7 +19,7 @@ public struct BaseConfiguration: Codable, Sendable {
     ///
     /// MLX uses group-wise quantization to reduce memory footprint. This struct
     /// defines how weights are grouped and the precision (bits) used for each group.
-    public struct Quantization: Codable, Sendable, Equatable {
+    public struct Quantization: Codable, Sendable, Hashable {
 
         /// Initializes a new quantization configuration.
         /// - Parameters:

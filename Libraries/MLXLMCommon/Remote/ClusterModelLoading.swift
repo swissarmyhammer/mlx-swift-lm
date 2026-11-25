@@ -18,7 +18,9 @@ import Foundation
 ///   - tokenizerLoader: The loader of the tokenizer.
 ///   - transport: The transport to the rank-0 worker.
 /// - Returns: The context, whose model is the cluster model.
-/// - Throws: The error of the worker handshake, or of the load.
+/// - Throws: ``ClusterModelError/modelTypeMismatch(expected:found:)`` when the worker reports a
+///   `model_type` other than the one of `directory`, the error of the worker handshake, or of the
+///   load.
 public func loadClusterModelContext(
     from directory: URL, using tokenizerLoader: any TokenizerLoader,
     transport: any RemoteModelTransport
@@ -29,7 +31,26 @@ public func loadClusterModelContext(
         try await factory._load(configuration: configuration, tokenizerLoader: tokenizerLoader)
     }
     let model = try ClusterLanguageModel.connect(over: transport)
+    try model.expectModelType(of: directory)
     return context.serving(through: model)
+}
+
+extension ClusterLanguageModel {
+
+    /// Throws unless the worker runs the `model_type` of the checkpoint in `directory`. A worker
+    /// that reports no `model_type`, or a checkpoint that names none, passes.
+    ///
+    /// - Parameter directory: The checkpoint directory the app loaded.
+    /// - Throws: ``ClusterModelError/modelTypeMismatch(expected:found:)``, or the error of the
+    ///   read of `config.json`.
+    func expectModelType(of directory: URL) throws {
+        guard let found = workerCapabilities.modelType,
+            let expected = try CheckpointFields(modelDirectory: directory).modelType
+        else { return }
+        guard found == expected else {
+            throw ClusterModelError.modelTypeMismatch(expected: expected, found: found)
+        }
+    }
 }
 
 extension ModelContext {
