@@ -38,10 +38,28 @@ comments:
     - evidence: f525bcc9 feat(cluster): load a sharded model layer by layer (not pushed)
     - next: review
   timestamp: 2026-11-25T02:14:40.973388+00:00
+- actor: claude-code
+  id: 01m887zftqb01906kfmz2epdg0
+  text: |-
+    ### 2-Mac JACCL verification (cluster 2fc28da8, loadShardedModelContext, long-run gate) — PASS both
+    - **Qwen3.8-27B-mxfp4, 1024 steps:**
+      - mean KL 0.00065, p99 0.0115, max 0.0267
+      - 1 noise flip, 1 tie
+      - load peak 13.40 → 7.29 GiB per rank
+      - 17.7 ms/token on one Mac vs 13.3 on two
+    - **Inkling-2-Mini-oQ4e-mtp, 1024 steps:**
+      - mean 0.00088, p99 0.0130, max 0.0764
+      - 0 noise flips, 5 ties
+      - load peak 14.56 → 7.78 GiB
+      - 16.2 ms/token on one Mac vs 15.2 on two this run; earlier 11.7 vs 15.5
+    - **Notes:**
+      - KL per step is bit-identical to the previous runs (deterministic).
+      - Inkling's single-Mac timing varies 11.7–16.2 ms/token between runs, so the planner's "measurably faster" rule (rh7h506) needs repeated measurements and a margin.
+  timestamp: 2026-11-25T02:18:57.239763+00:00
 depends_on:
 - 01M87HW2SS24TQTQ9HFE8SMZKZ
-position_column: doing
-position_ordinal: '8180'
+position_column: done
+position_ordinal: fffff980
 title: Chunked eval at load; shard after per-layer eval
 ---
 A one-shot `eval` of a very large model (300 GB+) trips the GPU watchdog (mlx-lm#1572), and exo evaluates layer by layer to avoid a FAST_SYNCH deadlock. For clustered loads, the worker must evaluate weights in chunks, layer by layer, and shard each layer right after its weights are evaluated. Each rank then never holds more than one layer's unsharded weights at a time on top of its shard.

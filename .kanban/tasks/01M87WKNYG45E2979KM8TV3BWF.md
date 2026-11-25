@@ -1,6 +1,15 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m887tbxhjc0d5nk99gtt7qky
+  text: |-
+    Drafts written for the user to read and submit; nothing was opened. File: /private/tmp/claude-501/-Users-wballard-github-swissarmyhammer-mlx-swift-lm/3b343604-bb7c-498e-a083-6249d59b3c42/scratchpad/upstream-pr-drafts.md
+    - PR 1: ml-explore/mlx, from fork commit 29075888, [jaccl] LID fallback.
+    - PR 2: ml-explore/mlx, from fork commit 59f01186, [metal] fence kernels at run time. It offers the mlx-swift build-flag alternative.
+    Waiting on the user to review and submit. Once both merge and ship in an mlx-swift release, switch Package.swift back to ml-explore/mlx-swift.
+  timestamp: 2026-11-25T02:16:09.393722+00:00
 position_column: todo
 position_ordinal: '8580'
 title: Draft upstream PRs for the JACCL LID fallback and FAST_SYNCH fence fix

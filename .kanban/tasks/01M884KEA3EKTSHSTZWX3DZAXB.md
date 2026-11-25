@@ -20,8 +20,8 @@ comments:
     - evidence: ad8ac35d feat(shard-check): statistical gate for runs over 64 steps (not pushed). Later commit f525bcc9 (^ffn1stg) adds a load-peak gate to the same script; the long-run gate is unchanged.
     - next: review
   timestamp: 2026-11-25T02:14:40.188303+00:00
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: fffff880
 title: 'ShardCheck comparator: statistical gate for long runs'
 ---
 The 1024-step 2-Mac runs (17p77c9) show no drift, but isolated single-step outliers trip the per-step gate: Inkling KL 0.0764 at one step of 1025; a Qwen argmax flip at a 3-ulp margin with KL 0.017. Keep the strict gate for short runs and add a statistical gate for long ones.
