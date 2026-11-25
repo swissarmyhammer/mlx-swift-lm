@@ -773,7 +773,7 @@ public enum MultiRowQuantizedMatvec {
     /// stock `QuantizedLinear` with no global scale, of affine 4 or 8 bits in
     /// groups of 32, 64 or 128, or of mxfp4, when MLX runs `qmv_fast` or the
     /// generic `qmv` for one row: the outputs fill whole tiles of 8 and the
-    /// input width fills whole blocks of that matvec (``MatvecLayout``).
+    /// input width fills whole blocks of that matvec (`MatvecLayout`).
     ///
     /// - Parameters:
     ///   - x: The input, shape `(..., K)`.

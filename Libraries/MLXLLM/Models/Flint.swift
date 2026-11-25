@@ -1086,7 +1086,7 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider {
 
     /// The prefill step when the caller sets none: the prefill chunk of mlx-vlm
     /// and mlx-lm. A forward of more tokens keeps the GPU busier than the
-    /// generic step of ``PrefillParameters/defaultStepSize``.
+    /// generic step of `PrefillParameters.defaultStepSize`.
     public let defaultPrefillStepSize = 2048
 
     /// Prefills every prompt token but the last into `cache`, and hands the
@@ -1104,7 +1104,7 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider {
     ///   - state: Not read; Flint keeps no state beside its cache.
     ///   - prefill: The step size, the chunking and the progress observer.
     /// - Returns: The tokens the iterator still has to read: the last prompt
-    ///   token, or the whole prompt under ``PrefillParameters/Chunking/unchunked``.
+    ///   token, or the whole prompt under `PrefillParameters.Chunking.unchunked`.
     public func prepare(
         _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
     ) throws -> PrepareResult {
@@ -1131,7 +1131,7 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider {
     static let checkpointPrefix = "language_model."
 
     /// Sanitizes the checkpoint, then fuses the projections of a quantized one
-    /// (see ``FlintProjectionFusion``).
+    /// (see `FlintProjectionFusion`).
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = checkpoint
         checkpoint.weights = try sanitize(

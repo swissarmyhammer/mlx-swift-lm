@@ -32,7 +32,7 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
     /// `Configuration`.
     ///
     /// A `config.json` matches when it decodes and `matches` holds for its configuration. The
-    /// creator is ``drafterCreator(_:create:)``, so that every drafter registered this way reads
+    /// creator is `drafterCreator(_:create:)`, so that every drafter registered this way reads
     /// its configuration the same way.
     ///
     /// - Parameters:
@@ -60,7 +60,7 @@ extension ModelTypeRegistry where T == any MTPDrafterModel {
     /// Registers the only drafter of each of `modelTypes`, read from a `config.json` that decodes
     /// as `Configuration`, in place of any creator registered for those model types before.
     ///
-    /// The creator is ``drafterCreator(_:create:)``. Registering again replaces the creator, so a
+    /// The creator is `drafterCreator(_:create:)`. Registering again replaces the creator, so a
     /// registration that runs more than once leaves one creator.
     ///
     /// - Parameters:
@@ -167,11 +167,11 @@ public final class MTPDrafterRegistry: AbstractModelRegistry, @unchecked Sendabl
 /// input processor, no message generator — drafters borrow their target's
 /// tokenizer).
 public final class MTPDrafterModelFactory: GenericModelFactory {
-    /// The context that ``_load(configuration:tokenizerLoader:)`` gives back: the drafter
+    /// The context that `_load(configuration:tokenizerLoader:)` gives back: the drafter
     /// model and its configuration, with no tokenizer.
     public typealias ContextType = MTPDrafterContext
 
-    /// The `Sendable` container that ``_wrap(_:)`` puts a drafter context in.
+    /// The `Sendable` container that `_wrap(_:)` puts a drafter context in.
     public typealias ContainerType = MTPDrafterContainer
 
     /// Loader for text drafters, with the drafter model types of ``MTPDrafterTypeRegistry/shared``

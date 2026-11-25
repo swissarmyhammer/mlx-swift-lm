@@ -126,7 +126,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// caches, availability state, and the prompt cache. Derived from the
     /// configuration so it is the single place identity is defined.
     ///
-    /// A Hub model at a revision other than ``defaultRevision`` gets
+    /// A Hub model at a revision other than `defaultRevision` gets
     /// `"\(id)@\(revision)"`, thus two revisions of one repository hold two
     /// cache entries and load two containers. A Hub model at the default
     /// revision, and a directory-backed model, keep `configuration.name`.
@@ -1279,7 +1279,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// teardown, the protocol offers no way to cancel a prewarm, and a
         /// warmup that outlives its caller only leaves the model cache warm.
         /// The warm-up itself checks for cancellation between its stages (see
-        /// ``MLXLanguageModel/warmUp()``), thus a cancelled task stops early.
+        /// `MLXLanguageModel.warmUp()`), thus a cancelled task stops early.
         ///
         /// - Parameters:
         ///   - model: The live model instance to warm.

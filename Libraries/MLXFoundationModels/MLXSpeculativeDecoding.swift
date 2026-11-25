@@ -49,9 +49,9 @@ public struct MLXSpeculativeDecoding: Sendable {
     public let drafterConfiguration: ModelConfiguration
 
     /// The tokens of each round: up to `blockSize - 1` drafts and the bonus token, or `nil` for
-    /// the drafter's ``MTPDrafterModel/preferredBlockSize``, else
-    /// ``SpeculativeDecodingConfig/defaultMTPBlockSize``. The drafter caps it at its
-    /// ``MTPDrafterModel/maximumBlockSize``.
+    /// the drafter's `MTPDrafterModel.preferredBlockSize`, else
+    /// `SpeculativeDecodingConfig.defaultMTPBlockSize`. The drafter caps it at its
+    /// `MTPDrafterModel.maximumBlockSize`.
     public let blockSize: Int?
 
     /// The drafter top-1 probability below which a chaining drafter (Qwen MTP) stops a round's
@@ -85,9 +85,9 @@ public struct MLXSpeculativeDecoding: Sendable {
     ///     as zero.
     ///   - memoryPolicy: the memory policy that admits the drafter on each call, or `nil`.
     ///   - loadDrafter: loads the drafter container of `drafterConfiguration`.
-    /// - Throws: ``SpeculativeDecodingConfigurationError/invalidMTPBlockSize(_:)`` when
+    /// - Throws: `SpeculativeDecodingConfigurationError.invalidMTPBlockSize(_:)` when
     ///   `blockSize` is smaller than 2, and
-    ///   ``SpeculativeDecodingConfigurationError/invalidMTPMinimumDraftProbability(_:)`` when
+    ///   `SpeculativeDecodingConfigurationError.invalidMTPMinimumDraftProbability(_:)` when
     ///   `minimumDraftProbability` is not from 0 to 1.
     public init(
         drafterConfiguration: ModelConfiguration,

@@ -1724,7 +1724,7 @@ public enum Qwen35Language {
         /// The hidden states of the tokens, with optional final normalization.
         ///
         /// A decode step with the final norm, and a speculative verify of
-        /// ``CompiledVerifyShape/tokenRange`` tokens that keeps its snapshots,
+        /// `CompiledVerifyShape.tokenRange` tokens that keeps its snapshots,
         /// run through a compiled schedule; every other call takes the general
         /// path of the layers.
         ///
@@ -2280,12 +2280,12 @@ public class Qwen35: Module, VLMModel {
     public var vocabularySize: Int { config.vocabSize }
 
     /// The prefill step when the caller sets none:
-    /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize``, the step of the
+    /// `MLXLMCommon.Qwen35PrefillPolicy.defaultStepSize`, the step of the
     /// text models too.
     public var defaultPrefillStepSize: Int { Qwen35PrefillPolicy.defaultStepSize }
 
     /// The largest prefill step, also when the caller sets a step:
-    /// ``MLXLMCommon/Qwen35PrefillPolicy/maximumStepSize(queryHeads:kvHeads:headDimension:)``.
+    /// `MLXLMCommon.Qwen35PrefillPolicy.maximumStepSize(queryHeads:kvHeads:headDimension:)`.
     public var maximumPrefillStepSize: Int? {
         let text = config.textConfiguration
         return Qwen35PrefillPolicy.maximumStepSize(

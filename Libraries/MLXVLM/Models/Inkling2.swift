@@ -375,8 +375,8 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     /// The logits of every position and, when `state` asks for MTP drafter state, the drafter
-    /// taps of every position in ``MLXLMCommon/mtpLastHiddenStatesKey``: the hidden states at
-    /// the taps of ``MLXLMCommon/mtpTargetLayerIdsKey``, or else at the taps of the checkpoint's
+    /// taps of every position in `MLXLMCommon.mtpLastHiddenStatesKey`: the hidden states at
+    /// the taps of `MLXLMCommon.mtpTargetLayerIdsKey`, or else at the taps of the checkpoint's
     /// own drafter, concatenated in that order.
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
@@ -440,7 +440,7 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         }
     }
 
-    /// Maps an oMLX checkpoint onto the Hugging Face layout (``Inkling2OMLXLayout``), strips the
+    /// Maps an oMLX checkpoint onto the Hugging Face layout (`Inkling2OMLXLayout`), strips the
     /// `model.` scope and sets each expert layer to its checkpoint's quantization.
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = checkpoint
@@ -481,7 +481,7 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
 }
 
 extension Inkling2: SpeculativeCacheRewindModel {
-    /// A verify pass keeps the convolution windows of up to ``speculativeVerifyPositions`` tokens
+    /// A verify pass keeps the convolution windows of up to `speculativeVerifyPositions` tokens
     /// and rewinds every token but its first, the bonus token.
     public var maximumNativeTargetCacheRewind: Int { Self.speculativeVerifyPositions - 1 }
 }

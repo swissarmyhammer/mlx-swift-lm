@@ -11,7 +11,7 @@ public enum LFM2DSparkRegistration {
     static let architecture = "Lfm2DSparkDraftModel"
 
     /// Registers the DSpark drafter for the `qwen3` model type of the shared drafter registry,
-    /// for a `config.json` whose `architectures` name ``architecture``.
+    /// for a `config.json` whose `architectures` name `architecture`.
     public static func register() async {
         await MTPDrafterTypeRegistry.shared.registerDrafter(
             modelTypes: ["qwen3"], configuration: LFM2DSparkConfiguration.self,

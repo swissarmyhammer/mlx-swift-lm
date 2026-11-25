@@ -407,8 +407,8 @@ private final class Inkling2DraftFold: Sendable {
 /// the looped stack. Its state holds, for each draft layer, the context keys and values of the
 /// newest `sliding_window_size - 1` positions in a rotating ring, and one ring more for the
 /// Markov head's mix of the newest position. Each entry of the state is one target position, so
-/// the state rewinds and resumes as ``ResumableMTPDrafterModel`` describes. Each proposal can
-/// take a logit processor, as ``StatefulMTPDistributionDrafterModel`` describes, so guided
+/// the state rewinds and resumes as `ResumableMTPDrafterModel` describes. Each proposal can
+/// take a logit processor, as `StatefulMTPDistributionDrafterModel` describes, so guided
 /// generation drafts under its grammar mask.
 ///
 /// The token embeddings and the vocabulary projection are the target's.

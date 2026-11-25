@@ -1269,11 +1269,11 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     /// The prefill step when the caller sets none:
-    /// ``MLXLMCommon/Qwen35PrefillPolicy/defaultStepSize``.
+    /// `MLXLMCommon.Qwen35PrefillPolicy.defaultStepSize`.
     public var defaultPrefillStepSize: Int { Qwen35PrefillPolicy.defaultStepSize }
 
     /// The largest prefill step, also when the caller sets a step:
-    /// ``MLXLMCommon/Qwen35PrefillPolicy/maximumStepSize(queryHeads:kvHeads:headDimension:)``.
+    /// `MLXLMCommon.Qwen35PrefillPolicy.maximumStepSize(queryHeads:kvHeads:headDimension:)`.
     public var maximumPrefillStepSize: Int? {
         Qwen35PrefillPolicy.maximumStepSize(
             queryHeads: configuration.attentionHeads, kvHeads: configuration.kvHeads,

@@ -109,7 +109,7 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         }
     }
 
-    /// The live keys and values, the first ``offset`` rows of each buffer.
+    /// The live keys and values, the first `offset` rows of each buffer.
     public override func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
         guard let keys, let values else { return nil }
         let count = Swift.min(offset, keys.dim(HeadRowsAxis.row))
@@ -236,7 +236,7 @@ public class ChunkedKVCache: KVCacheSimple {
         return (self.keys![.ellipsis, ..<end, 0...], self.values![.ellipsis, ..<end, 0...])
     }
 
-    /// The live keys and values, the rows from ``startPosition`` to ``offset``.
+    /// The live keys and values, the rows from `startPosition` to `offset`.
     public override func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
         guard let keys, let values else { return nil }
         let count = Swift.min(offset - startPosition, keys.dim(HeadRowsAxis.row))
