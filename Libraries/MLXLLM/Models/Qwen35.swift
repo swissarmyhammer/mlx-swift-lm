@@ -1498,15 +1498,16 @@ extension Qwen35TextModel: TensorParallelShardable {
     /// and the LM head stay whole. The projections fuse again over the shards, and every
     /// compiled trace drops.
     ///
-    /// - Parameter group: The group to split across.
-    public func shard(group: MLXDistributed.Group) throws {
+    /// - Parameters:
+    ///   - group: The group to split across.
+    ///   - hooks: The calls around the split of each decoder layer.
+    public func shardLayers(group: MLXDistributed.Group, hooks: TensorParallelLayerHooks) throws {
         let plan = try Qwen35TensorParallelPlan(
             configuration: configuration, groupSize: try group.size)
         guard plan.groupSize > 1 else { return }
-        let shards = try model.layers.map { try $0.makeShards(plan, group: group) }
-        for (layer, layerShards) in zip(model.layers, shards) {
-            try layer.shard(plan, with: layerShards, group: group)
-        }
+        try TensorParallel.shardLayers(
+            model.layers, hooks: hooks, makeShards: { try $0.makeShards(plan, group: group) },
+            shard: { try $0.shard(plan, with: $1, group: group) })
         kvHeads = kvHeads.map { _ in plan.kvHeads }
         try prepare()
         invalidateCompiledTraces()
@@ -1617,11 +1618,13 @@ extension Qwen35Model: SpeculativeCacheRewindModel {
 }
 
 extension Qwen35Model: TensorParallelShardable {
-    /// Splits the text model across `group`; see ``Qwen35TextModel/shard(group:)``.
+    /// Splits the text model across `group`; see ``Qwen35TextModel/shardLayers(group:hooks:)``.
     ///
-    /// - Parameter group: The group to split across.
-    public func shard(group: MLXDistributed.Group) throws {
-        try languageModel.shard(group: group)
+    /// - Parameters:
+    ///   - group: The group to split across.
+    ///   - hooks: The calls around the split of each decoder layer.
+    public func shardLayers(group: MLXDistributed.Group, hooks: TensorParallelLayerHooks) throws {
+        try languageModel.shardLayers(group: group, hooks: hooks)
         kvHeads = languageModel.kvHeads
     }
 }

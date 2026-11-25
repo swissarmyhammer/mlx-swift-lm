@@ -21,6 +21,9 @@ In a long run an argmax mismatch fails only when it is clear of the tie rule and
 exceeds 0.02. Every other argmax disagreement, a tie included, is a noise flip, and at most
 0.5% of steps may be noise flips. Per-window max and mean KL are printed so drift is visible.
 
+The load of the sharded run must also peak at most 75% of the reference's load peak: each rank
+loads its share layer by layer, so it never holds the whole model.
+
 With --tokens-only, the two reports of a generation are compared, and the check passes when
 their tokens are equal.
 
@@ -59,6 +62,8 @@ LONG_ALLOWED_FRACTION = 0.005
 LONG_MISMATCH_KL = 0.02
 # The percentile of the p99 limit.
 P99 = 99
+# The largest load peak of a sharded rank, as a fraction of the whole model's load peak.
+LOAD_PEAK_FRACTION = 0.75
 # The last step of each printed window; past the last one, windows keep doubling.
 WINDOW_ENDS = (32, 128, 256, 512, 1024)
 
@@ -317,9 +322,27 @@ def main(reference_path: Path, sharded_path: Path, max_kl: float) -> int:
     for name, report in (("reference", reference_report), ("sharded", sharded_report)):
         print_timing(name, report)
 
-    passed = tokens_ok and run_passes(steps, max_kl)
+    peak_ok = peak_pass(reference_report, sharded_report)
+    passed = tokens_ok and peak_ok and run_passes(steps, max_kl)
     print("PASS" if passed else "FAIL")
     return 0 if passed else 1
+
+
+def load_peak_passes(reference_report: dict, sharded_report: dict) -> bool:
+    """Whether the sharded load peaked well below the load of the whole model."""
+    limit = LOAD_PEAK_FRACTION * reference_report["loadPeakBytes"]
+    return sharded_report["loadPeakBytes"] <= limit
+
+
+def peak_pass(reference_report: dict, sharded_report: dict) -> bool:
+    """Print the load peaks, and whether the sharded one is within its limit."""
+    gib = float(1 << 30)
+    print(
+        f"load peak: reference {reference_report['loadPeakBytes'] / gib:.2f} GiB, "
+        f"sharded rank 0 {sharded_report['loadPeakBytes'] / gib:.2f} GiB "
+        f"(limit {LOAD_PEAK_FRACTION:.0%} of the reference)"
+    )
+    return load_peak_passes(reference_report, sharded_report)
 
 
 def print_timing(name: str, report: dict) -> None:
@@ -337,7 +360,8 @@ def compare_tokens(reference_path: Path, sharded_path: Path) -> int:
     print_tokens(reference_report, sharded_report)
     for name, report in (("reference", reference_report), ("sharded", sharded_report)):
         print_timing(name, report)
-    passed = reference_report["tokens"] == sharded_report["tokens"]
+    peak_ok = peak_pass(reference_report, sharded_report)
+    passed = peak_ok and reference_report["tokens"] == sharded_report["tokens"]
     print("PASS" if passed else "FAIL")
     return 0 if passed else 1
 

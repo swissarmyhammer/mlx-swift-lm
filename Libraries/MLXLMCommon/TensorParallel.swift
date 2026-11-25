@@ -7,10 +7,31 @@ import MLXNN
 /// A model that can split its layers across the processes of a distributed group.
 ///
 /// This is the counterpart of `model.shard(group)` in Python mlx-lm. Each process loads the
-/// whole model, then calls ``shard(group:)`` with the same group. Afterwards each process holds
-/// its share of every sharded layer, and the layers sum their partial results across the group.
+/// model, then calls ``shard(group:)`` with the same group. Afterwards each process holds its
+/// share of every sharded layer, and the layers sum their partial results across the group.
 /// Every process then computes the same logits.
+///
+/// A load that keeps its weights lazy splits layer by layer instead, through
+/// ``shardLayers(group:hooks:)``, so no process holds more than one layer's full weights; see
+/// ``loadShardedModelContext(from:using:group:willShardLayer:)``.
 public protocol TensorParallelShardable {
+
+    /// Replaces the weights of this process with its share of them, one layer at a time, and
+    /// calls `hooks` around the split of each layer.
+    ///
+    /// Every layer's shares are checked before any layer changes, so a model that cannot split
+    /// evenly across the group throws before it changes anything, and before any hook runs. A
+    /// group of one process leaves the model unchanged and calls no hook.
+    ///
+    /// - Parameters:
+    ///   - group: The group to split across. Every process passes the same group.
+    ///   - hooks: The calls around the split of each layer.
+    /// - Throws: ``TensorParallelShardingError`` when the model cannot split across the group,
+    ///   `ShardingError` of MLXNN when a quantized projection cannot, or the error of a hook.
+    func shardLayers(group: MLXDistributed.Group, hooks: TensorParallelLayerHooks) throws
+}
+
+extension TensorParallelShardable {
 
     /// Replaces the weights of this process with its share of them.
     ///
@@ -20,7 +41,39 @@ public protocol TensorParallelShardable {
     /// - Parameter group: The group to split across. Every process passes the same group.
     /// - Throws: ``TensorParallelShardingError`` when the model cannot split across the group,
     ///   or `ShardingError` of MLXNN when a quantized projection cannot.
-    func shard(group: MLXDistributed.Group) throws
+    public func shard(group: MLXDistributed.Group) throws {
+        try shardLayers(group: group, hooks: .none)
+    }
+}
+
+/// The calls around the split of each layer in ``TensorParallelShardable/shardLayers(group:hooks:)``.
+///
+/// Each call takes the index of the layer and the layer module, whose parameters are the full
+/// weights in `willShard` and the shares of this process in `didShard`. A sharded load evaluates
+/// the layer in each, so the full weights of one layer at most stand beside the shards.
+public struct TensorParallelLayerHooks {
+
+    /// A call on one layer: its index, and its module.
+    public typealias Hook = (_ index: Int, _ layer: Module) throws -> Void
+
+    /// Runs before the layer splits.
+    public let willShard: Hook
+
+    /// Runs after the layer split.
+    public let didShard: Hook
+
+    /// - Parameters:
+    ///   - willShard: Runs before each layer splits.
+    ///   - didShard: Runs after each layer split.
+    public init(willShard: @escaping Hook, didShard: @escaping Hook) {
+        self.willShard = willShard
+        self.didShard = didShard
+    }
+
+    /// Hooks that do nothing, for a split of a model already in memory.
+    public static var none: Self {
+        Self(willShard: { _, _ in }, didShard: { _, _ in })
+    }
 }
 
 /// A model cannot split across a distributed group.
@@ -32,8 +85,13 @@ public enum TensorParallelShardingError: Error, Equatable, CustomStringConvertib
     /// Sharding does not handle a part of the model yet.
     case unsupported(feature: String)
 
+    /// The model, of the named type, does not conform to ``TensorParallelShardable``.
+    case notShardable(modelType: String)
+
     public var description: String {
         switch self {
+        case .notShardable(let modelType):
+            "\(modelType) does not conform to TensorParallelShardable"
         case .indivisible(let quantity, let count, let groupSize):
             "\(quantity) \(count) not divisible by \(groupSize)"
         case .unsupported(let feature):
@@ -44,6 +102,29 @@ public enum TensorParallelShardingError: Error, Equatable, CustomStringConvertib
 
 /// Building blocks for ``TensorParallelShardable`` conformances.
 public enum TensorParallel {
+
+    /// Splits `layers` one at a time, after every layer's shards are made.
+    ///
+    /// `makeShards` builds the replacements of a layer without changing it, and throws when the
+    /// layer cannot split, so a model that cannot split throws before any layer changes. Each
+    /// layer then splits through `shard`, between the two calls of `hooks`.
+    ///
+    /// - Parameters:
+    ///   - layers: The layers, in order.
+    ///   - hooks: The calls around the split of each layer.
+    ///   - makeShards: Builds and checks the replacements of one layer.
+    ///   - shard: Splits one layer with its replacements.
+    public static func shardLayers<Layer: Module, Shards>(
+        _ layers: [Layer], hooks: TensorParallelLayerHooks,
+        makeShards: (Layer) throws -> Shards, shard: (Layer, Shards) throws -> Void
+    ) throws {
+        let shards = try layers.map(makeShards)
+        for (index, (layer, layerShards)) in zip(layers, shards).enumerated() {
+            try hooks.willShard(index, layer)
+            try shard(layer, layerShards)
+            try hooks.didShard(index, layer)
+        }
+    }
 
     /// The share of `count` that each process of a group keeps.
     ///

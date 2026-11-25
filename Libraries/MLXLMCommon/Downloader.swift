@@ -141,6 +141,10 @@ public struct ResolvedModelConfiguration: Sendable {
     /// - ``ModelConfiguration/weightFileSelection``
     public var weightFileSelection: WeightFileSelection
 
+    /// When the weights of the load evaluate. A sharded load defers them, to evaluate the
+    /// model layer by layer as it splits.
+    public var weightEvaluation: WeightEvaluation = .atLoad
+
     /// Components to load the model without.
     ///
     /// ## See Also

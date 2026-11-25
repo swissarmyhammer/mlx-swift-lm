@@ -198,6 +198,27 @@ class WindowTests(unittest.TestCase):
         self.assertEqual([(window.first, window.last) for window in windows], [(0, 32), (33, 39)])
 
 
+# The load peaks of ^ffn1stg for Qwen3.5-2B: the whole model, and one of two ranks.
+WHOLE_PEAK = 1_009_000_000
+RANK_PEAK = 633_000_000
+
+
+class LoadPeakTests(unittest.TestCase):
+    """A sharded load holds about its share, so its peak stays well below the whole model's."""
+
+    def test_layer_by_layer_peak_passes(self) -> None:
+        """The 2B rank peak of a layer-by-layer load is 63% of the whole load."""
+        self.assertTrue(
+            compare.load_peak_passes({"loadPeakBytes": WHOLE_PEAK}, {"loadPeakBytes": RANK_PEAK})
+        )
+
+    def test_whole_model_peak_fails(self) -> None:
+        """A rank that held the whole model before it split peaks as high as the reference."""
+        self.assertFalse(
+            compare.load_peak_passes({"loadPeakBytes": WHOLE_PEAK}, {"loadPeakBytes": WHOLE_PEAK})
+        )
+
+
 class ForcedInputTests(unittest.TestCase):
     """A teacher-forced run must have been fed the tokens of this reference."""
 

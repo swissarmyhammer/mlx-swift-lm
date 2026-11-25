@@ -880,6 +880,7 @@ public final class LLMModelFactory: GenericModelFactory {
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection,
+            weightEvaluation: configuration.weightEvaluation,
             excludedComponents: configuration.excludedComponents)
 
         let tokenizer = try await tokenizerTask

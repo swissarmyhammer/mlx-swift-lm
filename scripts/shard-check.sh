@@ -7,6 +7,9 @@
 # With --free-running, the sharded run feeds its own argmax, and its tokens must equal those
 # of the reference.
 #
+# Each rank loads its share layer by layer, and the load peak of rank 0 must stay at most 75%
+# of the unsharded load peak.
+#
 # With --announce, rank 0 generates through a ClusterLanguageModel that announces each op to
 # rank 1 with an all-sum, as a cluster worker does, and the tokens must equal those of a local
 # generation.

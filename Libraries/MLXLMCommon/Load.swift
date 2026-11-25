@@ -225,6 +225,23 @@ func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bo
     return try state.result()
 }
 
+/// The checkpoint of the files in `urls` with every tensor still lazy: each tensor reads its
+/// bytes when it evaluates. Tensors under `excludedNamespaces` are left out. Later files win,
+/// as in ``loadModelCheckpoint(urls:isRead:)``.
+func loadLazyModelCheckpoint(urls: [URL], excludedNamespaces: [String] = []) throws
+    -> ModelCheckpoint
+{
+    let exclusions = CheckpointNameMapping(excludedNamespaces.map { .excludePrefix($0) })
+    let state = ConcurrentLoadState(fileCount: urls.count)
+    for (file, url) in urls.enumerated() {
+        let (all, metadata) = try loadArraysAndMetadata(url: url, stream: .cpu)
+        state.merge(
+            file: file, weights: all.filter { exclusions.mapName($0.key) != nil },
+            metadata: metadata)
+    }
+    return try state.result()
+}
+
 // MARK: - Weight file selection
 
 /// The `model.safetensors.index.json` file, which maps each checkpoint key to
@@ -318,6 +335,21 @@ public enum WeightFileSelection: Sendable, Equatable {
     /// For a context whose forward pass runs elsewhere, such as a ``ClusterLanguageModel``:
     /// the load reads the configuration, the tokenizer and the processor, and no weight file.
     case skipped
+}
+
+/// When the weights of a load evaluate.
+///
+/// ## See Also
+/// - ``ResolvedModelConfiguration/weightEvaluation``
+public enum WeightEvaluation: Sendable, Equatable {
+    /// The load evaluates every weight and prepares the model before it returns.
+    case atLoad
+
+    /// The load installs lazy weights, which read their bytes from the files when they
+    /// evaluate, and neither evaluates nor prepares the model. The caller then evaluates it
+    /// part by part and calls `prepare()`, as
+    /// ``loadShardedModelContext(from:using:group:willShardLayer:)`` does layer by layer.
+    case deferred
 }
 
 /// The safetensors files in `modelDirectory` that hold the model's weights.
@@ -443,7 +475,7 @@ private func topLevelSafetensorURLs(in modelDirectory: URL) -> [URL] {
 }
 
 /// Decides how
-/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:excludedComponents:componentLoading:)``
+/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:weightEvaluation:excludedComponents:componentLoading:)``
 /// quantizes one layer.
 ///
 /// This is the filter that ``applyCheckpoint(_:to:)`` hands to `quantize(model:filter:)`, and it
@@ -519,7 +551,9 @@ package func weightFileBytes(of weightURLs: [URL]) -> Int {
 /// exist, and otherwise by the conventional `model*.safetensors` names. A model can name extra
 /// files it needs by conforming to ``AdditionalWeightFilesProviding``, and a caller can override
 /// the choice with ``ModelConfiguration/weightFileSelection``. With
-/// ``WeightFileSelection/skipped`` the function reads no file and returns at once.
+/// ``WeightFileSelection/skipped`` the function reads no file and returns at once. With
+/// ``WeightEvaluation/deferred`` the weights stay lazy, and the model is neither evaluated nor
+/// prepared.
 ///
 /// The model loads without the `excludedComponents` it supports, see
 /// ``ModelComponentsProviding``. Its on-demand components load the first time an input
@@ -535,6 +569,7 @@ public func loadWeights(
     quantization: BaseConfiguration.Quantization? = nil,
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil,
     weightFileSelection: WeightFileSelection = .automatic,
+    weightEvaluation: WeightEvaluation = .atLoad,
     excludedComponents: Set<ModelComponent> = [],
     componentLoading: ComponentLoading = .onFirstUse
 ) async throws {
@@ -561,6 +596,7 @@ public func loadWeights(
                                 from: weightURLs, into: model.consume(),
                                 quantization: quantization,
                                 perLayerQuantization: perLayerQuantization,
+                                evaluation: weightEvaluation,
                                 excludedComponents: excludedComponents,
                                 componentLoading: componentLoading)
                         }
@@ -571,16 +607,17 @@ public func loadWeights(
 }
 
 /// The blocking part of
-/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:excludedComponents:componentLoading:)``.
+/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:weightEvaluation:excludedComponents:componentLoading:)``.
 ///
 /// Prepares the components of the model, reads the weight files into a checkpoint, lets the
 /// model prepare it, applies the optional quantization, installs the parameters, and then
-/// prepares the derived inference state. Runs on the global queue that `loadWeights` dispatches
-/// to, never on a cooperative thread.
+/// prepares the derived inference state, unless `evaluation` defers both. Runs on the global
+/// queue that `loadWeights` dispatches to, never on a cooperative thread.
 private func installWeights(
     from weightURLs: [URL], into model: BaseLanguageModel,
     quantization: BaseConfiguration.Quantization?,
     perLayerQuantization: BaseConfiguration.PerLayerQuantization?,
+    evaluation: WeightEvaluation,
     excludedComponents: Set<ModelComponent>,
     componentLoading: ComponentLoading
 ) throws {
@@ -596,13 +633,22 @@ private func installWeights(
     // replaces are freed by then. The prepared tensors evaluate in groups first, so the
     // results of preparation never all stand beside the tensors they replace.
     do {
-        var checkpoint = try loadModelCheckpoint(
-            urls: weightURLs, excludedNamespaces: excludedNamespaces)
+        var checkpoint =
+            switch evaluation {
+            case .atLoad:
+                try loadModelCheckpoint(urls: weightURLs, excludedNamespaces: excludedNamespaces)
+            case .deferred:
+                try loadLazyModelCheckpoint(
+                    urls: weightURLs, excludedNamespaces: excludedNamespaces)
+            }
         checkpoint.perLayerQuantization = perLayerQuantization
         checkpoint = try model.prepareCheckpoint(checkpoint)
-        checkpoint.materializeWeights()
+        if evaluation == .atLoad {
+            checkpoint.materializeWeights()
+        }
         try applyCheckpoint(checkpoint, to: model)
     }
+    guard evaluation == .atLoad else { return }
 
     // Build derived inference-only state and realize the model while the loader
     // still has exclusive access. Forward passes must remain read-only.

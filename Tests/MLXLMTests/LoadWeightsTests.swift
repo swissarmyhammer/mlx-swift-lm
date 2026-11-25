@@ -565,6 +565,32 @@ final class LoadWeightsTests: XCTestCase {
         XCTAssertEqual(model.projectorValuesAtPreparation, [1, 2, 3, 4])
     }
 
+    func testDeferredLoadLeavesThePreparationToTheCaller() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeSidecarCheckpoint(in: directory)
+
+        // A sharded load prepares the model after its layers split, so the load must not.
+        let model = PreparedSidecarDeclaringModel()
+        try await loadWeights(modelDirectory: directory, model: model, weightEvaluation: .deferred)
+
+        XCTAssertEqual(model.preparationCount, 0)
+    }
+
+    func testDeferredLoadInstallsTheCheckpointValues() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try writeSidecarCheckpoint(in: directory)
+
+        // The lazy weights read the checkpoint when they evaluate.
+        let model = SidecarDeclaringModel()
+        try await loadWeights(modelDirectory: directory, model: model, weightEvaluation: .deferred)
+
+        XCTAssertEqual(model.projector.weight.asArray(Float.self), [1, 2, 3, 4])
+    }
+
     func testLoadWeightsFailsWhenTheSidecarIsNotDeclared() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

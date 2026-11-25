@@ -10,8 +10,9 @@ import MLXVLM
 /// Runs a prefill and greedy decode steps, and writes the last-position logits of each step.
 ///
 /// Launched with `MLX_RANK` (plus `MLX_HOSTFILE` for ring, or `MLX_IBV_DEVICES` and
-/// `MLX_JACCL_COORDINATOR` for JACCL), it joins that group and shards the model first;
-/// otherwise it runs the whole model. `scripts/shard-check.sh` compares the two.
+/// `MLX_JACCL_COORDINATOR` for JACCL), it joins that group and loads its share of the model
+/// layer by layer (``loadShardedModelContext(from:using:group:willShardLayer:)``); otherwise it
+/// runs the whole model. Each process prints the peak memory of its load. `scripts/shard-check.sh` compares the two.
 ///
 /// With `--teacher-forcing <reference.json>` it feeds the greedy tokens of that reference run
 /// as the next inputs instead of its own argmax, so one flipped near tie cannot change every
@@ -46,25 +47,25 @@ struct ShardCheck {
         let clock = ContinuousClock()
 
         let loadStart = clock.now
-        let context = try await loadContext(arguments.modelDirectory)
-        let loadTime = clock.now - loadStart
-
-        let shardStart = clock.now
-        if let group {
-            guard let model = context.model as? TensorParallelShardable else {
-                throw ShardCheckError.notShardable(String(describing: type(of: context.model)))
+        let context =
+            if let group {
+                try await loadShardedModelContext(
+                    from: arguments.modelDirectory, using: PseudoWordTokenizerLoader(),
+                    group: group)
+            } else {
+                try await loadContext(arguments.modelDirectory)
             }
-            try model.shard(group: group)
-        }
-        let shardTime = clock.now - shardStart
-        let timing = (load: loadTime.seconds, shard: shardTime.seconds)
+        // The load is the first allocation of the process, so the peak so far is its peak.
+        let load = LoadMeasure(
+            seconds: (clock.now - loadStart).seconds, peakBytes: Memory.peakMemory)
+        print("rank \(rank): load peak \(load.peakBytes.formattedGiB)")
 
         let reference: ReferenceRun?
         switch arguments.mode {
         case .announce:
             let prompt = try resolvePrompt(arguments, reference: nil)
             try runGeneration(
-                arguments, prompt: prompt, model: context.model, group: group, timing: timing)
+                arguments, prompt: prompt, model: context.model, group: group, load: load)
             return
         case .freeRunning:
             reference = nil
@@ -81,7 +82,8 @@ struct ShardCheck {
         try NumpyFile.write(run.logits, to: arguments.output)
         let report = Report(
             groupSize: try group?.size ?? 1, prompt: prompt, tokens: run.tokens,
-            forcedTokens: forcedTokens, loadSeconds: timing.load, shardSeconds: timing.shard,
+            forcedTokens: forcedTokens, loadSeconds: load.seconds,
+            loadPeakBytes: load.peakBytes,
             prefillSeconds: run.prefillTime.seconds,
             decodeSecondsPerToken: run.decodeTime.seconds / Double(arguments.decodeSteps))
         try report.write(besides: arguments.output)
@@ -106,7 +108,7 @@ struct ShardCheck {
     /// Rank 0, or the single process, writes the report.
     private static func runGeneration(
         _ arguments: Arguments, prompt: [Int], model: any LanguageModel,
-        group: MLXDistributed.Group?, timing: (load: Double, shard: Double)
+        group: MLXDistributed.Group?, load: LoadMeasure
     ) throws {
         let rankCount = try group?.size ?? 1
         let run: GenerationRun
@@ -133,7 +135,7 @@ struct ShardCheck {
         }
         let report = Report(
             groupSize: rankCount, prompt: prompt, tokens: run.tokens, forcedTokens: nil,
-            loadSeconds: timing.load, shardSeconds: timing.shard,
+            loadSeconds: load.seconds, loadPeakBytes: load.peakBytes,
             prefillSeconds: run.prefillTime.seconds,
             decodeSecondsPerToken: run.decodeTime.seconds / Double(arguments.decodeSteps))
         try report.write(besides: arguments.output)
@@ -162,6 +164,21 @@ struct ShardCheck {
         let backend: MLXDistributed.Backend =
             environment["MLX_IBV_DEVICES"] != nil ? .jaccl : .ring
         return try MLXDistributed.initialize(backend: backend, strict: true)
+    }
+}
+
+/// The time and the peak memory of a load.
+struct LoadMeasure {
+    /// The time of the load, in seconds.
+    let seconds: Double
+    /// The peak memory of the load, in bytes.
+    let peakBytes: Int
+}
+
+extension Int {
+    /// This byte count in GiB with two decimals, for the console.
+    var formattedGiB: String {
+        String(format: "%.2f GiB", Double(self) / Double(1 << 30))
     }
 }
 
@@ -247,8 +264,6 @@ extension Arguments.Mode {
 enum ShardCheckError: Error, CustomStringConvertible {
     /// The command line is wrong.
     case usage
-    /// The model of this type cannot shard.
-    case notShardable(String)
     /// No default prompt is known for the tokenizer of this model type.
     case noDefaultPrompt(modelType: String)
     /// The prompt of the command line is not the prompt of the reference run.
@@ -261,8 +276,6 @@ enum ShardCheckError: Error, CustomStringConvertible {
         case .usage:
             "usage: ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8] "
                 + "[--teacher-forcing reference.json | --announce]"
-        case .notShardable(let type):
-            "\(type) does not conform to TensorParallelShardable"
         case .noDefaultPrompt(let modelType):
             "no default prompt for model type \(modelType); pass --tokens"
         case .promptDiffersFromReference:
@@ -337,10 +350,10 @@ struct Report: Encodable {
     /// The input fed after each step but the last when teacher-forced; absent when the run fed
     /// its own argmax.
     let forcedTokens: [Int]?
-    /// The time to load the model.
+    /// The time to load the model, and in a group to split it.
     let loadSeconds: Double
-    /// The time to shard the model; zero when unsharded.
-    let shardSeconds: Double
+    /// The peak memory of the load, in bytes.
+    let loadPeakBytes: Int
     /// The time of the prefill step.
     let prefillSeconds: Double
     /// The mean time of one decode step.
@@ -350,8 +363,9 @@ struct Report: Encodable {
     var summary: String {
         String(
             format:
-                "group %d: load %.2fs, shard %.2fs, prefill %.3fs, decode %.1f ms/token, tokens %@",
-            groupSize, loadSeconds, shardSeconds, prefillSeconds, decodeSecondsPerToken * 1000,
+                "group %d: load %.2fs (peak %@), prefill %.3fs, decode %.1f ms/token, tokens %@",
+            groupSize, loadSeconds, loadPeakBytes.formattedGiB, prefillSeconds,
+            decodeSecondsPerToken * 1000,
             tokens.map(String.init).joined(separator: ","))
     }
 
