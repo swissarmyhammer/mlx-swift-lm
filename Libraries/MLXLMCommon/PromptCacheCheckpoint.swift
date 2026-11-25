@@ -19,8 +19,9 @@ import MLX
 /// A copy shares the arrays of the live cache. MLX does not write into an array
 /// that another array still holds, thus a copy keeps the state of the
 /// checkpoint while the live caches move on. A rotating cache copy keeps only
-/// its configured history (``RotatingKVCache/copyForCheckpoint()``), so it does
-/// not pin the rows a multi-token prefill adds past the window.
+/// its configured history (``RotatingKVCache/copyForCheckpoint()``), also inside
+/// a ``CacheList``, so it does not pin the rows a multi-token prefill adds past
+/// the window.
 ///
 /// `ChatSession` and the executor of `MLXFoundationModels` both keep
 /// checkpoints. Each one takes a checkpoint at the end of the last message of a
@@ -163,15 +164,24 @@ package struct PromptCacheCheckpoint {
         caches.contains { !$0.isTrimmable(after: positions) }
     }
 
-    /// Whether `cache` cannot rewind now or can stop being able to: a fresh
-    /// rotating cache rewinds until its window wraps, and a variance-normalized
-    /// cache rewinds exactly only inside its raw tail. A remote cache answers
-    /// for the layers it holds on its worker.
+    /// Whether `cache` cannot rewind now or can stop being able to: a cache with
+    /// a window (``KVCache/maxSize``, as a rotating cache or a composite over
+    /// one reports it) rewinds until its window wraps, a recurrent or
+    /// convolution cache (an ``ArraysCache``) rewinds at most inside its
+    /// rollback, and a variance-normalized cache rewinds exactly only inside its
+    /// raw tail. A ``CacheList`` can lose its rewind when one of its children
+    /// can. A remote cache answers for the layers it holds on its worker.
+    ///
+    /// It reads no ``KVCache/isTrimmable(after:)``, which a cache may answer
+    /// with a side effect for the width of a pass it is asked about.
     private static func canLoseRewind(_ cache: KVCache) -> Bool {
         if let remote = cache as? RemoteKVCache {
             return remote.status.canLoseRewind
         }
-        return !cache.isTrimmable || cache is RotatingKVCache
+        if let list = cache as? CacheList {
+            return list.children.contains(where: canLoseRewind)
+        }
+        return !cache.isTrimmable || cache.maxSize != nil || cache is ArraysCache
             || cache is VarianceNormalizedKVCache
     }
 
@@ -180,12 +190,23 @@ package struct PromptCacheCheckpoint {
         switch cache {
         case let tiles as VarianceNormalizedKVCache:
             return .tile(tiles.checkpoint())
-        case let rotating as RotatingKVCache:
-            return .copy(rotating.copyForCheckpoint())
         case _ where canLoseRewind(cache):
-            return .copy(cache.copy())
+            return .copy(checkpointCopy(of: cache))
         default:
             return .trim
+        }
+    }
+
+    /// A copy of `cache` for a checkpoint. A rotating cache keeps only its
+    /// configured history, also inside a ``CacheList``.
+    private static func checkpointCopy(of cache: KVCache) -> KVCache {
+        switch cache {
+        case let rotating as RotatingKVCache:
+            rotating.copyForCheckpoint()
+        case let list as CacheList:
+            CacheList(caches: list.children.map(checkpointCopy))
+        default:
+            cache.copy()
         }
     }
 
