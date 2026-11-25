@@ -1,12 +1,16 @@
 """Compare the logits and greedy tokens of a sharded ShardCheck run with a reference run.
 
 Usage: shard_check_compare.py <reference.npy> <sharded.npy> <max-kl>
+       shard_check_compare.py --tokens-only <reference.json> <sharded.json>
 
 Each .npy holds the last-position logits of each step, and the .json beside it holds the
 greedy tokens. The check passes when every greedy token and every argmax match, and the
 KL divergence of each step's distribution is at most max-kl. Raw logit differences are
 printed but not gated: over a large vocabulary they peak on tokens with negligible
 probability.
+
+With --tokens-only, the two reports of a generation are compared, and the check passes when
+their tokens are equal.
 """
 
 import json
@@ -59,15 +63,35 @@ def main(reference_path: Path, sharded_path: Path, max_kl: float) -> int:
     print(f"max KL {kl.max():.5f} at step {int(kl.argmax())} (limit {max_kl})")
     print(f"argmax agreement {int(argmax_agree.sum())}/{len(argmax_agree)}")
     for name, report in (("reference", reference_report), ("sharded", sharded_report)):
-        print(
-            f"{name}: group {report['groupSize']}, prefill {report['prefillSeconds']:.3f}s, "
-            f"decode {report['decodeSecondsPerToken'] * 1000:.1f} ms/token"
-        )
+        print_timing(name, report)
 
     passed = tokens_agree and bool(argmax_agree.all()) and kl.max() <= max_kl
     print("PASS" if passed else "FAIL")
     return 0 if passed else 1
 
 
+def print_timing(name: str, report: dict) -> None:
+    """Print the group size and the times of one run."""
+    print(
+        f"{name}: group {report['groupSize']}, prefill {report['prefillSeconds']:.3f}s, "
+        f"decode {report['decodeSecondsPerToken'] * 1000:.1f} ms/token"
+    )
+
+
+def compare_tokens(reference_path: Path, sharded_path: Path) -> int:
+    """Print the tokens of two generation reports and return the exit status."""
+    reference_report = json.loads(reference_path.read_text())
+    sharded_report = json.loads(sharded_path.read_text())
+    print(f"reference tokens: {reference_report['tokens']}")
+    print(f"sharded tokens:   {sharded_report['tokens']}")
+    for name, report in (("reference", reference_report), ("sharded", sharded_report)):
+        print_timing(name, report)
+    passed = reference_report["tokens"] == sharded_report["tokens"]
+    print("PASS" if passed else "FAIL")
+    return 0 if passed else 1
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "--tokens-only":
+        sys.exit(compare_tokens(Path(sys.argv[2]), Path(sys.argv[3])))
     sys.exit(main(Path(sys.argv[1]), Path(sys.argv[2]), float(sys.argv[3])))

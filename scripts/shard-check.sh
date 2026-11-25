@@ -2,14 +2,24 @@
 # Checks tensor-parallel sharding on one Mac: runs ShardCheck as two ring processes on
 # localhost, then unsharded, and compares the greedy tokens and logits.
 #
-# Usage: scripts/shard-check.sh <model-directory> [max-kl]
+# With --announce, rank 0 generates through a ClusterLanguageModel that announces each op to
+# rank 1 with an all-sum, as a cluster worker does, and the tokens must equal those of a local
+# generation.
+#
+# Usage: scripts/shard-check.sh [--announce] <model-directory> [max-kl]
 # Env: SHARD_CHECK_WORK (output directory), SHARD_CHECK_PORT (first ring port),
 #      SHARD_CHECK_TOKENS (comma-separated prompt ids), SHARD_CHECK_SKIP_BUILD=1.
 
 set -euo pipefail
 
+MODE_ARGS=()
+if [[ "${1:-}" == "--announce" ]]; then
+    MODE_ARGS=(--announce)
+    shift
+fi
+
 if [[ $# -lt 1 ]]; then
-    echo "usage: $0 <model-directory> [max-kl]" >&2
+    echo "usage: $0 [--announce] <model-directory> [max-kl]" >&2
     exit 2
 fi
 
@@ -30,9 +40,9 @@ if [[ "${SHARD_CHECK_SKIP_BUILD:-0}" != "1" ]]; then
         -derivedDataPath "$DERIVED" -quiet
 fi
 
-TOKEN_ARGS=()
+TOKEN_ARGS=("${MODE_ARGS[@]+"${MODE_ARGS[@]}"}")
 if [[ -n "${SHARD_CHECK_TOKENS:-}" ]]; then
-    TOKEN_ARGS=(--tokens "$SHARD_CHECK_TOKENS")
+    TOKEN_ARGS+=(--tokens "$SHARD_CHECK_TOKENS")
 fi
 
 cat > "$WORK/hostfile.json" <<EOF
@@ -53,6 +63,9 @@ STATUS=0
 wait "$RANK0" || STATUS=$?
 wait "$RANK1" || STATUS=$?
 cat "$WORK/rank0.log"
+if [[ ${#MODE_ARGS[@]} -gt 0 ]]; then
+    cat "$WORK/rank1.log"
+fi
 if [[ $STATUS -ne 0 ]]; then
     echo "a ring process failed ($STATUS); rank 1 log:" >&2
     cat "$WORK/rank1.log" >&2
@@ -63,5 +76,10 @@ echo "== unsharded reference"
 "$BINARY" "$MODEL" "$WORK/reference.npy" "${TOKEN_ARGS[@]+"${TOKEN_ARGS[@]}"}"
 
 echo "== compare"
-python3 -I "$ROOT/scripts/shard_check_compare.py" \
-    "$WORK/reference.npy" "$WORK/sharded.npy" "$MAX_KL"
+if [[ ${#MODE_ARGS[@]} -gt 0 ]]; then
+    python3 -I "$ROOT/scripts/shard_check_compare.py" --tokens-only \
+        "$WORK/reference.json" "$WORK/sharded.json"
+else
+    python3 -I "$ROOT/scripts/shard_check_compare.py" \
+        "$WORK/reference.npy" "$WORK/sharded.npy" "$MAX_KL"
+fi

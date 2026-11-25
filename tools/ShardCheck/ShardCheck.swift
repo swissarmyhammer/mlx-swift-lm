@@ -13,7 +13,13 @@ import MLXVLM
 /// `MLX_JACCL_COORDINATOR` for JACCL), it joins that group and shards the model first;
 /// otherwise it runs the whole model. `scripts/shard-check.sh` compares the two.
 ///
-/// Usage: `ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8]`
+/// With `--announce` it runs a greedy generation instead, and writes only the report. In a
+/// group, rank 0 drives a ``ClusterLanguageModel`` whose transport announces each op to every
+/// rank and runs it on its ``RemoteModelExecutor``; every other rank applies the announced ops
+/// to its own shard, as a cluster worker does.
+///
+/// Usage: `ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8]
+/// [--announce]`
 @main
 struct ShardCheck {
 
@@ -45,7 +51,13 @@ struct ShardCheck {
             try model.shard(group: group)
         }
         let shardTime = clock.now - shardStart
+        let timing = (load: loadTime.seconds, shard: shardTime.seconds)
 
+        if arguments.announce {
+            try runGeneration(
+                arguments, model: context.model, group: group, timing: timing)
+            return
+        }
         let run = try GreedyRun(
             model: context.model, prompt: arguments.tokens, decodeSteps: arguments.decodeSteps)
         guard rank == 0 else { return }
@@ -53,7 +65,45 @@ struct ShardCheck {
         try NumpyFile.write(run.logits, to: arguments.output)
         let report = Report(
             groupSize: try group?.size ?? 1, prompt: arguments.tokens, tokens: run.tokens,
-            loadSeconds: loadTime.seconds, shardSeconds: shardTime.seconds,
+            loadSeconds: timing.load, shardSeconds: timing.shard,
+            prefillSeconds: run.prefillTime.seconds,
+            decodeSecondsPerToken: run.decodeTime.seconds / Double(arguments.decodeSteps))
+        try report.write(besides: arguments.output)
+        print(report.summary)
+    }
+
+    /// Runs a greedy generation: through the announce loop in a group, else on the whole model.
+    /// Rank 0, or the single process, writes the report.
+    private static func runGeneration(
+        _ arguments: Arguments, model: any LanguageModel, group: MLXDistributed.Group?,
+        timing: (load: Double, shard: Double)
+    ) throws {
+        let rankCount = try group?.size ?? 1
+        let run: GenerationRun
+        if let group {
+            let executor = RemoteModelExecutor(
+                model: model,
+                configuration: try .init(
+                    modelDirectory: arguments.modelDirectory, rankCount: rankCount))
+            guard try group.rank == 0 else {
+                let summary = try AnnounceFollower.follow(executor, group: group)
+                print(
+                    "rank \(try group.rank): \(summary.opCount) ops, \(summary.parkCount) parks, "
+                        + "\(summary.failedOpCount) failed")
+                return
+            }
+            let transport = AnnouncingTransport(executor: executor, group: group)
+            run = try GenerationRun(
+                model: ClusterLanguageModel.connect(over: transport), prompt: arguments.tokens,
+                decodeSteps: arguments.decodeSteps)
+            try transport.close()
+        } else {
+            run = try GenerationRun(
+                model: model, prompt: arguments.tokens, decodeSteps: arguments.decodeSteps)
+        }
+        let report = Report(
+            groupSize: rankCount, prompt: arguments.tokens, tokens: run.tokens,
+            loadSeconds: timing.load, shardSeconds: timing.shard,
             prefillSeconds: run.prefillTime.seconds,
             decodeSecondsPerToken: run.decodeTime.seconds / Double(arguments.decodeSteps))
         try report.write(besides: arguments.output)
@@ -102,6 +152,8 @@ struct Arguments {
     let tokens: [Int]
     /// The greedy decode steps after the prefill.
     let decodeSteps: Int
+    /// Whether to run a greedy generation through the announce loop, not the logits check.
+    let announce: Bool
 
     /// Parses the command line, without the program name.
 
@@ -109,6 +161,7 @@ struct Arguments {
         var positional: [String] = []
         var tokens = Self.defaultTokens
         var decodeSteps = Self.defaultDecodeSteps
+        var announce = false
         var remaining = arguments[...]
         while let argument = remaining.popFirst() {
             switch argument {
@@ -119,6 +172,8 @@ struct Arguments {
                     throw ShardCheckError.usage
                 }
                 decodeSteps = value
+            case "--announce":
+                announce = true
             default:
                 positional.append(argument)
             }
@@ -128,6 +183,7 @@ struct Arguments {
         output = URL(fileURLWithPath: positional[1])
         self.tokens = tokens
         self.decodeSteps = decodeSteps
+        self.announce = announce
     }
 
     private static func parseTokens(_ value: String?) throws -> [Int] {
@@ -147,7 +203,8 @@ enum ShardCheckError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .usage:
-            "usage: ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8]"
+            "usage: ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8] "
+                + "[--announce]"
         case .notShardable(let type):
             "\(type) does not conform to TensorParallelShardable"
         }
