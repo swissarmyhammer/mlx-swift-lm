@@ -319,13 +319,10 @@ def main(reference_path: Path, sharded_path: Path, max_kl: float) -> int:
     agreeing = sum(step.verdict is Verdict.AGREE for step in steps)
     ties = sum(step.verdict is Verdict.TIE for step in steps)
     print(f"argmax agreement {agreeing}/{len(steps)}, ties skipped {ties}")
-    for name, report in (("reference", reference_report), ("sharded", sharded_report)):
-        print_timing(name, report)
+    print_timings(reference_report, sharded_report)
 
     peak_ok = peak_pass(reference_report, sharded_report)
-    passed = tokens_ok and peak_ok and run_passes(steps, max_kl)
-    print("PASS" if passed else "FAIL")
-    return 0 if passed else 1
+    return verdict(tokens_ok and peak_ok and run_passes(steps, max_kl))
 
 
 def load_peak_passes(reference_report: dict, sharded_report: dict) -> bool:
@@ -345,6 +342,18 @@ def peak_pass(reference_report: dict, sharded_report: dict) -> bool:
     return load_peak_passes(reference_report, sharded_report)
 
 
+def print_timings(reference_report: dict, sharded_report: dict) -> None:
+    """Print the group size and the times of both runs."""
+    for name, report in (("reference", reference_report), ("sharded", sharded_report)):
+        print_timing(name, report)
+
+
+def verdict(passed: bool) -> int:
+    """Print the verdict and return the exit status."""
+    print("PASS" if passed else "FAIL")
+    return 0 if passed else 1
+
+
 def print_timing(name: str, report: dict) -> None:
     """Print the group size and the times of one run."""
     print(
@@ -358,12 +367,9 @@ def compare_tokens(reference_path: Path, sharded_path: Path) -> int:
     reference_report = json.loads(reference_path.read_text())
     sharded_report = json.loads(sharded_path.read_text())
     print_tokens(reference_report, sharded_report)
-    for name, report in (("reference", reference_report), ("sharded", sharded_report)):
-        print_timing(name, report)
+    print_timings(reference_report, sharded_report)
     peak_ok = peak_pass(reference_report, sharded_report)
-    passed = peak_ok and reference_report["tokens"] == sharded_report["tokens"]
-    print("PASS" if passed else "FAIL")
-    return 0 if passed else 1
+    return verdict(peak_ok and reference_report["tokens"] == sharded_report["tokens"])
 
 
 if __name__ == "__main__":

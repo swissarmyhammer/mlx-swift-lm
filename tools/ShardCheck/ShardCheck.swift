@@ -23,7 +23,8 @@ import MLXVLM
 /// rank and runs it on its ``RemoteModelExecutor``; every other rank applies the announced ops
 /// to its own shard, as a cluster worker does.
 ///
-/// Without `--tokens` the prompt is ``DefaultPrompt``, or the prompt of the reference run.
+/// Without `--tokens` the prompt is the one of ``DefaultPrompt``, or the prompt of the reference
+/// run.
 ///
 /// Usage: `ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8]
 /// [--teacher-forcing reference.json | --announce]`
@@ -58,7 +59,7 @@ struct ShardCheck {
         // The load is the first allocation of the process, so the peak so far is its peak.
         let load = LoadMeasure(
             seconds: (clock.now - loadStart).seconds, peakBytes: Memory.peakMemory)
-        print("rank \(rank): load peak \(load.peakBytes.formattedGiB)")
+        Console.write("rank \(rank): load peak \(load.peakBytes.formattedGiB)")
 
         let reference: ReferenceRun?
         switch arguments.mode {
@@ -74,20 +75,40 @@ struct ShardCheck {
         }
         let prompt = try resolvePrompt(arguments, reference: reference)
         let forcedTokens = try reference?.forcedTokens(decodeSteps: arguments.decodeSteps)
-        let run = try GreedyRun(
+        let run = try GreedyRun.run(
             model: context.model, prompt: prompt, decodeSteps: arguments.decodeSteps,
             forcedTokens: forcedTokens)
         guard rank == 0 else { return }
 
         try NumpyFile.write(run.logits, to: arguments.output)
+        try writeReport(
+            arguments, groupSize: try group?.size ?? 1, prompt: prompt, tokens: run.tokens,
+            forcedTokens: forcedTokens, load: load, prefillTime: run.prefillTime,
+            decodeTime: run.decodeTime)
+    }
+
+    /// Writes the report of a run beside the output, and prints its summary.
+    ///
+    /// - Parameters:
+    ///   - arguments: The command line, for the output and the decode steps.
+    ///   - groupSize: The processes the model ran across.
+    ///   - prompt: The prompt token ids.
+    ///   - tokens: The greedy token after each step.
+    ///   - forcedTokens: The inputs of a teacher-forced run, or nil.
+    ///   - load: The time and peak memory of the load.
+    ///   - prefillTime: The time of the prefill.
+    ///   - decodeTime: The time of every decode step together.
+    private static func writeReport(
+        _ arguments: Arguments, groupSize: Int, prompt: [Int], tokens: [Int],
+        forcedTokens: [Int]?, load: LoadMeasure, prefillTime: Duration, decodeTime: Duration
+    ) throws {
         let report = Report(
-            groupSize: try group?.size ?? 1, prompt: prompt, tokens: run.tokens,
-            forcedTokens: forcedTokens, loadSeconds: load.seconds,
-            loadPeakBytes: load.peakBytes,
-            prefillSeconds: run.prefillTime.seconds,
-            decodeSecondsPerToken: run.decodeTime.seconds / Double(arguments.decodeSteps))
+            groupSize: groupSize, prompt: prompt, tokens: tokens, forcedTokens: forcedTokens,
+            loadSeconds: load.seconds, loadPeakBytes: load.peakBytes,
+            prefillSeconds: prefillTime.seconds,
+            decodeSecondsPerToken: decodeTime.seconds / Double(arguments.decodeSteps))
         try report.write(besides: arguments.output)
-        print(report.summary)
+        Console.write(report.summary)
     }
 
     /// The prompt of the command line; else that of the reference run, so a teacher-forced run
@@ -119,7 +140,7 @@ struct ShardCheck {
                     modelDirectory: arguments.modelDirectory, rankCount: rankCount))
             guard try group.rank == 0 else {
                 let summary = try AnnounceFollower.follow(executor, group: group)
-                print(
+                Console.write(
                     "rank \(try group.rank): \(summary.opCount) ops, \(summary.parkCount) parks, "
                         + "\(summary.failedOpCount) failed")
                 return
@@ -133,13 +154,10 @@ struct ShardCheck {
             run = try GenerationRun(
                 model: model, prompt: prompt, decodeSteps: arguments.decodeSteps)
         }
-        let report = Report(
-            groupSize: rankCount, prompt: prompt, tokens: run.tokens, forcedTokens: nil,
-            loadSeconds: load.seconds, loadPeakBytes: load.peakBytes,
-            prefillSeconds: run.prefillTime.seconds,
-            decodeSecondsPerToken: run.decodeTime.seconds / Double(arguments.decodeSteps))
-        try report.write(besides: arguments.output)
-        print(report.summary)
+        try writeReport(
+            arguments, groupSize: rankCount, prompt: prompt, tokens: run.tokens,
+            forcedTokens: nil, load: load, prefillTime: run.prefillTime,
+            decodeTime: run.decodeTime)
     }
 
     /// The model of `directory` from the LLM factory, or from the VLM factory for a model type
@@ -167,6 +185,14 @@ struct ShardCheck {
     }
 }
 
+/// The console of the check: the lines that `scripts/shard-check.sh` shows, on standard output.
+enum Console {
+    /// Writes `line` and a newline to standard output.
+    static func write(_ line: String) {
+        FileHandle.standardOutput.write(Data("\(line)\n".utf8))
+    }
+}
+
 /// The time and the peak memory of a load.
 struct LoadMeasure {
     /// The time of the load, in seconds.
@@ -187,6 +213,9 @@ struct Arguments {
 
     /// The greedy decode steps when the command line gives none.
     static let defaultDecodeSteps = 8
+
+    /// The positional arguments: the model directory and the output.
+    static let positionalCount = 2
 
     /// The local Hugging Face snapshot to load.
     let modelDirectory: URL
@@ -234,7 +263,7 @@ struct Arguments {
                 positional.append(argument)
             }
         }
-        guard positional.count == 2 else { throw ShardCheckError.usage }
+        guard positional.count == Self.positionalCount else { throw ShardCheckError.usage }
         modelDirectory = URL(fileURLWithPath: positional[0])
         output = URL(fileURLWithPath: positional[1])
         self.tokens = tokens
@@ -270,6 +299,8 @@ enum ShardCheckError: Error, CustomStringConvertible {
     case promptDiffersFromReference
     /// The reference run has fewer tokens than the decode steps need.
     case referenceTooShort(tokenCount: Int, decodeSteps: Int)
+    /// A file the build copies beside the binary is not there.
+    case missingResource(String)
 
     var description: String {
         switch self {
@@ -282,6 +313,8 @@ enum ShardCheckError: Error, CustomStringConvertible {
             "--tokens differs from the prompt of the --teacher-forcing reference"
         case .referenceTooShort(let tokenCount, let decodeSteps):
             "the reference has \(tokenCount) tokens; \(decodeSteps) decode steps need that many"
+        case .missingResource(let name):
+            "the resource \(name) is missing from the build of ShardCheck"
         }
     }
 }
@@ -300,14 +333,17 @@ struct GreedyRun {
     /// The time of every decode step together.
     let decodeTime: Duration
 
-    /// Runs the prefill of `prompt`, then `decodeSteps` greedy steps.
+    /// Runs the prefill of `prompt`, then `decodeSteps` greedy steps, through the model.
     ///
     /// - Parameters:
     ///   - model: The model, sharded or whole.
     ///   - prompt: The prompt token ids.
     ///   - decodeSteps: The decode steps after the prefill.
     ///   - forcedTokens: The input after each step but the last, or nil to feed the argmax.
-    init(model: any LanguageModel, prompt: [Int], decodeSteps: Int, forcedTokens: [Int]?) throws {
+    /// - Returns: The logits, the tokens and the times of the steps.
+    static func run(
+        model: any LanguageModel, prompt: [Int], decodeSteps: Int, forcedTokens: [Int]?
+    ) throws -> GreedyRun {
         let clock = ContinuousClock()
         let cache = try model.newCache(parameters: nil)
         var rows: [MLXArray] = []
@@ -332,10 +368,9 @@ struct GreedyRun {
                 prefillTime = clock.now - start
             }
         }
-        self.logits = stacked(rows)
-        self.tokens = tokens
-        self.prefillTime = prefillTime
-        self.decodeTime = clock.now - start - prefillTime
+        return GreedyRun(
+            logits: stacked(rows), tokens: tokens, prefillTime: prefillTime,
+            decodeTime: clock.now - start - prefillTime)
     }
 }
 
@@ -359,13 +394,16 @@ struct Report: Encodable {
     /// The mean time of one decode step.
     let decodeSecondsPerToken: Double
 
+    /// The milliseconds of one second, for the decode time of the summary.
+    private static let millisecondsPerSecond = 1000.0
+
     /// One line for the console.
     var summary: String {
         String(
             format:
                 "group %d: load %.2fs (peak %@), prefill %.3fs, decode %.1f ms/token, tokens %@",
             groupSize, loadSeconds, loadPeakBytes.formattedGiB, prefillSeconds,
-            decodeSecondsPerToken * 1000,
+            decodeSecondsPerToken * Self.millisecondsPerSecond,
             tokens.map(String.init).joined(separator: ","))
     }
 
@@ -406,40 +444,31 @@ struct ReferenceRun: Decodable {
 /// The default prompt: one English sentence, pre-tokenized for the tokenizer of each model
 /// family that can shard. Real text keeps the greedy distributions peaked; made-up ids invite
 /// near ties that bf16 noise flips.
+///
+/// `DefaultPrompts.json` holds the sentence and its ids as the `tokenizer.json` of each model
+/// type encodes it, without special tokens.
 enum DefaultPrompt {
 
-    /// The text the ids spell.
-    static let text =
-        "The lighthouse keeper climbed the narrow stairs every evening to light the lamp, and "
-        + "from the top he watched the fishing boats return safely to the harbor before the "
-        + "storm arrived."
+    /// The fields of `DefaultPrompts.json` that the check reads.
+    private struct Table: Decodable {
+        /// The ids of the sentence for each model type.
+        let tokensByModelType: [String: [Int]]
+    }
 
-    /// ``text`` as encoded by the `tokenizer.json` of each model type, without special tokens.
-    private static let tokensByModelType: [String: [Int]] = [
-        // Qwen3.5-2B and Qwen3.8-27B (4bit, mxfp4) encode it the same.
-        "qwen3_5": [
-            760, 324, 55965, 51624, 42942, 279, 14590, 30129, 1396, 11129, 310, 3000, 279, 27056,
-            11, 321, 494, 279, 1844, 551, 14936, 279, 19340, 30592, 460, 20359, 310, 279, 54517,
-            1518, 279, 13071, 11136, 13,
-        ],
-        // Inkling-2-Mini (4bit, oQ4e-mtp).
-        "inkling2_loop": [
-            371, 186077, 133997, 220, 118570, 158314, 2537, 149876, 161422, 220, 31604, 82,
-            150710, 171498, 149882, 150932, 149876, 169167, 11, 149880, 149920, 149876, 150769,
-            150026, 182047, 149876, 184221, 167627, 82, 150583, 188256, 149882, 149876, 220,
-            36598, 150463, 149876, 168566, 167617, 13,
-        ],
-    ]
-
-    /// The ids of ``text`` for the model type in the `config.json` of `directory`.
+    /// The ids of the sentence for the model type in the `config.json` of `directory`.
     ///
     /// - Throws: ``ShardCheckError/noDefaultPrompt(modelType:)`` for a model type whose
-    ///   tokenizer has no ids here, or the error of reading the configuration.
+    ///   tokenizer has no ids in the table, or the error of reading a file.
     static func tokens(forModelIn directory: URL) throws -> [Int] {
         let configuration = try JSONDecoder().decode(
             BaseConfiguration.self,
             from: Data(contentsOf: directory.appendingPathComponent("config.json")))
-        guard let tokens = tokensByModelType[configuration.modelType] else {
+        guard let url = Bundle.module.url(forResource: "DefaultPrompts", withExtension: "json")
+        else {
+            throw ShardCheckError.missingResource("DefaultPrompts.json")
+        }
+        let table = try JSONDecoder().decode(Table.self, from: Data(contentsOf: url))
+        guard let tokens = table.tokensByModelType[configuration.modelType] else {
             throw ShardCheckError.noDefaultPrompt(modelType: configuration.modelType)
         }
         return tokens
@@ -452,8 +481,20 @@ enum NumpyFile {
     /// The bytes the header and its length field align to.
     private static let headerAlignment = 64
 
-    /// The magic string and version 1.0 of the format.
-    private static let magic: [UInt8] = [0x93] + Array("NUMPY".utf8) + [1, 0]
+    /// The first byte of the magic string.
+    private static let magicByte: UInt8 = 0x93
+
+    /// Version 1.0 of the format: its major and minor bytes.
+    private static let version: [UInt8] = [1, 0]
+
+    /// The magic string and the version.
+    private static let magic: [UInt8] = [magicByte] + Array("NUMPY".utf8) + version
+
+    /// The bytes of the little-endian header length after the magic and the version.
+    private static let headerLengthBytes = 2
+
+    /// The low byte of a 16-bit value.
+    private static let lowByteMask: UInt16 = 0xff
 
     /// Writes `array`, which must be float32, to `url`.
     static func write(_ array: MLXArray, to url: URL) throws {
@@ -461,7 +502,7 @@ enum NumpyFile {
         var header =
             "{'descr': '<f4', 'fortran_order': False, 'shape': (\(shape)\(array.ndim == 1 ? "," : "")), }"
         // The magic, version and 2-byte length come first; the header ends with a newline.
-        let prefixLength = magic.count + 2
+        let prefixLength = magic.count + headerLengthBytes
         let padding =
             (headerAlignment - (prefixLength + header.utf8.count + 1) % headerAlignment)
             % headerAlignment
@@ -469,7 +510,7 @@ enum NumpyFile {
 
         var data = Data(magic)
         let headerLength = UInt16(header.utf8.count)
-        data.append(UInt8(headerLength & 0xff))
+        data.append(UInt8(headerLength & lowByteMask))
         data.append(UInt8(headerLength >> 8))
         data.append(Data(header.utf8))
         array.asArray(Float.self).withUnsafeBufferPointer { data.append(Data(buffer: $0)) }
@@ -486,9 +527,12 @@ struct PseudoWordTokenizerLoader: TokenizerLoader {
 }
 
 extension Duration {
+    /// The attoseconds of one second.
+    private static let attosecondsPerSecond = 1e18
+
     /// The duration in seconds.
     var seconds: Double {
         let (seconds, attoseconds) = components
-        return Double(seconds) + Double(attoseconds) / 1e18
+        return Double(seconds) + Double(attoseconds) / Self.attosecondsPerSecond
     }
 }

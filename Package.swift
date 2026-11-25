@@ -255,7 +255,8 @@ let package = Package(
                 "MLXScriptedLM",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
-            path: "tools/ShardCheck"
+            path: "tools/ShardCheck",
+            resources: [.copy("DefaultPrompts.json")]
         ),
         .testTarget(
             name: "MLXLMTests",

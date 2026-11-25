@@ -3,19 +3,20 @@
 Run: python3 -I scripts/test_shard_check_compare.py
 """
 
-import importlib.util
 import sys
+import types
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-# Keep the self-check from leaving scripts/__pycache__ behind.
-sys.dont_write_bytecode = True
+# The comparator runs from its source, compiled here, so the self-check leaves no
+# scripts/__pycache__ behind. A dataclass looks its module up in sys.modules.
 _MODULE_PATH = Path(__file__).resolve().parent / "shard_check_compare.py"
-_SPEC = importlib.util.spec_from_file_location("shard_check_compare", _MODULE_PATH)
-compare = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(compare)
+compare = types.ModuleType("shard_check_compare")
+compare.__file__ = str(_MODULE_PATH)
+sys.modules[compare.__name__] = compare
+exec(compile(_MODULE_PATH.read_text(), _MODULE_PATH, "exec"), compare.__dict__)
 
 MAX_KL = 0.05
 VOCABULARY = 8

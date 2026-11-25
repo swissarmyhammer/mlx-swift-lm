@@ -75,14 +75,18 @@ EOF
 echo "== unsharded reference"
 "$BINARY" "$MODEL" "$WORK/reference.npy" "${COMMON_ARGS[@]+"${COMMON_ARGS[@]}"}"
 
+# Starts ring process <rank> in the background, writing <output> and its log rank<rank>.log.
+launch_rank() {
+    local rank="$1" output="$2"
+    MLX_RANK="$rank" MLX_HOSTFILE="$WORK/hostfile.json" \
+        "$BINARY" "$MODEL" "$WORK/$output" "${SHARDED_ARGS[@]+"${SHARDED_ARGS[@]}"}" \
+        > "$WORK/rank$rank.log" 2>&1 &
+}
+
 echo "== sharded ($MODE): 2 ring processes on localhost"
-MLX_RANK=0 MLX_HOSTFILE="$WORK/hostfile.json" \
-    "$BINARY" "$MODEL" "$WORK/sharded.npy" "${SHARDED_ARGS[@]+"${SHARDED_ARGS[@]}"}" \
-    > "$WORK/rank0.log" 2>&1 &
+launch_rank 0 sharded.npy
 RANK0=$!
-MLX_RANK=1 MLX_HOSTFILE="$WORK/hostfile.json" \
-    "$BINARY" "$MODEL" "$WORK/rank1.npy" "${SHARDED_ARGS[@]+"${SHARDED_ARGS[@]}"}" \
-    > "$WORK/rank1.log" 2>&1 &
+launch_rank 1 rank1.npy
 RANK1=$!
 
 STATUS=0
