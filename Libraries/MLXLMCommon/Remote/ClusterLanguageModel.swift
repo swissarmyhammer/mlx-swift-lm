@@ -190,29 +190,35 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
         forward(inputs, cache: cache, logits: .allPositions).logits
     }
 
-    /// Runs `tokens` on the worker. A failure cancels the current task, which ends its
-    /// generation, and returns zero logits of the asked shape.
+    /// Runs `tokens` on the worker. A failure, or a batch of several sequences
+    /// (``ClusterModelError/unsupported(_:)`` of ``ClusterModelFeature/batchedInput``), cancels
+    /// the current task, which ends its generation, keeps the failure on the model, and returns
+    /// zero logits of the asked shape.
     private func forward(
         _ tokens: MLXArray, cache: [KVCache]?, logits scope: RemoteLogitsScope
     ) -> LMOutput {
-        precondition(Self.holdsOneSequence(tokens), "A cluster model runs one sequence at a time")
-        let tokenIDs = Self.tokenIDs(of: tokens)
         do {
+            guard Self.holdsOneSequence(tokens) else {
+                throw ClusterModelError.unsupported(.batchedInput)
+            }
             let remote = try remoteCache(of: cache ?? [])
-            let logits = try remote.forward(tokenIDs, logits: scope)
-            return LMOutput(logits: logits ?? placeholderLogits(positions: 1))
+            let logits = try remote.forward(Self.tokenIDs(of: tokens), logits: scope)
+            return LMOutput(logits: logits ?? placeholderLogits(of: tokens, scope: .lastPosition))
         } catch {
             session.recordFailure(error)
             clusterLogger.error("A cluster forward failed, cancelling the generation: \(error)")
             withUnsafeCurrentTask { $0?.cancel() }
-            return LMOutput(
-                logits: placeholderLogits(positions: scope == .allPositions ? tokenIDs.count : 1))
+            return LMOutput(logits: placeholderLogits(of: tokens, scope: scope))
         }
     }
 
-    /// Zero logits for `positions` positions, which a failed forward returns.
-    private func placeholderLogits(positions: Int) -> MLXArray {
-        MLXArray.zeros([1, positions, workerCapabilities.vocabularySize])
+    /// Zero logits of the shape a forward of `tokens` returns for `scope`, which a failed
+    /// forward returns: one row per sequence, and one position, or every position of
+    /// ``RemoteLogitsScope/allPositions``.
+    private func placeholderLogits(of tokens: MLXArray, scope: RemoteLogitsScope) -> MLXArray {
+        let sequences = tokens.ndim < Self.batchRank ? 1 : tokens.dim(0)
+        let positions = scope == .allPositions ? (tokens.ndim == 0 ? 1 : tokens.dim(-1)) : 1
+        return MLXArray.zeros([sequences, positions, workerCapabilities.vocabularySize])
     }
 
     /// The one remote cache of `cache`, which this model made.

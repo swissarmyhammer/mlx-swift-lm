@@ -319,6 +319,20 @@ struct ClusterLanguageModelTests {
         }
     }
 
+    @Test("a batch given straight to the forward fails the model with the batch refusal")
+    func aBatchedForwardFailsTheModel() throws {
+        let fixture = try Qwen35MTPFixture()
+        let model = try ClusterLanguageModel.connect(over: fixture.makeWorker())
+        let cache = try model.newCache(parameters: nil)
+        let batch = MLXArray([Int32(1), 2, 3, 4], [2, 2])
+
+        _ = model(batch, cache: cache)
+
+        #expect(throws: ClusterModelError.unsupported(.batchedInput)) {
+            try model.newCache(parameters: nil)
+        }
+    }
+
     @Test("a KV-cache configuration is refused")
     func aKVCacheConfigurationIsRefused() throws {
         let fixture = try Qwen35MTPFixture()
