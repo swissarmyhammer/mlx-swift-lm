@@ -80,6 +80,172 @@ public enum TensorParallel {
         }
     }
 
+    /// The quantization of a projection, whose inputs split only at the edge of a group.
+    public struct QuantizationGroups: Equatable, Sendable {
+        /// The quantization mode, such as affine, mxfp4 or nvfp4.
+        public let mode: QuantizationMode
+        /// The bits of each quantized value.
+        public let bits: Int
+        /// The inputs of each group.
+        public let groupSize: Int
+
+        /// - Parameters:
+        ///   - mode: The quantization mode.
+        ///   - bits: The bits of each quantized value.
+        ///   - groupSize: The inputs of each group.
+        public init(mode: QuantizationMode, bits: Int, groupSize: Int) {
+            self.mode = mode
+            self.bits = bits
+            self.groupSize = groupSize
+        }
+
+        /// The quantization of `layer`, or nil for a float projection.
+        init?(of layer: Linear) {
+            guard let quantized = layer as? QuantizedLinear else { return nil }
+            self.init(mode: quantized.mode, bits: quantized.bits, groupSize: quantized.groupSize)
+        }
+    }
+
+    /// Throws unless every process keeps whole rows of each segment of `rows`.
+    ///
+    /// The scales and biases of a quantized projection hold one row per output, so whole rows
+    /// keep whole groups.
+    ///
+    /// - Parameters:
+    ///   - rows: The rows of the unsharded projection.
+    ///   - segments: The segments of the rows, each of which splits on its own.
+    ///   - path: The path of the projection, for the error.
+    ///   - groupSize: The number of processes.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)``.
+    public static func requireWholeRows(
+        _ rows: Int, segments: Segments = .count(1), at path: String, across groupSize: Int
+    ) throws {
+        for segment in try segmentLengths(of: rows, segments, at: path) {
+            _ = try share(of: segment, named: "\(path) rows", across: groupSize)
+        }
+    }
+
+    /// Throws unless every process keeps whole rows of each segment of `layer`.
+    ///
+    /// - Parameters:
+    ///   - layer: The projection whose rows split.
+    ///   - segments: The segments of the rows, each of which splits on its own.
+    ///   - path: The path of the projection, for the error.
+    ///   - groupSize: The number of processes.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)``.
+    public static func requireWholeRows(
+        of layer: Linear, segments: Segments = .count(1), at path: String,
+        across groupSize: Int
+    ) throws {
+        try requireWholeRows(layer.shape.0, segments: segments, at: path, across: groupSize)
+    }
+
+    /// Throws unless every process keeps an equal run of `inputs` that holds whole groups of
+    /// `quantization`.
+    ///
+    /// - Parameters:
+    ///   - inputs: The inputs of the unsharded projection.
+    ///   - quantization: The quantization of the projection, or nil for a float one.
+    ///   - path: The path of the projection, for the error.
+    ///   - groupSize: The number of processes.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)``.
+    public static func requireWholeInputs(
+        _ inputs: Int, quantization: QuantizationGroups?, at path: String, across groupSize: Int
+    ) throws {
+        guard let quantization else {
+            _ = try share(of: inputs, named: "\(path) inputs", across: groupSize)
+            return
+        }
+        let groups = inputs / quantization.groupSize
+        guard groups * quantization.groupSize == inputs, groups % groupSize == 0 else {
+            throw TensorParallelShardingError.indivisible(
+                quantity: """
+                    \(path) quantization groups (\(quantization.mode.rawValue), \
+                    \(quantization.bits)-bit, \(quantization.groupSize) inputs each)
+                    """,
+                count: groups, groupSize: groupSize)
+        }
+    }
+
+    /// Throws unless every process keeps an equal run of the inputs of `layer` that holds whole
+    /// quantization groups.
+    ///
+    /// - Parameters:
+    ///   - layer: The projection whose inputs split.
+    ///   - path: The path of the projection, for the error.
+    ///   - groupSize: The number of processes.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)``.
+    public static func requireWholeInputs(
+        of layer: Linear, at path: String, across groupSize: Int
+    ) throws {
+        try requireWholeInputs(
+            layer.shape.1, quantization: QuantizationGroups(of: layer), at: path,
+            across: groupSize)
+    }
+
+    /// The projections of a layer that split, by the axis they split on.
+    public struct SplitProjections {
+        /// The projections whose rows split, with the segments of their rows.
+        public let rows: [(path: String, projection: Linear, segments: Segments)]
+        /// The projections whose inputs split.
+        public let inputs: [(path: String, projection: Linear)]
+
+        /// - Parameters:
+        ///   - rows: The projections whose rows split, by path, with their segments.
+        ///   - inputs: The projections whose inputs split, by path.
+        public init(
+            rows: [(path: String, projection: Linear, segments: Segments)],
+            inputs: [(path: String, projection: Linear)]
+        ) {
+            self.rows = rows
+            self.inputs = inputs
+        }
+
+        /// Throws unless every projection whose rows split is a stock projection. A projection
+        /// whose inputs split is checked as ``TensorParallel/makeShardedToAll(_:at:group:)``
+        /// copies it.
+        public func requireStockRowProjections() throws {
+            for row in rows {
+                try TensorParallel.requireStockProjection(row.projection, at: row.path)
+            }
+        }
+
+        /// Throws unless each process keeps whole rows of every projection whose rows split,
+        /// and whole quantization groups of every projection whose inputs split.
+        ///
+        /// - Parameter groupSize: The number of processes.
+        /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)``
+        ///   naming the first projection that does not split.
+        public func requireWholeShares(across groupSize: Int) throws {
+            for row in rows {
+                try TensorParallel.requireWholeRows(
+                    of: row.projection, segments: row.segments, at: row.path, across: groupSize)
+            }
+            for input in inputs {
+                try TensorParallel.requireWholeInputs(
+                    of: input.projection, at: input.path, across: groupSize)
+            }
+        }
+    }
+
+    /// The lengths of the segments of an axis of length `dimension`.
+    private static func segmentLengths(
+        of dimension: Int, _ segments: Segments, at path: String
+    ) throws -> [Int] {
+        let boundaries: [Int]
+        switch segments {
+        case .count(let count):
+            let length = try share(of: dimension, named: "\(path) segments", across: count)
+            boundaries = (1 ..< count).map { $0 * length }
+        case .indices(let indices):
+            boundaries = indices
+        case .fractions(let fractions):
+            boundaries = fractions.map { Int($0 * Double(dimension)) }
+        }
+        let edges = [0] + boundaries + [dimension]
+        return zip(edges, edges.dropFirst()).map { $1 - $0 }
+    }
+
     /// A copy of `layer` whose inputs split across `group`, which sums the partial outputs.
     ///
     /// - Parameters:

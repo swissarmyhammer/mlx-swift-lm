@@ -81,36 +81,62 @@ extension Qwen35DecoderLayer {
     func makeShards(
         _ plan: Qwen35TensorParallelPlan, group: MLXDistributed.Group
     ) throws -> Qwen35LayerShards {
-        let mlp = try denseMLP()
-        try TensorParallel.requireStockProjection(mlp.gateProj, at: "mlp.gate_proj")
-        try TensorParallel.requireStockProjection(mlp.upProj, at: "mlp.up_proj")
+        try splitProjections(plan).requireStockRowProjections()
+        try requireWholeShares(plan)
         let down = try TensorParallel.makeShardedToAll(
-            mlp.downProj, at: "mlp.down_proj", group: group)
+            try denseMLP().downProj, at: "mlp.down_proj", group: group)
 
         if let attention = selfAttn {
-            for (path, projection) in [
-                ("q_proj", attention.qProj), ("k_proj", attention.kProj),
-                ("v_proj", attention.vProj),
-            ] {
-                try TensorParallel.requireStockProjection(projection, at: "self_attn.\(path)")
-            }
             let output = try TensorParallel.makeShardedToAll(
                 attention.oProj, at: "self_attn.o_proj", group: group)
             return Qwen35LayerShards(mixer: ["o_proj": output], down: down)
         }
 
         let gatedDelta = gatedDeltaNet
-        for (path, projection) in [
-            ("in_proj_qkv", gatedDelta.inProjQKV), ("in_proj_z", gatedDelta.inProjZ),
-            ("in_proj_b", gatedDelta.inProjB), ("in_proj_a", gatedDelta.inProjA),
-        ] {
-            try TensorParallel.requireStockProjection(projection, at: "linear_attn.\(path)")
-        }
         let output = try TensorParallel.makeShardedToAll(
             gatedDelta.outProj, at: "linear_attn.out_proj", group: group)
         let conv = try TensorParallel.makeShardedDepthwiseConv(
             gatedDelta.conv1d, segments: plan.gatedDeltaInputSegments, group: group)
         return Qwen35LayerShards(mixer: ["out_proj": output, "conv1d": conv], down: down)
+    }
+
+    /// Throws unless each process keeps whole rows of every projection whose rows split, and
+    /// whole quantization groups of every projection whose inputs split.
+    ///
+    /// - Parameter plan: The plan of the model.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)`` naming
+    ///   the first projection that does not split.
+    func requireWholeShares(_ plan: Qwen35TensorParallelPlan) throws {
+        try splitProjections(plan).requireWholeShares(across: plan.groupSize)
+    }
+
+    /// The projections of this layer that split, by the axis they split on.
+    private func splitProjections(_ plan: Qwen35TensorParallelPlan) throws
+        -> TensorParallel.SplitProjections
+    {
+        let mlp = try denseMLP()
+        let rows: [(path: String, projection: Linear, segments: Segments)] = [
+            ("mlp.gate_proj", mlp.gateProj, .count(1)), ("mlp.up_proj", mlp.upProj, .count(1)),
+        ]
+        let down = (path: "mlp.down_proj", projection: mlp.downProj)
+        if let attention = selfAttn {
+            return TensorParallel.SplitProjections(
+                rows: rows + [
+                    ("self_attn.q_proj", attention.qProj, .count(1)),
+                    ("self_attn.k_proj", attention.kProj, .count(1)),
+                    ("self_attn.v_proj", attention.vProj, .count(1)),
+                ],
+                inputs: [down, ("self_attn.o_proj", attention.oProj)])
+        }
+        let gatedDelta = gatedDeltaNet
+        return TensorParallel.SplitProjections(
+            rows: rows + [
+                ("linear_attn.in_proj_qkv", gatedDelta.inProjQKV, plan.gatedDeltaInputSegments),
+                ("linear_attn.in_proj_z", gatedDelta.inProjZ, .count(1)),
+                ("linear_attn.in_proj_b", gatedDelta.inProjB, .count(1)),
+                ("linear_attn.in_proj_a", gatedDelta.inProjA, .count(1)),
+            ],
+            inputs: [down, ("linear_attn.out_proj", gatedDelta.outProj)])
     }
 
     /// Keeps the share of this process of every projection, conv and per-head parameter.

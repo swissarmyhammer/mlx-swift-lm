@@ -163,6 +163,173 @@ struct TensorParallelStockProjectionTests {
     }
 }
 
+struct TensorParallelWholeShareTests {
+
+    /// The processes of the splits.
+    private static let groupSize = 2
+
+    /// The rows of the projections.
+    private static let rows = 8
+
+    /// The 8-bit affine format of the attention of Inkling 2 Mini oQ4e.
+    private static let eightBits = 8
+    private static let affineGroupSize = 64
+
+    /// The 4-bit microscaled formats.
+    private static let fourBits = 4
+    private static let mxfp4GroupSize = 32
+    private static let nvfp4GroupSize = 16
+
+    @Test("a row split of whole rows on every process passes")
+    func acceptsWholeRows() {
+        let projection = QuantizedLinear(
+            Self.affineGroupSize, Self.rows, bias: false, groupSize: Self.affineGroupSize,
+            bits: Self.eightBits)
+        #expect(throws: Never.self) {
+            try TensorParallel.requireWholeRows(
+                of: projection, at: "self_attn.q_proj", across: Self.groupSize)
+        }
+    }
+
+    @Test("a segment of rows that the group does not divide throws, naming the layer")
+    func rejectsIndivisibleRowSegment() {
+        let processes = 4
+        #expect(
+            throws: TensorParallelShardingError.indivisible(
+                quantity: "linear_attn.in_proj_qkv rows", count: 6, groupSize: processes)
+        ) {
+            try TensorParallel.requireWholeRows(
+                12, segments: .indices([6]), at: "linear_attn.in_proj_qkv", across: processes)
+        }
+    }
+
+    @Test("8-bit affine inputs that split into whole groups of 64 pass")
+    func acceptsWholeAffineGroups() {
+        let projection = QuantizedLinear(
+            4 * Self.affineGroupSize, Self.rows, bias: false, groupSize: Self.affineGroupSize,
+            bits: Self.eightBits)
+        #expect(throws: Never.self) {
+            try TensorParallel.requireWholeInputs(
+                of: projection, at: "self_attn.o_proj", across: Self.groupSize)
+        }
+    }
+
+    @Test("mxfp4 inputs that would split a group of 32 throw, naming the layer")
+    func rejectsSplitMXFP4Group() {
+        let projection = QuantizedLinear(
+            Self.mxfp4GroupSize, Self.rows, bias: false, groupSize: Self.mxfp4GroupSize,
+            bits: Self.fourBits, mode: .mxfp4)
+        #expect(
+            throws: TensorParallelShardingError.indivisible(
+                quantity: "mlp.down_proj quantization groups (mxfp4, 4-bit, 32 inputs each)",
+                count: 1, groupSize: Self.groupSize)
+        ) {
+            try TensorParallel.requireWholeInputs(
+                of: projection, at: "mlp.down_proj", across: Self.groupSize)
+        }
+    }
+
+    @Test("nvfp4 inputs that would split a group of 16 throw, naming the layer")
+    func rejectsSplitNVFP4Group() {
+        let quantization = TensorParallel.QuantizationGroups(
+            mode: .nvfp4, bits: Self.fourBits, groupSize: Self.nvfp4GroupSize)
+        #expect(
+            throws: TensorParallelShardingError.indivisible(
+                quantity:
+                    "mlp.experts.down_proj quantization groups (nvfp4, 4-bit, 16 inputs each)",
+                count: 3, groupSize: Self.groupSize)
+        ) {
+            try TensorParallel.requireWholeInputs(
+                3 * Self.nvfp4GroupSize, quantization: quantization,
+                at: "mlp.experts.down_proj", across: Self.groupSize)
+        }
+    }
+
+    @Test("float inputs that the group does not divide throw, naming the layer")
+    func rejectsIndivisibleFloatInputs() {
+        let processes = 4
+        #expect(
+            throws: TensorParallelShardingError.indivisible(
+                quantity: "self_attn.o_proj inputs", count: 6, groupSize: processes)
+        ) {
+            try TensorParallel.requireWholeInputs(
+                of: Linear(6, Self.rows), at: "self_attn.o_proj", across: processes)
+        }
+    }
+}
+
+struct Qwen35WholeShareTests {
+
+    /// The processes of the plan.
+    private static let groupSize = 2
+
+    /// The width of the residual stream, two mxfp4 groups.
+    private static let hiddenSize = 64
+
+    /// The format of Qwen3.8-27B-mxfp4.
+    private static let mxfp4GroupSize = 32
+    private static let mxfp4Bits = 4
+
+    /// The first layer of a model whose every layer is full attention, and of one whose every
+    /// layer is gated delta.
+    private static let layerKinds = [1, 2]
+
+    /// A configuration of `intermediateSize` MLP width whose layers are full attention every
+    /// `fullAttentionInterval` layers.
+    private static func makeConfiguration(intermediateSize: Int, fullAttentionInterval: Int)
+        throws -> Qwen35TextConfiguration
+    {
+        var configuration = try JSONDecoder().decode(
+            Qwen35TextConfiguration.self,
+            from: Data(
+                Qwen35FixtureJSON.text(
+                    mtpLayers: 0, fullAttentionInterval: fullAttentionInterval,
+                    hiddenSize: hiddenSize
+                ).utf8))
+        configuration.attentionHeads = 8
+        configuration.kvHeads = 2
+        configuration.linearNumKeyHeads = 4
+        configuration.linearNumValueHeads = 8
+        configuration.intermediateSize = intermediateSize
+        return configuration
+    }
+
+    /// Layer 0 of `configuration`, with every projection quantized to mxfp4.
+    private static func makeLayer(_ configuration: Qwen35TextConfiguration) -> Qwen35DecoderLayer {
+        let layer = Qwen35DecoderLayer(configuration, layerIdx: 0)
+        quantize(model: layer, groupSize: mxfp4GroupSize, bits: mxfp4Bits, mode: .mxfp4)
+        return layer
+    }
+
+    @Test(
+        "an mxfp4 layer whose every split keeps whole groups passes",
+        arguments: layerKinds)
+    func acceptsWholeMXFP4Groups(fullAttentionInterval: Int) throws {
+        let configuration = try Self.makeConfiguration(
+            intermediateSize: 2 * Self.hiddenSize, fullAttentionInterval: fullAttentionInterval)
+        let plan = try Qwen35TensorParallelPlan(
+            configuration: configuration, groupSize: Self.groupSize)
+        let layer = Self.makeLayer(configuration)
+        #expect(throws: Never.self) { try layer.requireWholeShares(plan) }
+    }
+
+    @Test("an mxfp4 MLP of one group per row throws, naming the down projection")
+    func rejectsSplitMXFP4DownGroup() throws {
+        let configuration = try Self.makeConfiguration(
+            intermediateSize: Self.mxfp4GroupSize, fullAttentionInterval: 1)
+        let plan = try Qwen35TensorParallelPlan(
+            configuration: configuration, groupSize: Self.groupSize)
+        let layer = Self.makeLayer(configuration)
+        #expect(
+            throws: TensorParallelShardingError.indivisible(
+                quantity: "mlp.down_proj quantization groups (mxfp4, 4-bit, 32 inputs each)",
+                count: 1, groupSize: Self.groupSize)
+        ) {
+            try layer.requireWholeShares(plan)
+        }
+    }
+}
+
 struct Qwen35SingleProcessShardTests {
 
     /// The seed of the random weights.

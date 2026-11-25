@@ -143,21 +143,95 @@ struct Inkling2TensorParallelPlanTests {
             try Self.makePlan(groupSize: 3)
         }
     }
+}
 
-    @Test("an expert width that would split a quantization group throws")
-    func throwsForSplitQuantizationGroup() throws {
-        let plan = try Self.makePlan(groupSize: 4)
-        #expect(
-            throws: TensorParallelShardingError.indivisible(
-                quantity: "expert quantization groups", count: 18, groupSize: 4)
-        ) {
-            try plan.requireWholeQuantizationGroups(expertGroupSize: 64)
+/// The plan checks of a mixed-quantization layer, as in Inkling 2 Mini oQ4e: 8-bit affine
+/// attention in groups of 64 beside 4-bit experts.
+struct Inkling2WholeShareTests {
+
+    /// The processes of the plan.
+    private static let groupSize = 2
+
+    /// The 8-bit affine format of the attention.
+    private static let attentionBits = 8
+    private static let attentionGroupSize = 64
+
+    /// A group wider than the share of the output projection's 128 inputs on each process.
+    private static let wideGroupSize = 128
+
+    /// A 4-bit affine expert format of groups as wide as the tiny expert width, 32.
+    private static let wideExpertFormat = Inkling2ExpertFormat(
+        mode: .affine, bits: 4, groupSize: 32, hasGlobalScale: false)
+
+    /// The text stack of the tiny model.
+    private static func makeConfiguration() throws -> Inkling2TextConfiguration {
+        try JSONDecoder().decode(
+            Inkling2Configuration.self, from: Data(Inkling2ModelTests.tinyJSON.utf8)
+        ).textConfiguration
+    }
+
+    /// The decoder layers of a tiny model, with NVFP4 experts in groups of 16, and every
+    /// attention projection whose inputs `groupSize` divides quantized to 8-bit affine.
+    private static func makeLayers(attentionGroupSize groupSize: Int) throws
+        -> [Inkling2DecoderLayer]
+    {
+        let model = try Inkling2ModelTests.makeModel()
+        let layers = model.loraLayers.compactMap { $0 as? Inkling2DecoderLayer }
+        for layer in layers {
+            quantize(model: layer.attention) { _, module in
+                guard let linear = module as? Linear, linear.weight.dim(1) % groupSize == 0
+                else { return nil }
+                return (groupSize: groupSize, bits: attentionBits, mode: .affine)
+            }
+        }
+        return layers
+    }
+
+    private static func makePlan() throws -> Inkling2TensorParallelPlan {
+        try Inkling2TensorParallelPlan(configuration: makeConfiguration(), groupSize: groupSize)
+    }
+
+    @Test("8-bit affine attention beside nvfp4 experts splits across two processes")
+    func acceptsMixedQuantization() throws {
+        let plan = try Self.makePlan()
+        let layers = try Self.makeLayers(attentionGroupSize: Self.attentionGroupSize)
+        #expect(throws: Never.self) {
+            for layer in layers { try layer.requireWholeShares(plan) }
         }
     }
 
-    @Test("an expert width of whole quantization groups on each process passes")
-    func acceptsWholeQuantizationGroups() throws {
-        try Self.makePlan().requireWholeQuantizationGroups(expertGroupSize: 16)
+    @Test("attention groups wider than each process's share throw, naming the output projection")
+    func rejectsWideAttentionGroups() throws {
+        let plan = try Self.makePlan()
+        let layer = try #require(
+            try Self.makeLayers(attentionGroupSize: Self.wideGroupSize).first)
+        #expect(
+            throws: TensorParallelShardingError.indivisible(
+                quantity: "self_attn.o_proj quantization groups (affine, 8-bit, 128 inputs each)",
+                count: 1, groupSize: Self.groupSize)
+        ) {
+            try layer.requireWholeShares(plan)
+        }
+    }
+
+    @Test("expert groups wider than each process's share throw, naming the down projection")
+    func rejectsWideExpertGroups() throws {
+        let plan = try Self.makePlan()
+        let layer = try #require(
+            try Self.makeLayers(attentionGroupSize: Self.attentionGroupSize).first)
+        let experts = Inkling2Experts(
+            try Self.makeConfiguration(), gateUp: Self.wideExpertFormat,
+            down: Self.wideExpertFormat)
+        try layer.mlp.update(
+            modules: ModuleChildren(values: ["experts": .value(experts)]), verify: [])
+        #expect(
+            throws: TensorParallelShardingError.indivisible(
+                quantity:
+                    "mlp.experts.down_proj quantization groups (affine, 4-bit, 32 inputs each)",
+                count: 1, groupSize: Self.groupSize)
+        ) {
+            try layer.requireWholeShares(plan)
+        }
     }
 }
 

@@ -81,10 +81,10 @@ struct Inkling2TensorParallelPlan: Equatable {
 
     /// The axis of the gate and up rows, `[experts, 2 * width, inputs]`, which alternate per
     /// channel, so one contiguous run keeps each channel's pair.
-    private static let gateUpRowAxis = 1
+    static let gateUpRowAxis = 1
 
     /// The axis of the packed inputs of the down projection, `[experts, outputs, inputs]`.
-    private static let downInputAxis = 2
+    static let downInputAxis = 2
 
     /// The splits of the parameters of the experts. The global scale of each expert stays whole.
     static let expertSplits: [String: TensorParallel.Split] = Dictionary(
@@ -100,16 +100,6 @@ struct Inkling2TensorParallelPlan: Equatable {
                 ),
             ]
         })
-
-    /// Throws unless the inputs of the down projection split into whole quantization groups.
-    ///
-    /// - Parameter expertGroupSize: The quantization group size of the down projection.
-    func requireWholeQuantizationGroups(expertGroupSize: Int) throws {
-        let wholeWidth = expertWidth * groupSize
-        _ = try TensorParallel.share(
-            of: wholeWidth / expertGroupSize, named: "expert quantization groups",
-            across: groupSize)
-    }
 }
 
 /// The modules that replace parts of one decoder layer, made before anything changes.
@@ -132,27 +122,53 @@ extension Inkling2DecoderLayer {
     func makeShards(
         _ plan: Inkling2TensorParallelPlan, group: MLXDistributed.Group
     ) throws -> Inkling2LayerShards {
-        var projections = [
-            ("q_proj", attention.queryProj), ("k_proj", attention.keyProj),
-            ("v_proj", attention.valueProj), ("r_proj", attention.relativeProj),
-            ("gate_proj", attention.gateProj), ("sink_proj", attention.sinkProj),
-        ]
-        for (path, convolution) in [
-            ("k_sconv", attention.keyConvolution), ("v_sconv", attention.valueConvolution),
-        ] {
-            if let dynamic = convolution as? Inkling2DynamicShortConvolution {
-                projections.append(("\(path).weight_proj", dynamic.weightProj))
-            }
-        }
-        for (path, projection) in projections {
-            try TensorParallel.requireStockProjection(projection, at: "self_attn.\(path)")
-        }
-        // The gate and up rows split whole; only the down inputs cut across groups.
-        try plan.requireWholeQuantizationGroups(
-            expertGroupSize: mlp.experts.downProj.format.groupSize)
+        try splitProjections().requireStockRowProjections()
+        try requireWholeShares(plan)
         let output = try TensorParallel.makeShardedToAll(
             attention.outputProj, at: "self_attn.o_proj", group: group)
         return Inkling2LayerShards(output: output)
+    }
+
+    /// Throws unless each process keeps whole rows of every projection and expert projection
+    /// whose rows split, and whole quantization groups of every one whose inputs split.
+    ///
+    /// - Parameter plan: The plan of the model.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)`` naming
+    ///   the first projection that does not split.
+    func requireWholeShares(_ plan: Inkling2TensorParallelPlan) throws {
+        try splitProjections().requireWholeShares(across: plan.groupSize)
+        let experts = mlp.experts
+        try TensorParallel.requireWholeRows(
+            experts.gateUpProj.weight.dim(Inkling2TensorParallelPlan.gateUpRowAxis),
+            at: "mlp.experts.gate_up_proj", across: plan.groupSize)
+        let down = experts.downProj.format
+        let packedInputs = experts.downProj.weight.dim(Inkling2TensorParallelPlan.downInputAxis)
+        try TensorParallel.requireWholeInputs(
+            packedInputs * UInt32.bitWidth / down.bits,
+            quantization: TensorParallel.QuantizationGroups(
+                mode: down.mode, bits: down.bits, groupSize: down.groupSize),
+            at: "mlp.experts.down_proj", across: plan.groupSize)
+    }
+
+    /// The attention projections of this layer that split, by the axis they split on.
+    private func splitProjections() -> TensorParallel.SplitProjections {
+        let tapProjections: [(path: String, projection: Linear, segments: Segments)] = [
+            ("k_sconv", attention.keyConvolution), ("v_sconv", attention.valueConvolution),
+        ].compactMap { path, convolution in
+            (convolution as? Inkling2DynamicShortConvolution).map {
+                ("self_attn.\(path).weight_proj", $0.weightProj, .count(1))
+            }
+        }
+        let rows: [(path: String, projection: Linear, segments: Segments)] = [
+            ("self_attn.q_proj", attention.queryProj, .count(1)),
+            ("self_attn.k_proj", attention.keyProj, .count(1)),
+            ("self_attn.v_proj", attention.valueProj, .count(1)),
+            ("self_attn.r_proj", attention.relativeProj, .count(1)),
+            ("self_attn.gate_proj", attention.gateProj, .count(1)),
+            ("self_attn.sink_proj", attention.sinkProj, .count(1)),
+        ]
+        return TensorParallel.SplitProjections(
+            rows: rows + tapProjections, inputs: [("self_attn.o_proj", attention.outputProj)])
     }
 
     /// Keeps the share of this process of every attention head and of every expert.
