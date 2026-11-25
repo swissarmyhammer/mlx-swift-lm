@@ -52,8 +52,16 @@ comments:
     - evidence: e2f26822; 5 files — Libraries/MLXLMCommon/TensorParallel.swift (QuantizationGroups, requireWholeRows/requireWholeInputs, SplitProjections), Libraries/MLXLLM/Models/Qwen35TensorParallel.swift, Libraries/MLXVLM/Models/Inkling2TensorParallel.swift (requireWholeShares per layer, called in makeShards before any mutation; old plan.requireWholeQuantizationGroups removed), Tests/MLXLMTests/TensorParallelShardingTests.swift, Tests/MLXLMTests/Inkling2TensorParallelTests.swift. All 5 bundles green: MLXLMTests 1260 XCTest + 2724 Swift Testing (3 pre-existing known issues), MLXGuidedGenerationTests 95, MLXFoundationModelsTests 611, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11 XCTest. Shard-check: Inkling oQ4e PASS both modes; Qwen mxfp4 FAIL on default synthetic prompt (1-ulp prefill tie, bisected, not a sharding defect), PASS on prose prompt both modes.
     - next: the 2-Mac JACCL repeat (unchecked item) needs the FoundationModelsCluster session; consider a prose default prompt for ShardCheck so the default gate does not trip on junk-text ties.
   timestamp: 2026-11-25T00:59:30.692403+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m883ksg0qqmdk31wve8dftrd
+  text: |-
+    ### 2-Mac JACCL repeat — PASS (both)
+    ShardCheck at bc80c80f; rank 0 on m5u2 rdma_en6, rank 1 on m5u1 rdma_en5; FAST_SYNCH=1; 32 decode steps. Reference: unsharded run on m5u2 with the same ids.
+    - **Inkling-2-Mini-oQ4e-mtp** (3eea0427, default prompt): 33/33. Max KL 0.04832 at decode 1 (thin margin, flat distribution). Prefill 0.014; decodes 12–14 at 0.018/0.023/0.013; others ≤ 0.0077. Speed: 15.4 ms/token on one Mac, 18.6 on two, so it stays local.
+    - **Qwen3.8-27B-mxfp4** (bbdfd10f, 34 English ids `760,3712,314,279,3177,11690,440,264,2526,1809,314,19719,852,21681,3043,279,14367,13,5875,1599,1578,11,781,5617,18660,11,11388,321,8417,11,321,279,6092,13569`): 33/33. Max KL 0.00276 at decode 7. Speed: **17.4 ms/token on one Mac, 13.6 on two (1.28×).**
+  timestamp: 2026-11-25T01:02:39.616451+00:00
+position_column: done
+position_ordinal: fffff180
 title: Shard-check the Router's actual checkpoints (mxfp4, oQ4e-mtp/nvfp4)
 ---
 Sharding was validated only on the plain affine 4-bit checkpoints (Qwen3.8-27B-4bit, Inkling-2-Mini-4bit). The Router's model lists also use mlx-community/Qwen3.8-27B-mxfp4 and mlx-community/Inkling-2-Mini-oQ4e-mtp. The latter has mixed quantization: 8-bit affine gs64 attention, embed and lm_head, plus nvfp4 gs16 experts. Its per-layer quantization entries in config.json also differ between in_proj and q/k/v layers.
