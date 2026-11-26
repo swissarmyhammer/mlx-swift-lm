@@ -73,8 +73,24 @@ comments:
     - evidence: forks swissarmyhammer/mlx 523e1728, swissarmyhammer/mlx-swift 2d5a12b (jaccl-no-ipv4, pushed). mlx-swift-lm: 1 new file, Tests/MLXLMTests/QuantizedGatherGuardBytesTests.swift (4 cases, red at 6eb4ccc, green at 2d5a12b); Package.resolved is gitignored and resolves 2d5a12b locally. Five bundles pass (MLXLMTests 1261 XCTest + 2784 ST, Guided 96, FM 618, CXGrammar 7, Macros 11). Repro 6x: 0/384 + 0/288 (before 51/384 + 10/144). shard-check --tiny 18/18 PASS. Perf medians: prefill 3172 -> 3247 tok/s, decode 89.26 -> 89.03 tok/s (no drop over 2%).
     - next: /review, then commit mlx-swift-lm (coordinator).
   timestamp: 2026-11-26T22:28:15.974494+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m8d0hme10q7634nrvp7bvzg2
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (92b861d6) — 0 findings (attempted 7, confirmed 0, refuted 0, failed 0); reviewed Tests/MLXLMTests/QuantizedGatherGuardBytesTests.swift; 4 .kanban files had no matching validator
+    - next: none — moved to done
+  timestamp: 2026-11-26T22:45:15.329643+00:00
+- actor: claude-code
+  id: 01m8d0j0wz32tpg91w620watjs
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — cause: NAX QuantizedBlockLoader::load_safe out-of-bounds read when K % 64 != 0. Fixed in forks swissarmyhammer/mlx 523e1728 + swissarmyhammer/mlx-swift 2d5a12b (jaccl-no-ipv4, pushed); new Tests/MLXLMTests/QuantizedGatherGuardBytesTests.swift. Perf Inkling-2-Mini-4bit decode 89.26 -> 89.03 tok/s; parallel repro 13% -> 0/672
+    - test: green — 5 bundles, MLXLMTests twice (2784 ST + 1261 XCTest, ClusterInklingParityTests + guard-bytes passed both), verify-docs, --tiny 9 families PASS
+    - commit: 92b861d6
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-26T22:45:28.095006+00:00
+position_column: done
+position_ordinal: ffffff8480
 title: ClusterInklingParityTests flakes with NaN logits in full MLXLMTests runs
 ---
 `ClusterInklingParityTests` ("the prompt and every fed token give the local logits", promptLength 40) sometimes fails with NaN logits at every step, only in a full `MLXLMTests` run. Run alone (`xcrun xctest -XCTest MLXLMTests.ClusterInklingParityTests`) it passes.
