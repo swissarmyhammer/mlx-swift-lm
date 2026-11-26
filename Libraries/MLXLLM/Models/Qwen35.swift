@@ -710,6 +710,10 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
     @ModuleInfo(key: "shared_expert") var sharedExpert: Qwen3NextMLP
     @ModuleInfo(key: "shared_expert_gate") var sharedExpertGate: Linear
 
+    /// The group whose processes each hold a slice of every expert and of the shared expert,
+    /// or nil for whole experts.
+    private(set) var group: MLXDistributed.Group?
+
     init(_ args: Qwen35TextConfiguration) {
         self.normTopkProb = args.normTopkProb
         self.numExperts = args.numExperts
@@ -765,7 +769,17 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         var sharedY = sharedExpert(x)
         sharedY = sigmoid(sharedExpertGate(x)) * sharedY
 
-        return combined + sharedY
+        let sum = combined + sharedY
+        return group.map { MLXDistributed.allSum(sum, group: $0) } ?? sum
+    }
+
+    /// Sums the partial outputs of the experts across `group`, whose processes each hold a slice
+    /// of every expert and of the shared expert.
+    ///
+    /// The shared expert gate scales each token by one factor, so the sum of the gated partial
+    /// outputs is the gated sum, and one all-sum covers the routed and the shared experts.
+    func adoptShardedExperts(group: MLXDistributed.Group) {
+        self.group = group
     }
 }
 

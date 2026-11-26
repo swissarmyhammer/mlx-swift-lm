@@ -319,10 +319,12 @@ and run on the workers of a `ClusterLanguageModel`:
 
 | `model_type` | Factory | Notes |
 |---|---|---|
-| `qwen3_5`, `qwen3_5_text`, `qwen3_8`, `qwen3_8_text` | LLM | Dense only |
+| `qwen3_5`, `qwen3_5_text`, `qwen3_8`, `qwen3_8_text` | LLM | Dense |
+| `qwen3_5_moe`, `qwen3_8_moe` | LLM | Mixture of experts: each expert's inner width splits |
+| `prism_hadamard_qwen35` | LLM | Hadamard-rotated pack |
 | `inkling2`, `inkling2_loop` | VLM | Text stack; the vision tower stays whole, a cluster model takes no image |
 
-`qwen3_5_moe`, `qwen3_8_moe` and `prism_hadamard_qwen35` are refused, as is every other type.
+Every other type is refused.
 See [distributed-inference.md](distributed-inference.md).
 
 ## Memory Requirements

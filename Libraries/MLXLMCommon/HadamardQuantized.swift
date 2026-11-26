@@ -96,6 +96,75 @@ open class HadamardQuantizedLinear: QuantizedLinear {
     }
 }
 
+/// A ``HadamardQuantizedLinear`` whose inputs split across a group, which sums the partial
+/// outputs.
+///
+/// The rotation is block diagonal over the inputs, so when the share of each process holds whole
+/// blocks, the rotation of its inputs is the rotation of that share alone. Each process keeps the
+/// signs and the packed columns of its own inputs. ``TensorParallel/makeShardedToAll(_:at:group:)``
+/// makes it.
+public final class ShardedToAllHadamardQuantizedLinear: HadamardQuantizedLinear {
+
+    /// The group the inputs split across.
+    public let group: MLXDistributed.Group
+
+    /// The share of this process of `other`, whose partial outputs sum across `group`.
+    ///
+    /// - Parameters:
+    ///   - other: The whole rotated projection. It does not change.
+    ///   - path: The path of the projection, for the error.
+    ///   - group: The group to split across.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)`` when a
+    ///   share would split a quantization group or a Hadamard block.
+    public convenience init(
+        _ other: HadamardQuantizedLinear, at path: String, group: MLXDistributed.Group
+    ) throws {
+        try self.init(
+            other, at: path, rank: try group.rank, groupSize: try group.size, group: group)
+    }
+
+    /// The share of process `rank` of `groupSize` processes of `other`, whose partial outputs
+    /// sum across `group`.
+    ///
+    /// - Parameters:
+    ///   - other: The whole rotated projection. It does not change.
+    ///   - path: The path of the projection, for the error.
+    ///   - rank: The process whose inputs the share keeps.
+    ///   - groupSize: The number of processes.
+    ///   - group: The group the partial outputs sum across.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)`` when a
+    ///   share would split a quantization group or a Hadamard block.
+    init(
+        _ other: HadamardQuantizedLinear, at path: String, rank: Int, groupSize: Int,
+        group: MLXDistributed.Group
+    ) throws {
+        try TensorParallel.requireWholeInputs(of: other, at: path, across: groupSize)
+        func share(_ array: MLXArray) -> MLXArray {
+            contiguous(array.split(parts: groupSize, axis: -1)[rank])
+        }
+        self.group = group
+        super.init(
+            weight: share(other.weight), bias: other.bias, scales: share(other.scales),
+            biases: other.biases.map(share), signs: share(other.signs),
+            groupSize: other.groupSize, bits: other.bits, mode: other.mode,
+            rotation: other.rotation)
+    }
+
+    /// The sum across ``group`` of the partial outputs of every process, plus the bias once.
+    public override func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let sum = MLXDistributed.allSum(partialProduct(x), group: group)
+        return bias.map { sum + $0 } ?? sum
+    }
+
+    /// The product of `x`, the inputs of this process, with the columns of this process: its part
+    /// of the sum, without the bias.
+    func partialProduct(_ x: MLXArray) -> MLXArray {
+        quantizedMM(
+            rotation.forward(x, signs: signs), weight, scales: scales, biases: biases,
+            transpose: true, groupSize: groupSize, bits: bits, mode: mode)
+    }
+}
+
 /// A `QuantizedEmbedding` whose rows were quantized in a rotated basis.
 ///
 /// Lookup un-rotates the dequantized rows. ``asLinear(_:)`` rotates its input before the packed

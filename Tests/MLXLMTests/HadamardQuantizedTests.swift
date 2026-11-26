@@ -340,7 +340,9 @@ final class HadamardQuantizedTests: XCTestCase {
 
     // MARK: - Manifest
 
-    private static let packConfig = """
+    /// The `config.json` of a tiny rotated pack: the manifest beside a four-layer Qwen 3.5
+    /// configuration whose first two layers carry rotated projections.
+    static let packConfig = """
         {
             "model_type": "prism_hadamard_qwen35",
             "base_model_type": "qwen3_5",

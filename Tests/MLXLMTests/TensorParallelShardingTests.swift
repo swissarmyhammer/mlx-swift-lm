@@ -145,17 +145,6 @@ struct Qwen35TensorParallelPlanTests {
             try Qwen35TensorParallelPlan(configuration: configuration, groupSize: Self.groupSize)
         }
     }
-
-    @Test("a mixture-of-experts model is not supported yet")
-    func rejectsMixtureOfExperts() throws {
-        var configuration = try Self.makeConfiguration()
-        configuration.numExperts = 4
-        #expect(
-            throws: TensorParallelShardingError.unsupported(feature: "mixture-of-experts layers")
-        ) {
-            try Qwen35TensorParallelPlan(configuration: configuration, groupSize: Self.groupSize)
-        }
-    }
 }
 
 struct TensorParallelStockProjectionTests {

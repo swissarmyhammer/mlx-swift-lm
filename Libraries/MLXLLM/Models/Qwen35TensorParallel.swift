@@ -9,6 +9,8 @@ import MLXNN
 ///
 /// Each process keeps whole heads. The query projection of an attention layer holds the query
 /// and the gate of each head side by side, so a split of its rows keeps both halves together.
+/// Each process keeps a slice of the inner width of the MLP, or of every expert and of the
+/// shared expert of an MoE block, whose router and shared expert gate stay whole.
 struct Qwen35TensorParallelPlan: Equatable {
 
     /// The number of processes.
@@ -33,12 +35,9 @@ struct Qwen35TensorParallelPlan: Equatable {
     /// - Parameters:
     ///   - configuration: The configuration of the unsharded model.
     ///   - groupSize: The number of processes.
-    /// - Throws: ``TensorParallelShardingError`` when a count does not split, or for a
-    ///   mixture-of-experts model.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)`` when a
+    ///   count does not split.
     init(configuration: Qwen35TextConfiguration, groupSize: Int) throws {
-        guard configuration.numExperts == 0 else {
-            throw TensorParallelShardingError.unsupported(feature: "mixture-of-experts layers")
-        }
         self.groupSize = groupSize
         attentionHeads = try TensorParallel.share(
             of: configuration.attentionHeads, named: "attentionHeads", across: groupSize)
@@ -49,12 +48,45 @@ struct Qwen35TensorParallelPlan: Equatable {
         linearValueHeads = try TensorParallel.share(
             of: configuration.linearNumValueHeads, named: "linearNumValueHeads",
             across: groupSize)
-        _ = try TensorParallel.share(
-            of: configuration.intermediateSize, named: "intermediateSize", across: groupSize)
+        for (quantity, width) in Self.feedForwardWidths(of: configuration) {
+            _ = try TensorParallel.share(of: width, named: quantity, across: groupSize)
+        }
 
         let keyDim = configuration.linearNumKeyHeads * configuration.linearKeyHeadDim
         gatedDeltaInputSegments = .indices([keyDim, Qwen35GatedDeltaNet.queryKeyParts * keyDim])
     }
+
+    /// The inner widths of the feed-forward blocks of `configuration` that split, by name: the
+    /// width of the dense MLP, or of the experts and of the shared expert of an MoE block.
+    private static func feedForwardWidths(of configuration: Qwen35TextConfiguration)
+        -> KeyValuePairs<String, Int>
+    {
+        guard configuration.numExperts > 0 else {
+            return ["intermediateSize": configuration.intermediateSize]
+        }
+        return [
+            "moeIntermediateSize": configuration.moeIntermediateSize,
+            "sharedExpertIntermediateSize": configuration.sharedExpertIntermediateSize,
+        ]
+    }
+
+    /// One whole run per process of the leading axis.
+    private static let byRows = TensorParallel.Split(axis: 0, segments: .count(1))
+
+    /// The axis of the inputs of a projection, `[outputs, inputs]`.
+    private static let inputAxis = 1
+
+    /// The splits of the parameters of an MoE block that split in place: the inner width of
+    /// every expert, and of the shared expert. The router and the shared expert gate act on the
+    /// whole residual stream and stay whole.
+    static let expertSplits: [String: TensorParallel.Split] = {
+        let experts = TensorParallel.switchGLUSplits.map { ("switch_mlp.\($0.key)", $0.value) }
+        let sharedExpert = [
+            ("shared_expert.gate_proj", byRows), ("shared_expert.up_proj", byRows),
+            ("shared_expert.down_proj", TensorParallel.Split(axis: inputAxis, segments: .count(1))),
+        ]
+        return Dictionary(uniqueKeysWithValues: experts + sharedExpert)
+    }()
 }
 
 /// The modules that replace parts of one decoder layer, made before anything changes.
@@ -64,8 +96,9 @@ struct Qwen35LayerShards {
     /// projection, and the conv of a gated delta net.
     let mixer: [String: Module]
 
-    /// The down projection of the MLP.
-    let down: Linear
+    /// The down projection of a dense MLP, or nil for an MoE block, whose experts split in place
+    /// and sum once.
+    let down: Linear?
 }
 
 extension Qwen35DecoderLayer {
@@ -83,8 +116,7 @@ extension Qwen35DecoderLayer {
     ) throws -> Qwen35LayerShards {
         try splitProjections(plan).requireStockRowProjections()
         try requireWholeShares(plan)
-        let down = try TensorParallel.makeShardedToAll(
-            try denseMLP().downProj, at: "mlp.down_proj", group: group)
+        let down = try makeShardedDown(group: group)
 
         if let attention = selfAttn {
             let output = try TensorParallel.makeShardedToAll(
@@ -108,17 +140,39 @@ extension Qwen35DecoderLayer {
     ///   the first projection that does not split.
     func requireWholeShares(_ plan: Qwen35TensorParallelPlan) throws {
         try splitProjections(plan).requireWholeShares(across: plan.groupSize)
+        if let moe = mlp as? Qwen35SparseMoeBlock {
+            try TensorParallel.requireWholeExpertShares(
+                of: moe.switchMLP, at: Self.expertsPath, across: plan.groupSize)
+        }
+    }
+
+    /// The path of the experts of an MoE block.
+    private static let expertsPath = "mlp.switch_mlp"
+
+    /// The sharded-to-all down projection of a dense MLP, or nil for an MoE block, after a
+    /// check of the projections it splits in place.
+    private func makeShardedDown(group: MLXDistributed.Group) throws -> Linear? {
+        let (path, feedForward) = try denseFeedForward()
+        guard let moe = mlp as? Qwen35SparseMoeBlock else {
+            return try TensorParallel.makeShardedToAll(
+                feedForward.downProj, at: "\(path).down_proj", group: group)
+        }
+        try TensorParallel.requireStockExperts(moe.switchMLP, at: Self.expertsPath)
+        try TensorParallel.requireStockProjection(
+            feedForward.downProj, at: "\(path).down_proj")
+        return nil
     }
 
     /// The projections of this layer that split, by the axis they split on.
     private func splitProjections(_ plan: Qwen35TensorParallelPlan) throws
         -> TensorParallel.SplitProjections
     {
-        let mlp = try denseMLP()
+        let (path, mlp) = try denseFeedForward()
         let rows: [(path: String, projection: Linear, segments: Segments)] = [
-            ("mlp.gate_proj", mlp.gateProj, .count(1)), ("mlp.up_proj", mlp.upProj, .count(1)),
+            ("\(path).gate_proj", mlp.gateProj, .count(1)),
+            ("\(path).up_proj", mlp.upProj, .count(1)),
         ]
-        let down = (path: "mlp.down_proj", projection: mlp.downProj)
+        let down = (path: "\(path).down_proj", projection: mlp.downProj)
         if let attention = selfAttn {
             return TensorParallel.SplitProjections(
                 rows: rows + [
@@ -171,17 +225,29 @@ extension Qwen35DecoderLayer {
         }
         mixer.update(modules: ModuleChildren(values: shards.mixer.mapValues { .value($0) }))
 
-        let mlp = try denseMLP()
+        if let moe = mlp as? Qwen35SparseMoeBlock {
+            try TensorParallel.shardAxes(
+                of: moe, Qwen35TensorParallelPlan.expertSplits, group: group)
+            moe.adoptShardedExperts(group: group)
+            return
+        }
+        let (_, mlp) = try denseFeedForward()
         try TensorParallel.shardLeadingAxis(
             of: mlp, ["gate_proj": .count(1), "up_proj": .count(1)], group: group)
-        mlp.update(modules: ModuleChildren(values: ["down_proj": .value(shards.down)]))
+        if let down = shards.down {
+            mlp.update(modules: ModuleChildren(values: ["down_proj": .value(down)]))
+        }
     }
 
-    /// The dense MLP of this layer.
-    private func denseMLP() throws -> Qwen3NextMLP {
-        guard let mlp = mlp as? Qwen3NextMLP else {
-            throw TensorParallelShardingError.unsupported(feature: "mixture-of-experts layers")
+    /// The dense MLP of this layer, or the shared expert of its MoE block, with its path.
+    private func denseFeedForward() throws -> (path: String, mlp: Qwen3NextMLP) {
+        switch mlp {
+        case let moe as Qwen35SparseMoeBlock:
+            return ("mlp.shared_expert", moe.sharedExpert)
+        case let dense as Qwen3NextMLP:
+            return ("mlp", dense)
+        default:
+            throw TensorParallelShardingError.unsupported(feature: "an MLP of \(type(of: mlp))")
         }
-        return mlp
     }
 }

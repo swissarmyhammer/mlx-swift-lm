@@ -48,12 +48,9 @@ public final class RemoteModelExecutor {
     /// The `model_type` values whose model conforms to ``TensorParallelShardable`` and shards
     /// with no error, as the LLM factory loads them, or the VLM factory for a type only it
     /// knows.
-    ///
-    /// `qwen3_5_moe` is not here: its mixture-of-experts layers do not shard yet.
-    /// `prism_hadamard_qwen35` is not either: its rotated projections are not stock projections.
-    /// Both wait for the larger-models phase of the cluster work.
     public static let shardableModelFamilies = [
-        "inkling2", "inkling2_loop", "qwen3_5", "qwen3_5_text", "qwen3_8", "qwen3_8_text",
+        "inkling2", "inkling2_loop", "prism_hadamard_qwen35", "qwen3_5", "qwen3_5_moe",
+        "qwen3_5_text", "qwen3_8", "qwen3_8_moe", "qwen3_8_text",
     ]
 
     /// What a worker runs before it loads a model, for a planner.

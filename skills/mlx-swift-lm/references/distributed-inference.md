@@ -26,14 +26,15 @@ DocC article: `Libraries/MLXLMCommon/Documentation.docc/distributed-inference.md
 | `model_type` | What splits |
 |---|---|
 | `qwen3_5`, `qwen3_5_text`, `qwen3_8`, `qwen3_8_text` (dense) | Full-attention and gated delta heads, the gated delta conv, the MLP width |
+| `qwen3_5_moe`, `qwen3_8_moe` (MoE) | The heads as for dense, each expert's and the shared expert's inner width; the router stays whole |
+| `prism_hadamard_qwen35` (rotated pack) | As for dense; an input split of a rotated projection keeps each process's signs and needs whole Hadamard blocks |
 | `inkling2`, `inkling2_loop` (text stack) | Sliding and full attention heads, their short convolutions, each expert's inner width |
 
 `RemoteModelExecutor.shardableModelFamilies` holds the same list. Refused:
 
-- `qwen3_5_moe`, `qwen3_8_moe`: `TensorParallelShardingError.unsupported` (mixture-of-experts layers).
-- `prism_hadamard_qwen35`: `.unsupported` (rotated projections are not stock `Linear`/`QuantizedLinear`).
-- A LoRA-adapted projection: `.unsupported`, for the same reason.
-- A group size that does not divide a head count, an MLP width, or whole quantization groups: `.indivisible(quantity:count:groupSize:)`.
+- A LoRA-adapted projection: `TensorParallelShardingError.unsupported` (not a stock `Linear`, `QuantizedLinear` or `HadamardQuantizedLinear`).
+- An MoE block whose experts are not a stock `SwitchGLU`, or whose expert down projection has a bias: `.unsupported`.
+- A group size that does not divide a head count, an MLP or expert width, whole quantization groups, or whole Hadamard blocks: `.indivisible(quantity:count:groupSize:)`.
 - Any other model: `.notShardable(modelType:)`.
 
 Every share is checked before any layer changes, so a refused model stays as it was.

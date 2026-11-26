@@ -368,13 +368,7 @@ struct Inkling2ShareSumTests {
     private static func keepShare(
         of module: Module, _ splits: [String: TensorParallel.Split], rank: Int
     ) {
-        let parameters = module.parameters().flattened().map { path, value in
-            guard let split = TensorParallel.split(of: path, in: splits) else {
-                return (path, value)
-            }
-            return (path, contiguous(value.split(parts: groupSize, axis: split.axis)[rank]))
-        }
-        module.update(parameters: ModuleParameters.unflattened(parameters))
+        TensorParallelShares.keep(rank: rank, of: groupSize, in: module, splits)
     }
 
     private static func layerInput() -> MLXArray {

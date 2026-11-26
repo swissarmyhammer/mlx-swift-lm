@@ -135,7 +135,8 @@ struct RemoteModelExecutorTests {
     func eachShardableModelFamilyLoadsAModelThatShards(family: String) async throws {
         let model = try await ShardableFamilyConfiguration.makeModel(of: family)
 
-        #expect(model is TensorParallelShardable)
+        let shardable = try #require(model as? TensorParallelShardable)
+        #expect(throws: Never.self) { try shardable.shard(group: MLXDistributed.initialize()) }
     }
 
     @Test("describe reports the model as the worker runs it")
@@ -590,6 +591,19 @@ private enum ShardableFamilyConfiguration {
         "qwen3_8_text": (Qwen35FixtureJSON.text(mtpLayers: 0), "qwen3_5_text"),
         "inkling2": (Inkling2ModelTests.tinyJSON, "inkling2_loop"),
         "inkling2_loop": (Inkling2ModelTests.tinyJSON, "inkling2_loop"),
+        "qwen3_5_moe": (
+            Qwen35FixtureJSON.wrappedText(
+                modelType: "qwen3_5_moe",
+                textConfigJSON: Qwen35FixtureJSON.text(mtpLayers: 0, numExperts: 2)),
+            "qwen3_5_moe"
+        ),
+        "qwen3_8_moe": (
+            Qwen35FixtureJSON.wrappedText(
+                modelType: "qwen3_5_moe",
+                textConfigJSON: Qwen35FixtureJSON.text(mtpLayers: 0, numExperts: 2)),
+            "qwen3_5_moe"
+        ),
+        "prism_hadamard_qwen35": (HadamardQuantizedTests.packConfig, "prism_hadamard_qwen35"),
     ]
 
     /// A small `config.json` of `family`.

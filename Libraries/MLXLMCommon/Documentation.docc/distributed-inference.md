@@ -61,6 +61,8 @@ replacements of every layer first, then splits the layers one at a time.
 | `model_type` | Model | What splits |
 |---|---|---|
 | `qwen3_5`, `qwen3_5_text`, `qwen3_8`, `qwen3_8_text` | Qwen 3.5 and Qwen 3.8, dense | Full-attention and gated delta heads, the gated delta conv, the MLP width |
+| `qwen3_5_moe`, `qwen3_8_moe` | Qwen 3.5 and Qwen 3.8, mixture of experts | The heads as for the dense model, the inner width of every expert and of the shared expert; the router stays whole |
+| `prism_hadamard_qwen35` | Qwen 3.5 from a Hadamard-rotated pack | As for the dense model; a rotated projection whose inputs split keeps the signs of its own inputs |
 | `inkling2`, `inkling2_loop` | Inkling 2 Small and Mini, text stack | Attention heads of the sliding and full layers, their short convolutions, the inner width of every expert |
 
 ``RemoteModelExecutor/shardableModelFamilies`` lists the same types for a planner. The text
@@ -68,11 +70,13 @@ stack loads through the LLM factory for Qwen 3.5, or through the VLM factory for
 knows, such as Inkling 2. The vision tower of Inkling 2 stays whole, and a cluster model takes
 no image input.
 
-These are refused:
+The experts of an MoE block sum their partial outputs once, routed and shared together, as the
+experts of Inkling 2 do. The rotation of a ``HadamardQuantizedLinear`` is block diagonal over its
+inputs, so a split of its inputs needs whole Hadamard blocks on each process, which
+``TensorParallel/requireWholeInputs(of:at:across:)`` checks beside the quantization groups;
+``ShardedToAllHadamardQuantizedLinear`` holds the share of one process.
 
-- `qwen3_5_moe` and `qwen3_8_moe`: the mixture-of-experts layers do not shard yet.
-- `prism_hadamard_qwen35`: its rotated projections are not stock projections.
-- Any other model type, which does not conform to ``TensorParallelShardable``.
+Any other model type is refused: it does not conform to ``TensorParallelShardable``.
 
 ## Load a share layer by layer
 

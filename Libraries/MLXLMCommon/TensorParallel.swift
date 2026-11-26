@@ -145,18 +145,26 @@ public enum TensorParallel {
         return count / groupSize
     }
 
-    /// Throws unless `layer` is a stock `Linear` or `QuantizedLinear`.
+    /// The projection types whose weights split by rows or by inputs.
     ///
-    /// An adapter or a rotated layer is a subclass whose weights do not split by rows or columns.
+    /// A rotated projection splits as well: its rows keep the whole rotation, and
+    /// ``makeShardedToAll(_:at:group:)`` keeps the signs of the inputs of each process.
+    private static let stockProjectionTypes: Set<ObjectIdentifier> = [
+        ObjectIdentifier(Linear.self), ObjectIdentifier(QuantizedLinear.self),
+        ObjectIdentifier(HadamardQuantizedLinear.self),
+    ]
+
+    /// Throws unless `layer` is a stock `Linear`, `QuantizedLinear` or
+    /// ``HadamardQuantizedLinear``.
+    ///
+    /// An adapter is a subclass whose weights do not split by rows or columns, and a sharded
+    /// projection splits no further.
     ///
     /// - Parameters:
     ///   - layer: The projection to check.
     ///   - path: The path of the projection, for the error.
     public static func requireStockProjection(_ layer: Linear, at path: String) throws {
-        let type = ObjectIdentifier(Swift.type(of: layer))
-        guard
-            type == ObjectIdentifier(Linear.self) || type == ObjectIdentifier(QuantizedLinear.self)
-        else {
+        guard stockProjectionTypes.contains(ObjectIdentifier(Swift.type(of: layer))) else {
             throw TensorParallelShardingError.unsupported(
                 feature: "\(Swift.type(of: layer)) at \(path)")
         }
@@ -250,7 +258,10 @@ public enum TensorParallel {
     }
 
     /// Throws unless every process keeps an equal run of the inputs of `layer` that holds whole
-    /// quantization groups.
+    /// quantization groups, and whole Hadamard blocks of a rotated projection.
+    ///
+    /// The rotation of a ``HadamardQuantizedLinear`` is block diagonal over its inputs, so the
+    /// rotation of a run of whole blocks is the rotation of that run alone.
     ///
     /// - Parameters:
     ///   - layer: The projection whose inputs split.
@@ -260,8 +271,93 @@ public enum TensorParallel {
     public static func requireWholeInputs(
         of layer: Linear, at path: String, across groupSize: Int
     ) throws {
+        let inputs = layer.shape.1
         try requireWholeInputs(
-            layer.shape.1, quantization: QuantizationGroups(of: layer), at: path,
+            inputs, quantization: QuantizationGroups(of: layer), at: path, across: groupSize)
+        guard let rotated = layer as? HadamardQuantizedLinear else { return }
+        let blockSize = rotated.rotation.blockSize
+        _ = try share(
+            of: inputs / blockSize, named: "\(path) Hadamard blocks (\(blockSize) inputs each)",
+            across: groupSize)
+    }
+
+    /// The axis of the rows of each expert of a `SwitchLinear`, `[experts, outputs, inputs]`.
+    private static let expertRowAxis = 1
+
+    /// The axis of the inputs of each expert of a `SwitchLinear`, `[experts, outputs, inputs]`.
+    private static let expertInputAxis = 2
+
+    /// The splits of the parameters of a `SwitchGLU`, so each process keeps a slice of the inner
+    /// width of every expert: the rows of the gate and up projections, and the inputs of the
+    /// down projection. The quantized scales and biases split on the same axes.
+    public static let switchGLUSplits: [String: Split] = [
+        "gate_proj": Split(axis: expertRowAxis, segments: .count(1)),
+        "up_proj": Split(axis: expertRowAxis, segments: .count(1)),
+        expertDownKey: Split(axis: expertInputAxis, segments: .count(1)),
+    ]
+
+    /// The key of the down projection of a `SwitchGLU`.
+    private static let expertDownKey = "down_proj"
+
+    /// The expert projection types whose weights split on the axes of ``switchGLUSplits``.
+    private static let stockExpertTypes: Set<ObjectIdentifier> = [
+        ObjectIdentifier(SwitchLinear.self), ObjectIdentifier(QuantizedSwitchLinear.self),
+    ]
+
+    /// The gate and up projections of `experts`, whose rows split, by key.
+    private static func rowProjections(of experts: SwitchGLU) -> [(
+        key: String, projection: SwitchLinear
+    )] {
+        [("gate_proj", experts.gateProj), ("up_proj", experts.upProj)]
+    }
+
+    /// Throws unless `experts` is a stock `SwitchGLU` of stock `SwitchLinear` or
+    /// `QuantizedSwitchLinear` projections, whose down projection has no bias, so
+    /// ``switchGLUSplits`` splits it. A subclass may transform the activations between the
+    /// projections, and a bias of the down projection would add once on every process.
+    ///
+    /// - Parameters:
+    ///   - experts: The experts to check.
+    ///   - path: The path of the experts, for the error.
+    public static func requireStockExperts(_ experts: SwitchGLU, at path: String) throws {
+        guard ObjectIdentifier(Swift.type(of: experts)) == ObjectIdentifier(SwitchGLU.self) else {
+            throw TensorParallelShardingError.unsupported(
+                feature: "\(Swift.type(of: experts)) at \(path)")
+        }
+        let projections = rowProjections(of: experts) + [(expertDownKey, experts.downProj)]
+        for (key, projection) in projections {
+            guard stockExpertTypes.contains(ObjectIdentifier(Swift.type(of: projection))) else {
+                throw TensorParallelShardingError.unsupported(
+                    feature: "\(Swift.type(of: projection)) at \(path).\(key)")
+            }
+        }
+        guard experts.downProj.bias == nil else {
+            throw TensorParallelShardingError.unsupported(
+                feature: "a bias of the expert down projection at \(path).\(expertDownKey)")
+        }
+    }
+
+    /// Throws unless each process keeps whole rows of the gate and up projection of every
+    /// expert of `experts`, and whole quantization groups of the inputs of its down projection.
+    ///
+    /// - Parameters:
+    ///   - experts: The experts whose inner width splits.
+    ///   - path: The path of the experts, for the error.
+    ///   - groupSize: The number of processes.
+    /// - Throws: ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)`` naming
+    ///   the first projection that does not split.
+    public static func requireWholeExpertShares(
+        of experts: SwitchGLU, at path: String, across groupSize: Int
+    ) throws {
+        for (key, projection) in rowProjections(of: experts) {
+            try requireWholeRows(projection.outputDims, at: "\(path).\(key)", across: groupSize)
+        }
+        let down = experts.downProj
+        let quantization = (down as? QuantizedSwitchLinear).map {
+            QuantizationGroups(mode: $0.mode, bits: $0.bits, groupSize: $0.groupSize)
+        }
+        try requireWholeInputs(
+            down.inputDims, quantization: quantization, at: "\(path).\(expertDownKey)",
             across: groupSize)
     }
 
@@ -334,11 +430,15 @@ public enum TensorParallel {
     ///   - layer: A stock projection. It does not change.
     ///   - path: The path of the projection, for the error.
     ///   - group: The group to split across.
-    /// - Returns: A `ShardedToAllLinear` or `QuantizedShardedToAllLinear`.
+    /// - Returns: A `ShardedToAllLinear`, `QuantizedShardedToAllLinear` or
+    ///   ``ShardedToAllHadamardQuantizedLinear``.
     public static func makeShardedToAll(
         _ layer: Linear, at path: String, group: MLXDistributed.Group
     ) throws -> Linear {
         try requireStockProjection(layer, at: path)
+        if let rotated = layer as? HadamardQuantizedLinear {
+            return try ShardedToAllHadamardQuantizedLinear(rotated, at: path, group: group)
+        }
         return try shardLinear(layer, sharding: .shardedToAll, group: group)
     }
 
@@ -417,20 +517,54 @@ public enum TensorParallel {
 
     /// Splits the named parameters of `owner` across `group` on their own axes, in place.
     ///
-    /// The update goes through `owner`, as in ``shardLeadingAxis(of:_:group:)``.
+    /// The update goes through `owner`, as in ``shardLeadingAxis(of:_:group:)``. The signs of a
+    /// rotated projection whose rows split stay whole, because every process reads the whole
+    /// input.
     ///
     /// - Parameters:
     ///   - owner: The module that holds the parameters.
     ///   - splits: The split of each key; see ``split(of:in:)``.
     ///   - group: The group to split across.
+    /// - Throws: ``TensorParallelShardingError/unsupported(feature:)`` for an input split of a
+    ///   rotated projection, or `ShardingError` of MLXNN when a parameter cannot split.
     public static func shardAxes(
         of owner: Module, _ splits: [String: Split], group: MLXDistributed.Group
     ) throws {
+        let wholeSigns = try wholeRotationSigns(in: owner, splits)
         try shardInPlace(
             owner,
             predicate: { path, _ in
-                split(of: path, in: splits).map { (axis: $0.axis, segments: $0.segments) }
+                guard !wholeSigns.contains(path) else { return nil }
+                return split(of: path, in: splits).map { (axis: $0.axis, segments: $0.segments) }
             },
             group: group)
+    }
+
+    /// The paths of the signs of the rotated projections of `owner` whose rows `splits` splits.
+    ///
+    /// Each sign belongs to one input, and every process reads the whole input of a projection
+    /// whose rows split, so the signs stay whole.
+    ///
+    /// - Parameters:
+    ///   - owner: The module that holds the projections.
+    ///   - splits: The split of each key; see ``split(of:in:)``.
+    /// - Throws: ``TensorParallelShardingError/unsupported(feature:)`` for a rotated projection
+    ///   whose inputs `splits` splits in place: its inputs split through
+    ///   ``makeShardedToAll(_:at:group:)``, which keeps the signs of each process.
+    static func wholeRotationSigns(
+        in owner: Module, _ splits: [String: Split]
+    ) throws -> Set<String> {
+        let rotated = owner.namedModules().compactMap { key, module in
+            module is HadamardQuantizedLinear ? key : nil
+        }
+        let rowSplit = try rotated.filter { key in
+            guard let split = split(of: "\(key).weight", in: splits) else { return false }
+            guard split.axis == 0 else {
+                throw TensorParallelShardingError.unsupported(
+                    feature: "an input split of the rotated projection \(key)")
+            }
+            return true
+        }
+        return Set(rowSplit.map { "\($0).signs" })
     }
 }
