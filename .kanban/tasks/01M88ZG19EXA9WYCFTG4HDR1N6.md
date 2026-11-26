@@ -58,8 +58,24 @@ comments:
     - evidence: 9 files — Tests/MLXLMTestSupport/MaxAbsDiff.swift (new), Tests/MLXLMTestSupport/Inkling2TinyModels.swift, Tests/MLXLMTests/GatedDeltaGPUStreamTests.swift, ContinuationAssertions.swift, Qwen3VLContinuationTests.swift, Qwen35ContinuationTests.swift, Qwen3VLMoEContinuationTests.swift, GlmOcrContinuationTests.swift. swift-format applied. `swift build --build-tests` reported no warnings other than the known SwiftBuild Cmlx "missing creator" warning. xctest MLXLMTests: 1261 XCTest, 0 failures; 2749 Swift Testing passed (the 3 known issues are pre-existing withKnownIssue). MLXFoundationModelsTests: 618 passed. All 3 findings are checked.
     - next: /review
   timestamp: 2026-11-26T16:47:43.501585+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8cd0ttzgsg7k71mmamks2kn
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (44748660): 0 findings (7 attempted, 0 failed, 0 skipped; 8 files reviewed, 2 .kanban files matched no validator). All 3 prior findings checked.
+    - next: none, task moved to done
+  timestamp: 2026-11-26T17:04:01.887444+00:00
+- actor: claude-code
+  id: 01m8cd19xnthdq0j9x9earr4pb
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 8 test files (shared MaxAbsDiff.swift, Inkling2TinyModels.swift named axes + [:] literal)
+    - test: green — 5 bundles; MLXLMTests twice (2749 ST + 1261 XCTest, 0 failures), FM 618, Guided 95, CXGrammar 7, Macros 11
+    - commit: 44748660
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-26T17:04:17.333181+00:00
+position_column: done
+position_ordinal: fffffe80
 title: GatedDelta ops fallback uses CustomFunction, which creates a second GPU stream
 ---
 Found by FoundationModelsCluster's GPU-stream guard (wevkejv, 13d83dd).
