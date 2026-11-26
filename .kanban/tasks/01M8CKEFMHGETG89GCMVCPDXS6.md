@@ -1,7 +1,79 @@
 ---
 assignees:
 - claude-code
-position_column: todo
+comments:
+- actor: claude-code
+  id: 01m8cwx8davs1xkdj8zee3ndst
+  text: |-
+    Root cause found. It is NOT a concurrency bug and NOT in this repo: MLX's NAX quantized block loaders read past the end of the weights and scales when K is not a multiple of the tile depth BK = 64. That is an out-of-bounds read in the Metal kernel. Concurrency only changes which bytes lie after the buffer.
+
+    Mechanism (each step was checked):
+    - Inkling2Experts.outputs -> down_proj -> gatherQuantizedMM(nvfp4, global scale, sortedIndices). For promptLength 40 the 39-token prefill chunk gives 78 rows (B >= 16, B/E >= 4), so GatherQMM::eval_gpu takes gather_qmm_rhs. On an M5 (NAX) with bfloat16 that is gather_qmm_rhs_nax with bm=32, bn=64, bk=64. promptLength 5 gives 10 rows and takes gather_qmv, so it never fails. That is why only case 40 flakes. The float32 model (bfloat16: false) takes the non-NAX path (TF32 is off) and gave 0 failures in 64.
+    - The tiny target has intermediate_size 32, so for down_proj K = 32, which is less than BK = 64 (align_K = false). In the K tail, `QuantizedBlockLoader::load_safe` (fp_quantized_nax.h, and both affine loaders in quantized_nax.h) checks only the row bound `bi >= src_tile_dim.y`. It always dequantizes all BK columns. For the last row of the last expert, it reads past the end of the weight and scales buffers. The A tile is zero-padded (psk = 0), but if a garbage e4m3 scale byte is 0x7F or 0xFF (NaN), then 0 * NaN = NaN, and the expert outputs of that tile are NaN. The NaN reaches the KV cache in the prefill, so every later step is NaN. This matches the card: "NaN at every step".
+    - Layer trace, with temporary hooks, of a model that had gone bad: embed, q/k/v, attention, residual, router, gateUp and activated are all finite. The down_proj gather output is the first NaN. The parameters and the 243 Mirror-reachable arrays of the model were bitwise unchanged, and the 13 Inkling2KernelConstants were unchanged. A reference model that had been good went NaN after other models were built concurrently. A model built fresh after that was bad or good at random, and Memory.clearCache() changed which. So the result depends on the memory layout next to the buffers, not on corrupted state.
+
+    Deterministic repro (no concurrency): gatherQuantizedMM sorted, E=4, N=64, 80 rows, bf16, with the weights/scales(/biases) as views of buffers followed by 4096 bytes of 0xFF, against the same views followed by zeros. nvfp4: K=32 NaN, K=96 NaN, K=64 bit-identical. affine gs32: the same (K=32 and 96 NaN, 64 identical). Clean results equal the dequantized float32 reference within 0.02 (refmax 6.7), before and after the fix.
+
+    Fix (proven in a scratch build only; not pushed anywhere): in load_safe, packs whose column is >= src_tile_dim.x load zeros and read neither weights nor scales/biases. Applied to fp_quantized_nax.h and the two affine loaders in quantized_nax.h, AND to mlx-swift's Source/Cmlx/mlx-generated/{fp_,}quantized_nax.cpp + mlx-generated/metal/*.h. Those are the JIT source strings that are actually compiled at run time, so editing kernels/*.h alone changes nothing. Patch (mlx paths): scratchpad mlx-nax-load-safe.patch. It applies cleanly to ~/github/swissarmyhammer/mlx (jaccl-no-ipv4, 59f01186).
+
+    Rates (8-thread concurrent tiny-target builds, then serial forwards, compared bit for bit with a reference):
+    - before: 6 runs gave 4, 7, 8, 13, 9 and 10 bad of 64 (51/384, 13%). The 'concurrent local runs' variant gave 2, 2 and 6 bad of 48.
+    - after the kernel fix: 3 runs, 0/192 and 0/144.
+    Full MLXLMTests bundle at HEAD 91d85604 (unchanged code): see the next comment. 91d85604 did not cause this and did not fix it. With global_scale = 1 the experts were ~1e-9, but 0 * NaN is still NaN.
+
+    Not the cause, ruled out: the thread-local streams/compile caches, Inkling2KernelConstants, the RemoteModelExecutor/in-process worker (the repro has no cluster lane at all; the local lane goes NaN), random state, weights, and the poisoned allocator buffer cache (filling the cache with NaN buffers did not reproduce it).
+
+    Production: the Inkling 2 Mini checkpoints have K = 2304 / 1152, which are multiples of 64, so they are not affected today. Any quantized NAX matmul with K % 64 != 0 is affected, for all fp and affine modes.
+  timestamp: 2026-11-26T21:41:41.930171+00:00
+- actor: claude-code
+  id: 01m8cxw7m3tb69rm59tc24qwv9
+  text: |-
+    Full-bundle rate at HEAD 91d85604 with unchanged code: 8 full `xcrun xctest MLXLMTests.xctest` runs, 0 failures (each run: 2783 Swift Testing tests passed, 3 known issues). Since 91d85604, the flake is rare in the full bundle, but the out-of-bounds read is still there. The concurrent-build stress described above reproduces it about 13% of the time.
+
+    Blocker: a decision is needed. The fix belongs in the mlx fork, not in this repo:
+    1. Apply scratchpad mlx-nax-load-safe.patch to swissarmyhammer/mlx jaccl-no-ipv4. Add an mlx test: quantized/gather matmul with K % 64 != 0 over buffers that guard-band bytes follow.
+    2. In swissarmyhammer/mlx-swift jaccl-no-ipv4: bump the submodule, regenerate Source/Cmlx/mlx-generated (the JIT strings {fp_,}quantized_nax.cpp and metal/*.h), then push.
+    3. Here: bump the mlx-swift revision in Package.resolved. Add a regression test in MLXLMTests: gatherQuantizedMM sorted nvfp4 + affine, K = 32/96, over guarded buffers. It must give finite, bit-identical results with 0x00 and 0xFF guard bytes. The test fails today and passes with the patch; I verified both in a scratch build.
+    This step was told not to commit, and pushing the forks moves shared dependencies, so I stopped here. A workaround in this repo only (for example, tiny intermediate_size 32 -> 64) would hide a real MLX bug. I did not apply it.
+
+    Repo is clean: the temporary instrumentation and the TMP test were removed; the TMP test is kept in scratchpad TMPPoisonInklingTests.swift.saved. The other bundles at unchanged HEAD: Guided 96, FoundationModels 618, CXGrammar 7, Macros 11 XCTest. All pass.
+  timestamp: 2026-11-26T21:58:36.931713+00:00
+- actor: claude-code
+  id: 01m8cxwag5ykjc1p0n833a4gdk
+  text: |-
+    ### implement — stuck
+    - evidence: cause = OOB read in MLX NAX QuantizedBlockLoader::load_safe (fp_quantized_nax.h + quantized_nax.h; JIT copies in mlx-swift mlx-generated) when K % 64 != 0; tiny Inkling down_proj K=32, gather_qmm_rhs_nax at promptLength 40. Stress repro before 51/384 (13%) bad, after kernel patch (scratch build) 0/192 + 0/144. Deterministic guard-band repro: K=32/96 NaN, K=64 identical; fixed by patch. Full MLXLMTests x8 at HEAD: 0 failures. No repo files changed.
+    - next: user approves pushing the mlx + mlx-swift fork fix (patch in scratchpad mlx-nax-load-safe.patch), then bump Package.resolved and add the guarded-buffer regression test here.
+  timestamp: 2026-11-26T21:58:39.877271+00:00
+- actor: claude-code
+  id: 01m8czje1sgf7q4q8fff71v7zn
+  text: |-
+    The coordinator approved pushing to our forks. Done:
+
+    1. swissarmyhammer/mlx jaccl-no-ipv4 **523e1728** (pushed). The three NAX quantized loaders with the K-tail pattern are fixed: fp_quantized_nax.h, plus the general and group-32 affine loaders in quantized_nax.h. The only other load_safe in a NAX header is steel/gemm/nax.h (NAXTile), which already bounds both dims. clang-format 21.1.8 and ruff are clean. New python test `test_gather_qmm_sorted_unaligned_k_reads_inside_buffers` (affine gs32 and nvfp4, K in {32, 96}, 0xFF guard bytes, finite and equal to the zero-guard result). It fails in all 4 cases without the fix and passes with it (local `setup.py build_ext --inplace` in a venv).
+       - test_quantized.py with MLX_ENABLE_TF32=0: 55 tests OK.
+       - With TF32 on (default on M5) there are pre-existing tolerance failures. Their set is identical before and after the fix, except for the 4 new cases, which the fix removes (1292 -> 1288).
+    2. swissarmyhammer/mlx-swift jaccl-no-ipv4 **2d5a12b** (pushed). Submodule bumped to 523e1728. Source/Cmlx/mlx-generated regenerated with tools/update-mlx.sh, not by hand; the generator also rewrote the commit comment in include-framework/Metal.hpp. mlx-c submodule initialized for the script. `swift build --build-tests` passes; xctest: MLXTests 446 XCTest + 80 ST, CmlxTests 1, MLXIntegrationTests 700 ST, all pass.
+    3. mlx-swift-lm: Package.resolved is gitignored, so there is nothing to commit for the pin. `swift package update mlx-swift` resolved 2d5a12b locally. SwiftPM's cached submodule checkout lacked 523e1728, so I ran `git fetch` in .build/checkouts/mlx-swift/Source/Cmlx/mlx, and did the same in .build/shard-check/SourcePackages. New test Tests/MLXLMTests/QuantizedGatherGuardBytesTests.swift: 4 cases (affine and nvfp4 x K 32/96). All 4 failed at 6eb4ccc and pass at 2d5a12b. Nothing else from the scratch test was restored.
+
+    Perf, this Mac, Inkling-2-Mini-4bit (affine gs64, K 2304/1152), ShardCheck Release, 512-token prompt, 128 decode steps, one warm-up then 3 runs, three interleaved sessions each:
+    - before (6eb4ccc), session medians: prefill 3299 / 3168 / 3172 tok/s; decode 89.30 / 89.19 / 89.26 tok/s.
+    - after (2d5a12b), session medians: prefill 3210 / 3232 / 3315 tok/s; decode 89.13 / 88.97 / 89.03 tok/s.
+    - Pooled medians over 9 runs each: prefill 3172 -> 3247 tok/s (+2.4%, within noise); decode 89.26 -> 89.03 tok/s (-0.26%). No drop over 2%. The changed code runs only in an unaligned tile tail, and this model's K values are aligned.
+
+    Verification:
+    - All five bundles at 2d5a12b: MLXLMTests 1261 XCTest + 2784 ST (3 known issues), Guided 96, FoundationModels 618, CXGrammar 7, Macros 11, all pass.
+    - Parallel-build repro, 6 runs: 0/384 bad (bisect) and 0/288 (concurrent). The repro was built in a scratch path; the file was added only for that build and then removed.
+    - `scripts/shard-check.sh --tiny`: 18/18 PASS (9 families, teacher-forced and announce).
+  timestamp: 2026-11-26T22:28:12.985209+00:00
+- actor: claude-code
+  id: 01m8czjgz6rv03ntmeayy64mx0
+  text: |-
+    ### implement — changed
+    - evidence: forks swissarmyhammer/mlx 523e1728, swissarmyhammer/mlx-swift 2d5a12b (jaccl-no-ipv4, pushed). mlx-swift-lm: 1 new file, Tests/MLXLMTests/QuantizedGatherGuardBytesTests.swift (4 cases, red at 6eb4ccc, green at 2d5a12b); Package.resolved is gitignored and resolves 2d5a12b locally. Five bundles pass (MLXLMTests 1261 XCTest + 2784 ST, Guided 96, FM 618, CXGrammar 7, Macros 11). Repro 6x: 0/384 + 0/288 (before 51/384 + 10/144). shard-check --tiny 18/18 PASS. Perf medians: prefill 3172 -> 3247 tok/s, decode 89.26 -> 89.03 tok/s (no drop over 2%).
+    - next: /review, then commit mlx-swift-lm (coordinator).
+  timestamp: 2026-11-26T22:28:15.974494+00:00
+position_column: doing
 position_ordinal: '8180'
 title: ClusterInklingParityTests flakes with NaN logits in full MLXLMTests runs
 ---

@@ -28,8 +28,24 @@ comments:
     - evidence: 2 files — Tests/MLXLMTestSupport/Inkling2TinyModels.swift (per-expert NVFP4 global scale = absmax, passed to MLX.quantized and stored; removed the global_scale = 1 loop), Tests/MLXLMTests/Inkling2Tests.swift (new `expertsReachTheLogits(bfloat16:)`, RED then GREEN). Throwaway probe deleted; Libraries/ unchanged. swift-format run on both. All five bundles via `xcrun xctest`: MLXLMTests 2783 Swift Testing tests passed (3 known issues, which are existing withKnownIssue tests in AttentionKernelToleranceTests/ToolTests) + 1261 XCTest 0 failures; MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 618 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest 0 failures. ClusterInklingParityTests passed on this run (no NaN flake). shard-check --tiny inkling2 inkling2_loop: 4 FAIL with all-sum dropped, 4 PASS restored, 0 `error:` lines in both build logs.
     - next: /review
   timestamp: 2026-11-26T20:41:37.762703+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m8cv1vtcwm65g6em8dnq0md1
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (91d85604): 0 findings (confirmed 0, refuted 0, attempted 7, failed 0); 2 files reviewed, 4 .kanban files matched no validator
+    - next: none — moved to done
+  timestamp: 2026-11-26T21:09:15.724492+00:00
+- actor: claude-code
+  id: 01m8cv27tt3qpd9erq78jjdyrc
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — Tests/MLXLMTestSupport/Inkling2TinyModels.swift, Tests/MLXLMTests/Inkling2Tests.swift (not a model bug; tiny NVFP4 global scale)
+    - test: green — MLXLMTests twice (2783 ST + 1261 XCTest, 0 failures, ClusterInklingParityTests passed both), FM 618, Guided 96, CXGrammar 7, Macros 11; --tiny all 9 families PASS
+    - commit: 91d85604
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-26T21:09:28.026006+00:00
+position_column: done
+position_ordinal: ffffff8380
 title: 'Inkling 2 tiny target: the MoE branch does not reach the logits, so tiny shard-check cannot see an Inkling MoE sharding break'
 ---
 Found in ^727pxfp. With `Inkling2TinyModels.target(json: Inkling2TinyModels.targetJSON)` (and the tiny `inkling2` / `inkling2_loop` checkpoints that `ShardCheck tiny-checkpoint` writes from it), the MoE output has no effect on the logits:
