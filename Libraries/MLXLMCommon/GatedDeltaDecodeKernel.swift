@@ -752,7 +752,7 @@ extension GatedDeltaDecodeKernel.Snapshots {
 
     /// The gated delta rule of the op path over the tokens of a speculative
     /// verify, one token at a time, with the snapshot slots the kernel would
-    /// keep: each token runs ``gatedDeltaUpdate(q:k:v:a:b:aLog:dtBias:state:mask:useKernel:)``
+    /// keep: each token runs ``gatedDeltaUpdate(q:k:v:a:b:aLog:dtBias:state:mask:useKernel:recomputeChunks:)``
     /// from the state after the token before it, and the state of each token
     /// but the last is its slot (``unslottedTokenCount``). A verify of two tokens thus runs the two one-token updates that a
     /// split after its first token runs.
@@ -768,6 +768,8 @@ extension GatedDeltaDecodeKernel.Snapshots {
     ///   - state: The recurrent state before the first token, or nil.
     ///   - mask: The mask of the tokens, shape `(batch, tokens)`, or nil.
     ///   - useKernel: False when the layer trains.
+    ///   - recomputeChunks: False when the layer runs in a distributed group;
+    ///     see ``gatedDeltaUpdate(q:k:v:a:b:aLog:dtBias:state:mask:useKernel:recomputeChunks:)``.
     ///   - convWindow: The conv input window of the tokens: the conv state
     ///     before the first token, then the conv input of each token.
     /// - Returns: The output of the tokens, the recurrent state after the
@@ -775,7 +777,7 @@ extension GatedDeltaDecodeKernel.Snapshots {
     package static func gatedDeltaUpdate(
         q: MLXArray, k: MLXArray, v: MLXArray, a: MLXArray, b: MLXArray, aLog: MLXArray,
         dtBias: MLXArray, state: MLXArray?, mask: MLXArray?, useKernel: Bool,
-        convWindow: MLXArray
+        recomputeChunks: Bool = true, convWindow: MLXArray
     ) -> (output: MLXArray, state: MLXArray, snapshots: Self) {
         var current = state
         let steps = (0 ..< q.dim(GatedDeltaAxis.step)).map { token in
@@ -783,7 +785,8 @@ extension GatedDeltaDecodeKernel.Snapshots {
             let step = MLXLMCommon.gatedDeltaUpdate(
                 q: q[0..., tokens], k: k[0..., tokens], v: v[0..., tokens], a: a[0..., tokens],
                 b: b[0..., tokens], aLog: aLog, dtBias: dtBias, state: current,
-                mask: mask.map { $0[0..., tokens] }, useKernel: useKernel)
+                mask: mask.map { $0[0..., tokens] }, useKernel: useKernel,
+                recomputeChunks: recomputeChunks)
             current = step.1
             return step
         }

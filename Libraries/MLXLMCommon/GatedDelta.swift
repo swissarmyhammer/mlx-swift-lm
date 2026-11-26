@@ -365,6 +365,14 @@ private func gatedDeltaStepOps(
 /// backward recomputes the chunk instead, so only the chunk boundaries are
 /// kept - what `mx.checkpoint` does for the Python trainer. Inference is
 /// unaffected: the forward is the same ops in the same order.
+///
+/// A process in a distributed group turns the recompute off
+/// (`recomputeChunks: false`): mlx core's `custom_function` calls
+/// `stop_gradient` on the calling thread's C++ default stream, so each
+/// thread that runs a custom function makes a second GPU stream, and work
+/// that crosses two GPU streams hangs under `MLX_METAL_FAST_SYNCH`
+/// (exo#2391). The chunks then run as plain ops, whose backward keeps every
+/// step's state.
 let gatedDeltaRecomputeChunk = 16
 
 private enum GatedDeltaRecompute {
@@ -426,8 +434,36 @@ private enum GatedDeltaRecompute {
             vjp({ steps($0, masked: true) }, primals: primals, cotangents: cotangents).1
         }
     }
+
+    /// The run of one chunk, which takes and returns what ``steps(_:masked:)``
+    /// does.
+    ///
+    /// - Parameters:
+    ///   - masked: Whether the inputs end with a mask.
+    ///   - recomputing: Whether the chunk runs through the custom function
+    ///     whose backward recomputes it, or as plain ops; see
+    ///     ``gatedDeltaRecomputeChunk``.
+    static func chunk(masked: Bool, recomputing: Bool) -> ([MLXArray]) -> [MLXArray] {
+        guard recomputing else { return { steps($0, masked: masked) } }
+        return masked ? Self.masked : unmasked
+    }
 }
 
+/// The gated delta rule as MLX ops, one step at a time in chunks of
+/// ``gatedDeltaRecomputeChunk`` steps.
+///
+/// - Parameters:
+///   - q: The queries, shape `(batch, steps, keyHeads, keyHeadDim)`.
+///   - k: The keys, shape `(batch, steps, keyHeads, keyHeadDim)`.
+///   - v: The values, shape `(batch, steps, valueHeads, valueHeadDim)`.
+///   - g: The decay gates.
+///   - beta: The beta gates, shape `(batch, steps, valueHeads)`.
+///   - state: The recurrent state, or nil for zeros.
+///   - mask: The steps to keep, or nil to keep every step.
+///   - recomputeChunks: Whether the backward recomputes each chunk instead
+///     of keeping every step's state. A process in a distributed group
+///     passes false; see ``gatedDeltaRecomputeChunk``.
+/// - Returns: The output and the recurrent state after the last step.
 func gatedDeltaOps(
     q: MLXArray,
     k: MLXArray,
@@ -435,7 +471,8 @@ func gatedDeltaOps(
     g: MLXArray,
     beta: MLXArray,
     state: MLXArray? = nil,
-    mask: MLXArray? = nil
+    mask: MLXArray? = nil,
+    recomputeChunks: Bool = true
 ) -> (MLXArray, MLXArray) {
     let B = q.dim(GatedDeltaAxis.batch)
     let T = q.dim(GatedDeltaAxis.step)
@@ -457,6 +494,7 @@ func gatedDeltaOps(
 
     var ys = [MLXArray]()
     ys.reserveCapacity((T + gatedDeltaRecomputeChunk - 1) / gatedDeltaRecomputeChunk)
+    let run = GatedDeltaRecompute.chunk(masked: mask != nil, recomputing: recomputeChunks)
 
     for start in stride(from: 0, to: T, by: gatedDeltaRecomputeChunk) {
         let steps = start ..< min(start + gatedDeltaRecomputeChunk, T)
@@ -464,12 +502,8 @@ func gatedDeltaOps(
             q[0..., steps], k[0..., steps], v[0..., steps], g[0..., steps], beta[0..., steps],
             state,
         ]
-        let run: ([MLXArray]) -> [MLXArray]
         if let mask {
             inputs.append(mask[0..., steps])
-            run = GatedDeltaRecompute.masked
-        } else {
-            run = GatedDeltaRecompute.unmasked
         }
         let out = run(inputs)
         ys.append(out[0])
@@ -510,6 +544,31 @@ private func fastGatedDelta(
 
 // MARK: - Public API
 
+/// One call of the gated delta rule over `steps` tokens, through the
+/// fastest path that supports the inputs: the MLXFast kernel, the custom
+/// Metal kernel, or the ops fallback.
+///
+/// - Parameters:
+///   - q: The queries, shape `(batch, steps, keyHeads, keyHeadDim)`.
+///   - k: The keys, shape `(batch, steps, keyHeads, keyHeadDim)`.
+///   - v: The values, shape `(batch, steps, valueHeads, valueHeadDim)`.
+///   - a: The decay input, shape `(batch, steps, valueHeads)`.
+///   - b: The beta input, shape `(batch, steps, valueHeads)`.
+///   - aLog: The log decay rate of each value head.
+///   - dtBias: The decay bias of each value head.
+///   - state: The recurrent state, or nil for zeros.
+///   - mask: The steps to keep, or nil to keep every step.
+///   - useKernel: Whether the custom Metal kernel may run. A model in
+///     training passes false, because the kernel has no gradient.
+///   - recomputeChunks: Whether the backward of the ops fallback recomputes
+///     each chunk instead of keeping every step's state. A process in a
+///     distributed group passes false: the recompute runs through an MLX
+///     custom function, which makes a second GPU stream on each thread that
+///     calls it, and work that crosses two GPU streams hangs under
+///     `MLX_METAL_FAST_SYNCH`. Without it the forward is the same, and the
+///     backward keeps every step's state.
+/// - Returns: The output, shape `(batch, steps, valueHeads, valueHeadDim)`,
+///   and the float32 recurrent state after the last step.
 public func gatedDeltaUpdate(
     q: MLXArray,
     k: MLXArray,
@@ -520,7 +579,8 @@ public func gatedDeltaUpdate(
     dtBias: MLXArray,
     state: MLXArray? = nil,
     mask: MLXArray? = nil,
-    useKernel: Bool = true
+    useKernel: Bool = true,
+    recomputeChunks: Bool = true
 ) -> (MLXArray, MLXArray) {
     let beta = sigmoid(b).asType(.float32)
     let g = computeGatedDeltaG(aLog, a, dtBias)
@@ -559,5 +619,7 @@ public func gatedDeltaUpdate(
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 
-    return gatedDeltaOps(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
+    return gatedDeltaOps(
+        q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask,
+        recomputeChunks: recomputeChunks)
 }

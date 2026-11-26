@@ -87,37 +87,42 @@ public enum Inkling2TinyModels {
         let config = try JSONDecoder().decode(
             Inkling2Configuration.self, from: Data(json.utf8))
         let model = Inkling2(config)
-        MLXRandom.seed(targetSeed)
-        var parameters = [String: MLXArray]()
-        for (key, value) in model.parameters().flattened() where value.dtype == .float32 {
-            parameters[key] = MLXRandom.normal(value.shape) * weightScale
-        }
-        for (key, value) in model.parameters().flattened() where key.hasSuffix(".global_scale") {
-            parameters[key] = MLXArray.ones(value.shape)
-        }
-        for (key, value) in model.parameters().flattened()
-        where key.hasSuffix("_proj.weight") && value.dtype == .uint32 {
-            let prefix = String(key.dropLast(".weight".count))
-            let (rows, packed) = (value.dim(1), value.dim(2))
-            let dense =
-                MLXRandom.normal([value.dim(0), rows, packed * valuesPerPackedWord]) * weightScale
-            let (weight, scales, _) = MLX.quantized(
-                dense, groupSize: expertGroupSize, bits: expertBits, mode: .nvfp4)
-            parameters[key] = weight
-            parameters["\(prefix).scales"] = scales
-        }
-        if bfloat16 {
-            for (key, value) in parameters
-            where value.dtype == .float32 && !float32Suffixes.contains(where: key.hasSuffix) {
-                parameters[key] = value.asType(.bfloat16)
+        // Task-local rather than MLXRandom.seed: parallel tests must not share (or perturb) the
+        // global random stream, or the weights differ from run to run.
+        try withRandomState(MLXRandom.RandomState(seed: targetSeed)) {
+            var parameters = [String: MLXArray]()
+            for (key, value) in model.parameters().flattened() where value.dtype == .float32 {
+                parameters[key] = MLXRandom.normal(value.shape) * weightScale
             }
+            for (key, value) in model.parameters().flattened() where key.hasSuffix(".global_scale")
+            {
+                parameters[key] = MLXArray.ones(value.shape)
+            }
+            for (key, value) in model.parameters().flattened()
+            where key.hasSuffix("_proj.weight") && value.dtype == .uint32 {
+                let prefix = String(key.dropLast(".weight".count))
+                let (rows, packed) = (value.dim(1), value.dim(2))
+                let dense =
+                    MLXRandom.normal([value.dim(0), rows, packed * valuesPerPackedWord])
+                    * weightScale
+                let (weight, scales, _) = MLX.quantized(
+                    dense, groupSize: expertGroupSize, bits: expertBits, mode: .nvfp4)
+                parameters[key] = weight
+                parameters["\(prefix).scales"] = scales
+            }
+            if bfloat16 {
+                for (key, value) in parameters
+                where value.dtype == .float32 && !float32Suffixes.contains(where: key.hasSuffix) {
+                    parameters[key] = value.asType(.bfloat16)
+                }
+            }
+            try model.update(
+                parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
+            if bfloat16 {
+                try model.prepare()
+            }
+            eval(model)
         }
-        try model.update(
-            parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
-        if bfloat16 {
-            try model.prepare()
-        }
-        eval(model)
         return model
     }
 
@@ -129,11 +134,14 @@ public enum Inkling2TinyModels {
     public static func drafter(json: String) throws -> Inkling2DraftModel {
         let drafter = Inkling2DraftModel(
             try JSONDecoder().decode(Inkling2DraftConfiguration.self, from: Data(json.utf8)))
-        MLXRandom.seed(drafterSeed)
-        let parameters = Dictionary(
-            uniqueKeysWithValues: drafter.parameters().flattened().map { key, value in
-                (key, MLXRandom.normal(value.shape) * weightScale)
-            })
+        // Task-local rather than MLXRandom.seed: parallel tests must not share (or perturb) the
+        // global random stream.
+        let parameters = withRandomState(MLXRandom.RandomState(seed: drafterSeed)) {
+            Dictionary(
+                uniqueKeysWithValues: drafter.parameters().flattened().map { key, value in
+                    (key, MLXRandom.normal(value.shape) * weightScale)
+                })
+        }
         try drafter.update(
             parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
         eval(drafter)

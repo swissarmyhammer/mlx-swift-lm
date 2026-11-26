@@ -280,8 +280,16 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
     /// Whether one matmul computes the four input projections.
     var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
 
-    /// Takes the head counts of one process of a tensor parallel group.
+    /// Whether the ops fallback of the gated delta rule recomputes each chunk in the backward;
+    /// see `recomputeChunks` of `gatedDeltaUpdate` in MLXLMCommon.
+    /// A layer of a tensor parallel group turns it off, because the recompute makes a second
+    /// GPU stream, and the group's process uses one.
+    private(set) var recomputesChunks = true
+
+    /// Takes the head counts of one process of a tensor parallel group, and turns the chunk
+    /// recompute of the ops fallback off; see ``recomputesChunks``.
     func adoptShardedHeads(from plan: Qwen35TensorParallelPlan) {
+        recomputesChunks = false
         numKHeads = plan.linearKeyHeads
         numVHeads = plan.linearValueHeads
         keyDim = headKDim * numKHeads
@@ -454,6 +462,7 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
             (out, newRecState, snapshots) = GatedDeltaDecodeKernel.Snapshots.gatedDeltaUpdate(
                 q: qNormed, k: kNormed, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias,
                 state: recState, mask: mask, useKernel: !training,
+                recomputeChunks: recomputesChunks,
                 convWindow: concatenated([convState, qkv], axis: 1))
         } else {
             (out, newRecState) = gatedDeltaUpdate(
@@ -466,7 +475,8 @@ final class Qwen35GatedDeltaNet: Module, GatedDeltaDecodeLayer {
                 dtBias: dtBias,
                 state: recState,
                 mask: mask,
-                useKernel: !training)
+                useKernel: !training,
+                recomputeChunks: recomputesChunks)
             snapshots = nil
         }
 
