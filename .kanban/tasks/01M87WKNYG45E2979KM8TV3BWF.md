@@ -10,8 +10,8 @@ comments:
     - PR 2: ml-explore/mlx, from fork commit 59f01186, [metal] fence kernels at run time. It offers the mlx-swift build-flag alternative.
     Waiting on the user to review and submit. Once both merge and ship in an mlx-swift release, switch Package.swift back to ml-explore/mlx-swift.
   timestamp: 2026-11-25T02:16:09.393722+00:00
-position_column: todo
-position_ordinal: '8580'
+position_column: done
+position_ordinal: fffffd80
 title: Draft upstream PRs for the JACCL LID fallback and FAST_SYNCH fence fix
 ---
 We depend on forks: swissarmyhammer/mlx `jaccl-no-ipv4` (2907588 JACCL LID fallback; 59f0118 fence kernels from embedded source, Metal 3.2) and swissarmyhammer/mlx-swift `jaccl-no-ipv4` (6eb4ccc). Get both changes upstream so we can go back to ml-explore.
