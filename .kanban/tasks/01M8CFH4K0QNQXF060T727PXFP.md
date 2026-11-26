@@ -24,6 +24,38 @@ comments:
     - Tests: MLXLMTests XCTest 1261/0 failures + Swift Testing 2782 passed (3 pre-existing known issues); MLXFoundationModelsTests 618; MLXGuidedGenerationTests 96; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11 XCTest. python self-check 25 OK. verify-docs exit 0. swift-format applied; swiftlint no_magic_numbers/force rules clean on new Swift files; ruff format on the python.
     - next: review
   timestamp: 2026-11-26T19:58:20.474656+00:00
+- actor: claude-code
+  id: 01m8cqr4mxzy62rcjqq74anya1
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (14672856): 1 finding (1 confirmed, 0 refuted) — scripts/shard-check.sh:157
+    - next: implement the finding in the 2026-11-26 14:07 Review Findings section; task stays in review
+  timestamp: 2026-11-26T20:11:31.357642+00:00
+- actor: claude-code
+  id: 01m8cqrhnzmhw612sx2q2nja6w
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 13 files (TinyShardCheckpoint, ShardCheck tiny-families/tiny-checkpoint, shard-check.sh --tiny, tests, docs); --tiny 18/18 PASS
+    - test: green — MLXLMTests 1261 XCTest + 2782 ST, FM 618, Guided 96, CXGrammar 7, Macros 11; swift build ok; python 25 OK; verify-docs ok; --tiny PASS
+    - commit: 14672856
+    - review: findings — scripts/shard-check.sh:157
+  timestamp: 2026-11-26T20:11:44.703184+00:00
+- actor: claude-code
+  id: 01m8cqxxtpvt6ewmq37vj4vnrc
+  text: |-
+    Fix of the shard-check.sh:157 finding.
+    - DISCOVERY: on macOS /bin/bash 3.2 the old code did not actually exit 0: an empty `families` hits `set -u` ("families[@]: unbound variable") and exits 1 by accident with no useful message. On bash >= 4.4 (empty arrays are fine under set -u) it would have exited 0 as the finding says. So the regression tests assert the exact status AND message, not just non-zero; a bare non-zero assert passed on the old code (tried first, discarded).
+    - check_tiny: the listing is a command substitution with `|| { echo "could not list the tiny families (ShardCheck tiny-families)" >&2; exit 1; }`, split with a here-string (blank lines dropped), and an empty list fails with "ShardCheck tiny-families listed no family to check".
+    - Whole-script sweep: no pipes; the other `$(...)` are plain assignments (ROOT, WORK with mktemp - verified `set -e` aborts on `W="${X:-$(false)}"` in bash 3.2) or already guarded (`if ! tokens="$(...)"`). The other swallowed failures: check_model runs as an `if` condition in check_tiny, where set -e is off, so `mkdir -p "$work"` and the hostfile heredoc now `|| return`.
+    - Tests: TinyFamilyListTests in scripts/test_shard_check_compare.py copies the script into a temp tree with a fake ShardCheck at .build/shard-check/Build/Products/Release/ShardCheck, SHARD_CHECK_SKIP_BUILD=1. RED: both failed (got the unbound-variable line). GREEN: 27 tests OK. ruff format --line-length 100.
+  timestamp: 2026-11-26T20:14:40.982248+00:00
+- actor: claude-code
+  id: 01m8cqy02hy35p3y82g66za821
+  text: |-
+    ### implement — changed
+    - evidence: 2 files — scripts/shard-check.sh, scripts/test_shard_check_compare.py. Fake ShardCheck `exit 1` -> --tiny status 1 "could not list the tiny families (ShardCheck tiny-families)"; fake `exit 0` (empty list) -> status 1 "ShardCheck tiny-families listed no family to check". Real `scripts/shard-check.sh --tiny` (with build): status 0, 18/18 PASS (9 families x teacher-forced/announce), build log has no `error:` line (^8pkmyp2). python3 -I scripts/test_shard_check_compare.py: 27 tests OK. No Swift change. Finding flipped to [x].
+    - next: review
+  timestamp: 2026-11-26T20:14:43.281167+00:00
 position_column: doing
 position_ordinal: '8180'
 title: 'ShardCheck: write tiny random checkpoints so shard-check runs with no real checkpoint'
@@ -33,3 +65,21 @@ Found in ^ze3xffb. `scripts/shard-check.sh` (2 ring processes on localhost vs th
 - [x] Add a way to write tiny random checkpoints of each shardable family (a ShardCheck subcommand or a script), with the configs that split across two processes.
 - [x] Run shard-check over each of them in CI or document the command, so a new shardable family gets a logits check with no download.
 - [x] Note that the 75% load-peak gate is not meaningful for megabyte-sized checkpoints (both read 0.00 GiB). #cluster
+
+## Review Findings (2026-11-26 14:07)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 11 file(s) reviewed, 10 not reviewed.
+
+> 10 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M8853Y27H14BR99PEZE3XFFB.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8853Y27H14BR99PEZE3XFFB.md` — no validator matches this file
+> - `.kanban/tasks/01M8CFH4K0QNQXF060T727PXFP.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8CFH4K0QNQXF060T727PXFP.md` — no validator matches this file
+> - `.kanban/tasks/01M8CP9XNJQWH4DA8GY4NASSZT.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8CP9XNJQWH4DA8GY4NASSZT.md` — no validator matches this file
+> - `.kanban/tasks/01M8CPA14AQJAKTGY6K8PKMYP2.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8CPA14AQJAKTGY6K8PKMYP2.md` — no validator matches this file
+> - `Libraries/MLXLMCommon/Documentation.docc/distributed-inference.md` — no validator matches this file
+> - `skills/mlx-swift-lm/references/distributed-inference.md` — no validator matches this file
+
+- [x] `scripts/shard-check.sh:157` `completeness/public-output-contract` — If `"$BINARY" tiny-families` fails, the exit status is discarded by the `done < <(...)` process substitution. `check_tiny` then runs zero families, prints `==== tiny checkpoints in $WORK` with an empty result list, and exits 0. `--tiny` therefore reports success when no family was checked. The script's stated contract is to print one PASS or FAIL line per family and check, and to fail when any check fails. Capture the family list into a variable, for example `families_text="$("$BINARY" tiny-families)" || { echo "could not list the tiny families" >&2; exit 1; }`, then split it into `families`. Also fail when the resulting list is empty, so that a silent zero-check run cannot pass.

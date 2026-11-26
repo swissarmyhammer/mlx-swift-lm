@@ -1,9 +1,14 @@
-"""Self-check of the gate in shard_check_compare.py, on synthetic logits.
+"""Self-check of the gate in shard_check_compare.py, on synthetic logits, and of the
+family list of `shard-check.sh --tiny`, against a fake ShardCheck.
 
 Run: python3 -I scripts/test_shard_check_compare.py
 """
 
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -259,6 +264,61 @@ class ForcedInputTests(unittest.TestCase):
         reference = {"prompt": [1, 2], "tokens": [7, 8, 9]}
         sharded = {"prompt": [1, 3], "forcedTokens": [7, 8]}
         self.assertFalse(compare.forced_inputs_match(reference, sharded))
+
+
+_SCRIPT_PATH = Path(__file__).resolve().parent / "shard-check.sh"
+# Where shard-check.sh looks for ShardCheck, relative to the repository root.
+_BINARY_PATH = Path(".build/shard-check/Build/Products/Release/ShardCheck")
+# The mode of the fake ShardCheck: executable, as a build product is.
+_EXECUTABLE_MODE = 0o755
+
+
+def tiny_run_outcome(fake_binary: str) -> tuple[int, str]:
+    """The exit status and the last stderr line of `shard-check.sh --tiny`, against a fake
+    ShardCheck whose body is `fake_binary`.
+
+    The script runs from a copy in a temporary tree that holds the fake binary where the
+    script looks for ShardCheck, and the build is skipped, so no Swift build is touched.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        script = Path(root) / "scripts" / _SCRIPT_PATH.name
+        script.parent.mkdir()
+        shutil.copy(_SCRIPT_PATH, script)
+        binary = Path(root) / _BINARY_PATH
+        binary.parent.mkdir(parents=True)
+        binary.write_text(f"#!/bin/bash\n{fake_binary}\n")
+        binary.chmod(_EXECUTABLE_MODE)
+        environment = {
+            **os.environ,
+            "SHARD_CHECK_SKIP_BUILD": "1",
+            "SHARD_CHECK_WORK": str(Path(root) / "work"),
+        }
+        result = subprocess.run(
+            ["/bin/bash", str(script), "--tiny"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        stderr_lines = result.stderr.splitlines() or [""]
+        return result.returncode, stderr_lines[-1]
+
+
+class TinyFamilyListTests(unittest.TestCase):
+    """`--tiny` with no family named fails, and says why, when it cannot check any family."""
+
+    def test_failing_family_list_fails_the_run(self) -> None:
+        """When `ShardCheck tiny-families` fails, no family was checked, so the run fails."""
+        self.assertEqual(
+            tiny_run_outcome("exit 1"),
+            (1, "could not list the tiny families (ShardCheck tiny-families)"),
+        )
+
+    def test_empty_family_list_fails_the_run(self) -> None:
+        """An empty family list would check nothing, so the run fails rather than pass."""
+        self.assertEqual(
+            tiny_run_outcome("exit 0"), (1, "ShardCheck tiny-families listed no family to check")
+        )
 
 
 if __name__ == "__main__":

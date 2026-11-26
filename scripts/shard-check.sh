@@ -24,7 +24,7 @@
 # the prompt ids the tiny vocabulary holds. Both load peaks of a tiny checkpoint read about
 # 0.00 GiB, so the 75% load-peak gate says nothing there, and the tiny mode alone turns it off
 # (--no-load-peak-gate of shard_check_compare.py). The script prints one PASS or FAIL line per
-# family and check, and fails when any check fails.
+# family and check, and fails when any check fails, or when ShardCheck lists no family to check.
 #
 # Usage: scripts/shard-check.sh [--free-running | --announce] <model-directory>
 #        scripts/shard-check.sh --tiny [<family>...]
@@ -85,7 +85,9 @@ check_model() {
     local mode="$1" model="$2" work="$3" port="$4" tokens="$5"
     shift 5
     local compare_options=("$@")
-    mkdir -p "$work"
+    # check_tiny calls this function as an `if` condition, where `set -e` is off, so each step
+    # whose failure would otherwise go on returns its status explicitly.
+    mkdir -p "$work" || return
 
     local common_args=()
     if [[ "$mode" == announce ]]; then
@@ -102,7 +104,7 @@ check_model() {
         sharded_args+=(--teacher-forcing "$work/reference.json")
     fi
 
-    cat > "$work/hostfile.json" <<EOF
+    cat > "$work/hostfile.json" <<EOF || return
 [["127.0.0.1:$port"], ["127.0.0.1:$((port + 1))"]]
 EOF
 
@@ -147,17 +149,31 @@ EOF
 }
 
 # Writes the tiny checkpoint of each family, runs each check of TINY_MODES on it with its own
-# ports, prints one line per family and check, and exits with status 1 when any check fails.
+# ports, prints one line per family and check, and exits with status 1 when any check fails,
+# or when the family list cannot be read or is empty.
 # Usage: check_tiny [<family>...]; no family means every family that shards.
 check_tiny() {
-    local families=("$@")
+    local families=("$@") family
     if [[ ${#families[@]} -eq 0 ]]; then
+        # A command substitution, not `done < <(...)`: a process substitution discards the
+        # status of ShardCheck, so a failed listing would check no family and pass.
+        local families_text
+        families_text="$("$BINARY" tiny-families)" || {
+            echo "could not list the tiny families (ShardCheck tiny-families)" >&2
+            exit 1
+        }
         while IFS= read -r family; do
-            families+=("$family")
-        done < <("$BINARY" tiny-families)
+            if [[ -n "$family" ]]; then
+                families+=("$family")
+            fi
+        done <<< "$families_text"
+        if [[ ${#families[@]} -eq 0 ]]; then
+            echo "ShardCheck tiny-families listed no family to check" >&2
+            exit 1
+        fi
     fi
 
-    local results=() failures=0 next_port="$PORT" family mode tokens
+    local results=() failures=0 next_port="$PORT" mode tokens
     for family in "${families[@]}"; do
         local checkpoint="$WORK/$family/checkpoint"
         echo "==== $family: writing a tiny checkpoint"
