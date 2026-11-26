@@ -442,6 +442,83 @@ public enum TensorParallel {
         return try shardLinear(layer, sharding: .shardedToAll, group: group)
     }
 
+    /// A copy of `layer` that keeps the inputs of this process of `group`, whose output is the
+    /// part of this process of a sum the caller makes once, across `group`.
+    ///
+    /// A block that adds several partial outputs, such as the routed experts and the shared
+    /// expert of an MoE block, sums them with one all-sum instead of one per projection. Rank 0
+    /// keeps the bias, so the sum adds it once. A rotated projection keeps the signs and the
+    /// packed columns of its own inputs.
+    ///
+    /// - Parameters:
+    ///   - layer: A stock projection. It does not change.
+    ///   - path: The path of the projection, for the error.
+    ///   - group: The group to split across.
+    /// - Returns: A `Linear`, `QuantizedLinear` or ``HadamardQuantizedLinear``, the type of
+    ///   `layer`.
+    /// - Throws: ``TensorParallelShardingError/unsupported(feature:)`` for a projection that is
+    ///   not stock, or ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)``
+    ///   when a share would split a quantization group or a Hadamard block.
+    public static func makeInputShard(
+        _ layer: Linear, at path: String, group: MLXDistributed.Group
+    ) throws -> Linear {
+        try makeInputShard(layer, at: path, rank: try group.rank, groupSize: try group.size)
+    }
+
+    /// The process of a group whose input shard keeps the bias, so the sum adds it once.
+    private static let biasRank = 0
+
+    /// A copy of `layer` that keeps the inputs of process `rank` of `groupSize` processes, whose
+    /// output is the part of that process of a sum the caller makes once.
+    ///
+    /// Process `biasRank` keeps the bias, so the sum adds it once. A rotated projection keeps
+    /// the signs and the packed columns of its own inputs: the rotation is block diagonal over
+    /// the inputs, so the rotation of a run of whole blocks is the rotation of that run alone.
+    ///
+    /// - Parameters:
+    ///   - layer: A stock projection. It does not change.
+    ///   - path: The path of the projection, for the error.
+    ///   - rank: The process whose inputs the shard keeps.
+    ///   - groupSize: The number of processes.
+    /// - Returns: A `Linear`, `QuantizedLinear` or ``HadamardQuantizedLinear``, the type of
+    ///   `layer`.
+    /// - Throws: ``TensorParallelShardingError/unsupported(feature:)`` for a projection that is
+    ///   not stock, or ``TensorParallelShardingError/indivisible(quantity:count:groupSize:)``
+    ///   when a share would split a quantization group or a Hadamard block.
+    static func makeInputShard(
+        _ layer: Linear, at path: String, rank: Int, groupSize: Int
+    ) throws -> Linear {
+        try requireStockProjection(layer, at: path)
+        try requireWholeInputs(of: layer, at: path, across: groupSize)
+        func share(_ array: MLXArray) -> MLXArray {
+            inputShare(of: array, rank: rank, groupSize: groupSize)
+        }
+        let bias = rank == biasRank ? layer.bias : nil
+        switch layer {
+        case let rotated as HadamardQuantizedLinear:
+            return HadamardQuantizedLinear(
+                weight: share(rotated.weight), bias: bias, scales: share(rotated.scales),
+                biases: rotated.biases.map(share), signs: share(rotated.signs),
+                groupSize: rotated.groupSize, bits: rotated.bits, mode: rotated.mode,
+                rotation: rotated.rotation)
+        case let quantized as QuantizedLinear:
+            let shard = QuantizedLinear(
+                weight: share(quantized.weight), bias: bias, scales: share(quantized.scales),
+                biases: quantized.biases.map(share), groupSize: quantized.groupSize,
+                bits: quantized.bits, mode: quantized.mode, globalScale: quantized.globalScale)
+            shard.freeze()
+            return shard
+        default:
+            return Linear(weight: share(layer.weight), bias: bias)
+        }
+    }
+
+    /// Part `rank` of `groupSize` equal parts of the last axis of `array`, the inputs of a
+    /// projection.
+    static func inputShare(of array: MLXArray, rank: Int, groupSize: Int) -> MLXArray {
+        contiguous(array.split(parts: groupSize, axis: -1)[rank])
+    }
+
     /// A copy of the depthwise `conv` that keeps the channels of this process.
     ///
     /// A depthwise conv has one group per channel, so the copy has fewer groups too.

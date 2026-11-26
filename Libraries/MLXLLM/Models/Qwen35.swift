@@ -776,6 +776,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
     /// Sums the partial outputs of the experts across `group`, whose processes each hold a slice
     /// of every expert and of the shared expert.
     ///
+    /// The down projection of the shared expert is an input shard that does not sum on its own.
     /// The shared expert gate scales each token by one factor, so the sum of the gated partial
     /// outputs is the gated sum, and one all-sum covers the routed and the shared experts.
     func adoptShardedExperts(group: MLXDistributed.Group) {

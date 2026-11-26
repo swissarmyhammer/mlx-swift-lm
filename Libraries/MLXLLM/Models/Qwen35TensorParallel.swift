@@ -70,23 +70,15 @@ struct Qwen35TensorParallelPlan: Equatable {
         ]
     }
 
-    /// One whole run per process of the leading axis.
-    private static let byRows = TensorParallel.Split(axis: 0, segments: .count(1))
-
-    /// The axis of the inputs of a projection, `[outputs, inputs]`.
-    private static let inputAxis = 1
-
     /// The splits of the parameters of an MoE block that split in place: the inner width of
-    /// every expert, and of the shared expert. The router and the shared expert gate act on the
-    /// whole residual stream and stay whole.
-    static let expertSplits: [String: TensorParallel.Split] = {
-        let experts = TensorParallel.switchGLUSplits.map { ("switch_mlp.\($0.key)", $0.value) }
-        let sharedExpert = [
-            ("shared_expert.gate_proj", byRows), ("shared_expert.up_proj", byRows),
-            ("shared_expert.down_proj", TensorParallel.Split(axis: inputAxis, segments: .count(1))),
-        ]
-        return Dictionary(uniqueKeysWithValues: experts + sharedExpert)
-    }()
+    /// every expert. The shared expert splits as a dense MLP does, except that its down
+    /// projection, which may be rotated, becomes an input shard that the block sums with the
+    /// experts. The router and the shared expert gate act on the whole residual stream and stay
+    /// whole.
+    static let expertSplits: [String: TensorParallel.Split] = Dictionary(
+        uniqueKeysWithValues: TensorParallel.switchGLUSplits.map {
+            ("switch_mlp.\($0.key)", $0.value)
+        })
 }
 
 /// The modules that replace parts of one decoder layer, made before anything changes.
@@ -96,9 +88,10 @@ struct Qwen35LayerShards {
     /// projection, and the conv of a gated delta net.
     let mixer: [String: Module]
 
-    /// The down projection of a dense MLP, or nil for an MoE block, whose experts split in place
-    /// and sum once.
-    let down: Linear?
+    /// The sharded-to-all down projection of the dense MLP, or the input shard of the down
+    /// projection of the shared expert of an MoE block, whose output the block sums with that of
+    /// the routed experts, which split in place.
+    let down: Linear
 }
 
 extension Qwen35DecoderLayer {
@@ -149,18 +142,18 @@ extension Qwen35DecoderLayer {
     /// The path of the experts of an MoE block.
     private static let expertsPath = "mlp.switch_mlp"
 
-    /// The sharded-to-all down projection of a dense MLP, or nil for an MoE block, after a
-    /// check of the projections it splits in place.
-    private func makeShardedDown(group: MLXDistributed.Group) throws -> Linear? {
+    /// The sharded-to-all down projection of the dense MLP, or the input shard of the down
+    /// projection of the shared expert of an MoE block after a check of the routed experts,
+    /// which split in place. The MoE block sums the shared and the routed experts once.
+    private func makeShardedDown(group: MLXDistributed.Group) throws -> Linear {
         let (path, feedForward) = try denseFeedForward()
+        let downPath = "\(path).down_proj"
         guard let moe = mlp as? Qwen35SparseMoeBlock else {
             return try TensorParallel.makeShardedToAll(
-                feedForward.downProj, at: "\(path).down_proj", group: group)
+                feedForward.downProj, at: downPath, group: group)
         }
         try TensorParallel.requireStockExperts(moe.switchMLP, at: Self.expertsPath)
-        try TensorParallel.requireStockProjection(
-            feedForward.downProj, at: "\(path).down_proj")
-        return nil
+        return try TensorParallel.makeInputShard(feedForward.downProj, at: downPath, group: group)
     }
 
     /// The projections of this layer that split, by the axis they split on.
@@ -229,14 +222,11 @@ extension Qwen35DecoderLayer {
             try TensorParallel.shardAxes(
                 of: moe, Qwen35TensorParallelPlan.expertSplits, group: group)
             moe.adoptShardedExperts(group: group)
-            return
         }
-        let (_, mlp) = try denseFeedForward()
+        let (_, feedForward) = try denseFeedForward()
         try TensorParallel.shardLeadingAxis(
-            of: mlp, ["gate_proj": .count(1), "up_proj": .count(1)], group: group)
-        if let down = shards.down {
-            mlp.update(modules: ModuleChildren(values: ["down_proj": .value(down)]))
-        }
+            of: feedForward, ["gate_proj": .count(1), "up_proj": .count(1)], group: group)
+        feedForward.update(modules: ModuleChildren(values: ["down_proj": .value(shards.down)]))
     }
 
     /// The dense MLP of this layer, or the shared expert of its MoE block, with its path.

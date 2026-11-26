@@ -583,6 +583,18 @@ private enum ShardableFamilyConfiguration {
         }
     }
 
+    /// The experts of each MoE layer of the mixture-of-experts fixture.
+    private static let moeExperts = 2
+
+    /// The fixture `config.json` of the Qwen 3.5 mixture-of-experts families, and the model type
+    /// it names.
+    private static let qwen35MoEFixture = (
+        json: Qwen35FixtureJSON.wrappedText(
+            modelType: "qwen3_5_moe",
+            textConfigJSON: Qwen35FixtureJSON.text(mtpLayers: 0, numExperts: moeExperts)),
+        modelType: "qwen3_5_moe"
+    )
+
     /// The fixture `config.json` of each family, and the model type the fixture names.
     private static let fixtures: [String: (json: String, modelType: String)] = [
         "qwen3_5": (Qwen35FixtureJSON.visionLanguage(mtpLayers: 0), "qwen3_5"),
@@ -591,18 +603,8 @@ private enum ShardableFamilyConfiguration {
         "qwen3_8_text": (Qwen35FixtureJSON.text(mtpLayers: 0), "qwen3_5_text"),
         "inkling2": (Inkling2ModelTests.tinyJSON, "inkling2_loop"),
         "inkling2_loop": (Inkling2ModelTests.tinyJSON, "inkling2_loop"),
-        "qwen3_5_moe": (
-            Qwen35FixtureJSON.wrappedText(
-                modelType: "qwen3_5_moe",
-                textConfigJSON: Qwen35FixtureJSON.text(mtpLayers: 0, numExperts: 2)),
-            "qwen3_5_moe"
-        ),
-        "qwen3_8_moe": (
-            Qwen35FixtureJSON.wrappedText(
-                modelType: "qwen3_5_moe",
-                textConfigJSON: Qwen35FixtureJSON.text(mtpLayers: 0, numExperts: 2)),
-            "qwen3_5_moe"
-        ),
+        "qwen3_5_moe": qwen35MoEFixture,
+        "qwen3_8_moe": qwen35MoEFixture,
         "prism_hadamard_qwen35": (HadamardQuantizedTests.packConfig, "prism_hadamard_qwen35"),
     ]
 

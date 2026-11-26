@@ -140,7 +140,7 @@ public final class ShardedToAllHadamardQuantizedLinear: HadamardQuantizedLinear 
     ) throws {
         try TensorParallel.requireWholeInputs(of: other, at: path, across: groupSize)
         func share(_ array: MLXArray) -> MLXArray {
-            contiguous(array.split(parts: groupSize, axis: -1)[rank])
+            TensorParallel.inputShare(of: array, rank: rank, groupSize: groupSize)
         }
         self.group = group
         super.init(

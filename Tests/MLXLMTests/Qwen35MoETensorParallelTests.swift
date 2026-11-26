@@ -49,6 +49,38 @@ enum Qwen35MoEShardFixture {
     }
 }
 
+/// The share of one process of a Qwen 3.5 MoE block, made in one process.
+enum Qwen35MoEShares {
+
+    /// The rows of the gate and up projections of the shared expert, which split as those of a
+    /// dense MLP do.
+    private static let sharedExpertRows: [String: TensorParallel.Split] = [
+        "gate_proj": TensorParallel.Split(axis: 0, segments: .count(1)),
+        "up_proj": TensorParallel.Split(axis: 0, segments: .count(1)),
+    ]
+
+    /// The path of the down projection of the shared expert, for the error.
+    private static let sharedExpertDownPath = "mlp.shared_expert.down_proj"
+
+    /// Keeps the share of process `rank` of `groupSize` processes of `block`: the in-place splits
+    /// of the plan, the rows of the shared expert, and the input shard of its down projection,
+    /// whose output the block sums with the routed experts.
+    ///
+    /// - Parameters:
+    ///   - rank: The process whose share the block keeps.
+    ///   - groupSize: The number of processes.
+    ///   - block: The block whose parameters split, in place.
+    static func keep(rank: Int, of groupSize: Int, in block: Qwen35SparseMoeBlock) throws {
+        TensorParallelShares.keep(
+            rank: rank, of: groupSize, in: block, Qwen35TensorParallelPlan.expertSplits)
+        let sharedExpert = block.sharedExpert
+        TensorParallelShares.keep(rank: rank, of: groupSize, in: sharedExpert, sharedExpertRows)
+        let down = try TensorParallel.makeInputShard(
+            sharedExpert.downProj, at: sharedExpertDownPath, rank: rank, groupSize: groupSize)
+        sharedExpert.update(modules: ModuleChildren(values: ["down_proj": .value(down)]))
+    }
+}
+
 struct Qwen35MoETensorParallelPlanTests {
 
     /// An expert width a group of two divides.
@@ -124,20 +156,14 @@ struct Qwen35MoETensorParallelPlanTests {
                 == TensorParallel.Split(axis: 2, segments: .count(1)))
     }
 
-    @Test("the gate and up rows of the shared expert split")
-    func splitsSharedExpertRows() {
+    @Test(
+        "the shared expert splits as a dense MLP does, not in place with the experts",
+        arguments: ["gate_proj", "up_proj", "down_proj"])
+    func keepsSharedExpertOutOfExpertSplits(projection: String) {
         #expect(
             TensorParallel.split(
-                of: "shared_expert.gate_proj.weight", in: Qwen35TensorParallelPlan.expertSplits)
-                == TensorParallel.Split(axis: 0, segments: .count(1)))
-    }
-
-    @Test("the down projection of the shared expert splits its inputs")
-    func splitsSharedExpertDownInputs() {
-        #expect(
-            TensorParallel.split(
-                of: "shared_expert.down_proj.biases", in: Qwen35TensorParallelPlan.expertSplits)
-                == TensorParallel.Split(axis: 1, segments: .count(1)))
+                of: "shared_expert.\(projection).weight", in: Qwen35TensorParallelPlan.expertSplits)
+                == nil)
     }
 
     @Test(
@@ -173,12 +199,18 @@ struct Qwen35MoEWholeShareTests {
     private static let mxfp4GroupSize = 32
     private static let mxfp4Bits = 4
 
+    /// The mxfp4 groups of a width whose share on each process keeps whole groups.
+    private static let wholeShareGroups = Qwen35MoEShardFixture.groupSize
+
+    /// A width whose share on each process keeps whole mxfp4 groups.
+    private static let wholeShareWidth = wholeShareGroups * mxfp4GroupSize
+
     /// Layer 0 of a model of `expertWidth` experts, with every projection quantized to mxfp4.
     private static func makeLayer(expertWidth: Int) throws -> (
         Qwen35DecoderLayer, Qwen35TensorParallelPlan
     ) {
         let configuration = try Qwen35MoEShardFixture.makeConfiguration(
-            expertWidth: expertWidth, sharedExpertWidth: 2 * mxfp4GroupSize)
+            expertWidth: expertWidth, sharedExpertWidth: wholeShareWidth)
         let layer = Qwen35DecoderLayer(configuration, layerIdx: 0)
         quantize(model: layer, groupSize: mxfp4GroupSize, bits: mxfp4Bits, mode: .mxfp4)
         let plan = try Qwen35TensorParallelPlan(
@@ -188,7 +220,7 @@ struct Qwen35MoEWholeShareTests {
 
     @Test("an mxfp4 MoE layer whose every split keeps whole groups passes")
     func acceptsWholeMXFP4Groups() throws {
-        let (layer, plan) = try Self.makeLayer(expertWidth: 2 * Self.mxfp4GroupSize)
+        let (layer, plan) = try Self.makeLayer(expertWidth: Self.wholeShareWidth)
         #expect(throws: Never.self) { try layer.requireWholeShares(plan) }
     }
 
@@ -223,22 +255,45 @@ struct Qwen35MoEShareSumTests {
     /// process.
     private static let width = 128
 
-    /// The quantization of the quantized block.
+    /// The quantization of a quantized block: 4-bit, in groups of 32 inputs.
     private static let quantizationGroupSize = 32
     private static let quantizationBits = 4
 
     /// The largest difference float32 sums in another order leave.
     private static let tolerance: Float = 1e-4
 
-    /// A block on the weights of ``weightSeed``, quantized to 4-bit affine when `quantized`.
-    private static func makeBlock(quantized: Bool) throws -> Qwen35SparseMoeBlock {
+    /// The format of the weights of a block.
+    enum BlockFormat: CaseIterable, CustomTestStringConvertible {
+        /// Float weights.
+        case float
+        /// Affine quantized weights.
+        case affine
+        /// mxfp4 quantized weights.
+        case mxfp4
+
+        /// The quantization mode of the format, or nil for float weights.
+        var mode: QuantizationMode? {
+            switch self {
+            case .float: nil
+            case .affine: .affine
+            case .mxfp4: .mxfp4
+            }
+        }
+
+        var testDescription: String { "\(self)" }
+    }
+
+    /// A block on the weights of ``weightSeed``, in `format`.
+    private static func makeBlock(_ format: BlockFormat) throws -> Qwen35SparseMoeBlock {
         let configuration = try Qwen35MoEShardFixture.makeConfiguration(
             expertWidth: width, sharedExpertWidth: width)
         let block = withRandomState(MLXRandom.RandomState(seed: weightSeed)) {
             Qwen35SparseMoeBlock(configuration)
         }
-        if quantized {
-            quantize(model: block, groupSize: quantizationGroupSize, bits: quantizationBits)
+        if let mode = format.mode {
+            quantize(
+                model: block, groupSize: quantizationGroupSize, bits: quantizationBits,
+                mode: mode)
         }
         eval(block)
         return block
@@ -250,18 +305,16 @@ struct Qwen35MoEShareSumTests {
     }
 
     @Test(
-        "the expert shares of a float and of a quantized block sum to the whole block",
-        arguments: [false, true])
-    func expertSharesSum(quantized: Bool) throws {
+        "the expert shares of a float, an affine and an mxfp4 block sum to the whole block",
+        arguments: BlockFormat.allCases)
+    func expertSharesSum(format: BlockFormat) throws {
         let x = Self.blockInput()
-        let expected = try Self.makeBlock(quantized: quantized)(x)
+        let expected = try Self.makeBlock(format)(x)
 
         var sum = MLXArray.zeros(like: expected)
         for rank in 0 ..< Qwen35MoEShardFixture.groupSize {
-            let block = try Self.makeBlock(quantized: quantized)
-            TensorParallelShares.keep(
-                rank: rank, of: Qwen35MoEShardFixture.groupSize, in: block,
-                Qwen35TensorParallelPlan.expertSplits)
+            let block = try Self.makeBlock(format)
+            try Qwen35MoEShares.keep(rank: rank, of: Qwen35MoEShardFixture.groupSize, in: block)
             sum = sum + block(x)
         }
 
@@ -270,7 +323,7 @@ struct Qwen35MoEShareSumTests {
 
     @Test("a block whose experts sum across a group of one keeps its decode output")
     func groupOfOneKeepsDecodeOutput() throws {
-        let block = try Self.makeBlock(quantized: true)
+        let block = try Self.makeBlock(.affine)
         let token = Self.blockInput()[0..., ..<1]
         let before = block(token)
 

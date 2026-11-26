@@ -165,6 +165,61 @@ struct TensorParallelStockProjectionTests {
     }
 }
 
+/// The input shard of a projection, whose output is the part of one process of a sum that the
+/// caller makes once.
+struct TensorParallelInputShardTests {
+
+    /// The processes of the splits.
+    private static let groupSize = 2
+
+    /// The inputs of the projection: two quantization groups on each process.
+    private static let inputs = 128
+
+    /// The outputs of the projection.
+    private static let outputs = 8
+
+    /// The quantization of the quantized projection.
+    private static let quantizationGroupSize = 32
+    private static let quantizationBits = 4
+
+    /// The seed of the weights and of the input.
+    private static let seed: UInt64 = 20_261_127
+
+    /// The tokens of the input.
+    private static let length = 3
+
+    /// The largest difference float32 sums in another order leave.
+    private static let tolerance: Float = 1e-4
+
+    /// A projection with a bias on seeded weights, quantized to 4-bit affine when `quantized`.
+    private static func makeProjection(quantized: Bool) -> Linear {
+        let projection = withRandomState(MLXRandom.RandomState(seed: seed)) {
+            Linear(inputs, outputs, bias: true)
+        }
+        guard quantized else { return projection }
+        return QuantizedLinear(
+            projection, groupSize: quantizationGroupSize, bits: quantizationBits)
+    }
+
+    @Test(
+        "the input shards of a float and of a quantized projection, the bias on rank 0, sum to it",
+        arguments: [false, true])
+    func inputShardsSumToWholeProjection(quantized: Bool) throws {
+        let whole = Self.makeProjection(quantized: quantized)
+        let x = MLXRandom.normal([1, Self.length, Self.inputs], key: MLXRandom.key(Self.seed))
+        let inputs = x.split(parts: Self.groupSize, axis: -1)
+
+        var sum = MLXArray.zeros(like: whole(x))
+        for rank in 0 ..< Self.groupSize {
+            let shard = try TensorParallel.makeInputShard(
+                whole, at: "proj", rank: rank, groupSize: Self.groupSize)
+            sum = sum + shard(inputs[rank])
+        }
+
+        #expect(maxAbsDiff(sum, whole(x)) < Self.tolerance)
+    }
+}
+
 struct TensorParallelWholeShareTests {
 
     /// The processes of the splits.
