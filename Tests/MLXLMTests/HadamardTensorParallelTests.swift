@@ -35,6 +35,9 @@ enum RotatedProjectionFixture {
     /// The seed of the weights, the signs and the input.
     private static let seed: UInt64 = 20_261_126
 
+    /// The seed of the bias.
+    private static let biasSeed: UInt64 = 7
+
     /// The tokens of the input.
     private static let length = 3
 
@@ -45,9 +48,10 @@ enum RotatedProjectionFixture {
     private static let flippedSign: Float = -1
 
     /// A rotated projection of `outputs` rows over `inputs` inputs in `blockSize` blocks, on
-    /// seeded weights and signs.
+    /// seeded weights and signs, with a seeded bias when `biased`.
     static func makeProjection(
-        blockSize: Int = blockSize, outputs: Int = outputs, inputs: Int = inputs
+        blockSize: Int = blockSize, outputs: Int = outputs, inputs: Int = inputs,
+        biased: Bool = false
     ) -> HadamardQuantizedLinear {
         let (weightKey, signKey) = MLXRandom.split(key: MLXRandom.key(seed))
         let (weight, scales, biases) = quantized(
@@ -56,7 +60,9 @@ enum RotatedProjectionFixture {
         let signs = which(
             MLXRandom.bernoulli([inputs], key: signKey), keptSign, flippedSign)
         return HadamardQuantizedLinear(
-            weight: weight, scales: scales, biases: biases, signs: signs,
+            weight: weight,
+            bias: biased ? MLXRandom.normal([outputs], key: MLXRandom.key(biasSeed)) : nil,
+            scales: scales, biases: biases, signs: signs,
             groupSize: quantizationGroupSize, bits: quantizationBits,
             rotation: SignedBlockHadamard(blockSize: blockSize))
     }
@@ -73,36 +79,53 @@ struct HadamardShardedToAllTests {
     /// leave.
     private static let tolerance: Float = 1e-3
 
-    @Test("the input shares of a rotated projection, each with its own signs, sum to the whole")
-    func inputSharesSumToWholeProjection() throws {
-        let whole = RotatedProjectionFixture.makeProjection()
-        let x = RotatedProjectionFixture.input()
-        let groupSize = RotatedProjectionFixture.groupSize
-        let inputs = x.split(parts: groupSize, axis: -1)
+    /// A way to make the share of one process of a rotated projection.
+    enum RotatedShare: CaseIterable, CustomTestStringConvertible {
+        /// The partial product of a ``ShardedToAllHadamardQuantizedLinear``, which sums without
+        /// the bias.
+        case shardedToAllPartialProduct
+        /// The input shard of ``TensorParallel/makeInputShard(_:at:group:)`` of a projection with
+        /// no bias.
+        case inputShard
+        /// The input shard of ``TensorParallel/makeInputShard(_:at:group:)`` of a projection with
+        /// a bias, which rank 0 alone keeps.
+        case biasedInputShard
 
-        var sum = MLXArray.zeros(like: whole(x))
-        for rank in 0 ..< groupSize {
-            let share = try ShardedToAllHadamardQuantizedLinear(
-                whole, at: "self_attn.o_proj", rank: rank, groupSize: groupSize,
-                group: MLXDistributed.initialize())
-            sum = sum + share.partialProduct(inputs[rank])
+        /// Whether the whole projection has a bias.
+        var isBiased: Bool { self == .biasedInputShard }
+
+        var testDescription: String { "\(self)" }
+
+        /// The partial output on `x`, the inputs of process `rank`, of the share of that process
+        /// of `whole`.
+        func partialOutput(
+            of whole: HadamardQuantizedLinear, rank: Int, on x: MLXArray
+        ) throws -> MLXArray {
+            let groupSize = RotatedProjectionFixture.groupSize
+            switch self {
+            case .shardedToAllPartialProduct:
+                return try ShardedToAllHadamardQuantizedLinear(
+                    whole, at: "self_attn.o_proj", rank: rank, groupSize: groupSize,
+                    group: MLXDistributed.initialize()
+                ).partialProduct(x)
+            case .inputShard, .biasedInputShard:
+                return try TensorParallel.makeInputShard(
+                    whole, at: "mlp.shared_expert.down_proj", rank: rank, groupSize: groupSize)(x)
+            }
         }
-
-        #expect(maxAbsDiff(sum, whole(x)) < Self.tolerance)
     }
 
-    @Test("the input shards of a rotated projection, each with its own signs, sum to the whole")
-    func inputShardsSumToWholeProjection() throws {
-        let whole = RotatedProjectionFixture.makeProjection()
+    @Test(
+        "the shares of a rotated projection, each with its own signs, sum to it, the bias once",
+        arguments: RotatedShare.allCases)
+    func sharesSumToWholeProjection(share: RotatedShare) throws {
+        let whole = RotatedProjectionFixture.makeProjection(biased: share.isBiased)
         let x = RotatedProjectionFixture.input()
         let groupSize = RotatedProjectionFixture.groupSize
         let inputs = x.split(parts: groupSize, axis: -1)
 
-        var sum = MLXArray.zeros(like: whole(x))
-        for rank in 0 ..< groupSize {
-            let shard = try TensorParallel.makeInputShard(
-                whole, at: "mlp.shared_expert.down_proj", rank: rank, groupSize: groupSize)
-            sum = sum + shard(inputs[rank])
+        let sum = try TensorParallelShares.sum(over: groupSize) { rank in
+            try share.partialOutput(of: whole, rank: rank, on: inputs[rank])
         }
 
         #expect(maxAbsDiff(sum, whole(x)) < Self.tolerance)
@@ -293,12 +316,7 @@ struct RotatedMoEShardTests {
         let x = Self.blockInput()
         let expected = try Self.makeBlock()(x)
 
-        var sum = MLXArray.zeros(like: expected)
-        for rank in 0 ..< Qwen35MoEShardFixture.groupSize {
-            let block = try Self.makeBlock()
-            try Qwen35MoEShares.keep(rank: rank, of: Qwen35MoEShardFixture.groupSize, in: block)
-            sum = sum + block(x)
-        }
+        let sum = try Qwen35MoEShares.sum(of: Self.makeBlock, on: x)
 
         #expect(maxAbsDiff(sum, expected) < Self.tolerance)
     }

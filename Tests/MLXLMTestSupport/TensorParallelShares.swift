@@ -27,4 +27,19 @@ public enum TensorParallelShares {
         }
         module.update(parameters: ModuleParameters.unflattened(parameters))
     }
+
+    /// The sum over every process of `groupSize` processes of the partial output of its share,
+    /// which the all-sum of a group of `groupSize` processes computes.
+    ///
+    /// - Parameters:
+    ///   - groupSize: The number of processes, at least one.
+    ///   - partialOutput: The partial output of the share of a process, given its rank.
+    /// - Returns: The sum of the partial outputs of every process.
+    public static func sum(
+        over groupSize: Int, _ partialOutput: (Int) throws -> MLXArray
+    ) rethrows -> MLXArray {
+        try (1 ..< groupSize).reduce(try partialOutput(0)) { sum, rank in
+            sum + (try partialOutput(rank))
+        }
+    }
 }

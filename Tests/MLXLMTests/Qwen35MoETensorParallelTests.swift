@@ -79,6 +79,24 @@ enum Qwen35MoEShares {
             sharedExpert.downProj, at: sharedExpertDownPath, rank: rank, groupSize: groupSize)
         sharedExpert.update(modules: ModuleChildren(values: ["down_proj": .value(down)]))
     }
+
+    /// The sum over every process of ``Qwen35MoEShardFixture/groupSize`` of the output on `x` of
+    /// its share of a block that `makeBlock` makes, which the all-sum of the block computes.
+    ///
+    /// - Parameters:
+    ///   - makeBlock: Makes the whole block, the same one on each call.
+    ///   - x: The input of the block.
+    /// - Returns: The sum of the outputs of the shares.
+    static func sum(
+        of makeBlock: () throws -> Qwen35SparseMoeBlock, on x: MLXArray
+    ) throws -> MLXArray {
+        let groupSize = Qwen35MoEShardFixture.groupSize
+        return try TensorParallelShares.sum(over: groupSize) { rank in
+            let block = try makeBlock()
+            try keep(rank: rank, of: groupSize, in: block)
+            return block(x)
+        }
+    }
 }
 
 struct Qwen35MoETensorParallelPlanTests {
@@ -311,12 +329,7 @@ struct Qwen35MoEShareSumTests {
         let x = Self.blockInput()
         let expected = try Self.makeBlock(format)(x)
 
-        var sum = MLXArray.zeros(like: expected)
-        for rank in 0 ..< Qwen35MoEShardFixture.groupSize {
-            let block = try Self.makeBlock(format)
-            try Qwen35MoEShares.keep(rank: rank, of: Qwen35MoEShardFixture.groupSize, in: block)
-            sum = sum + block(x)
-        }
+        let sum = try Qwen35MoEShares.sum(of: { try Self.makeBlock(format) }, on: x)
 
         #expect(maxAbsDiff(sum, expected) < Self.tolerance)
     }

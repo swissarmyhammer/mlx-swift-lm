@@ -490,26 +490,17 @@ public enum TensorParallel {
     ) throws -> Linear {
         try requireStockProjection(layer, at: path)
         try requireWholeInputs(of: layer, at: path, across: groupSize)
-        func share(_ array: MLXArray) -> MLXArray {
-            inputShare(of: array, rank: rank, groupSize: groupSize)
-        }
         let bias = rank == biasRank ? layer.bias : nil
         switch layer {
         case let rotated as HadamardQuantizedLinear:
             return HadamardQuantizedLinear(
-                weight: share(rotated.weight), bias: bias, scales: share(rotated.scales),
-                biases: rotated.biases.map(share), signs: share(rotated.signs),
-                groupSize: rotated.groupSize, bits: rotated.bits, mode: rotated.mode,
-                rotation: rotated.rotation)
+                inputShareOf: rotated, rank: rank, groupSize: groupSize, bias: bias)
         case let quantized as QuantizedLinear:
-            let shard = QuantizedLinear(
-                weight: share(quantized.weight), bias: bias, scales: share(quantized.scales),
-                biases: quantized.biases.map(share), groupSize: quantized.groupSize,
-                bits: quantized.bits, mode: quantized.mode, globalScale: quantized.globalScale)
-            shard.freeze()
-            return shard
+            return QuantizedInputShare(of: quantized, rank: rank, groupSize: groupSize)
+                .makeLinear(bias: bias)
         default:
-            return Linear(weight: share(layer.weight), bias: bias)
+            return Linear(
+                weight: inputShare(of: layer.weight, rank: rank, groupSize: groupSize), bias: bias)
         }
     }
 
@@ -517,6 +508,63 @@ public enum TensorParallel {
     /// projection.
     static func inputShare(of array: MLXArray, rank: Int, groupSize: Int) -> MLXArray {
         contiguous(array.split(parts: groupSize, axis: -1)[rank])
+    }
+
+    /// The packed arrays and the format of the inputs of one process of a quantized projection:
+    /// the one input split of a `QuantizedLinear` and of a ``HadamardQuantizedLinear``.
+    struct QuantizedInputShare {
+
+        /// The packed columns of the inputs of the process.
+        let weight: MLXArray
+
+        /// The scales of the quantization groups of the inputs of the process.
+        let scales: MLXArray
+
+        /// The affine biases of those groups, or nil for a format without them.
+        let biases: MLXArray?
+
+        /// The inputs of each quantization group.
+        let groupSize: Int
+
+        /// The bits of each packed weight.
+        let bits: Int
+
+        /// The quantization mode.
+        let mode: QuantizationMode
+
+        /// The global scale of the whole projection, or nil for a format without one.
+        let globalScale: MLXArray?
+
+        /// The share of process `rank` of `processes` processes of `layer`, whose inputs hold
+        /// whole quantization groups.
+        ///
+        /// - Parameters:
+        ///   - layer: The whole quantized projection. It does not change.
+        ///   - rank: The process whose inputs the share keeps.
+        ///   - processes: The number of processes.
+        init(of layer: QuantizedLinear, rank: Int, groupSize processes: Int) {
+            func share(_ array: MLXArray) -> MLXArray {
+                inputShare(of: array, rank: rank, groupSize: processes)
+            }
+            weight = share(layer.weight)
+            scales = share(layer.scales)
+            biases = layer.biases.map(share)
+            groupSize = layer.groupSize
+            bits = layer.bits
+            mode = layer.mode
+            globalScale = layer.globalScale
+        }
+
+        /// A frozen `QuantizedLinear` over the share.
+        ///
+        /// - Parameter bias: The bias of the share, or nil.
+        func makeLinear(bias: MLXArray?) -> QuantizedLinear {
+            let linear = QuantizedLinear(
+                weight: weight, bias: bias, scales: scales, biases: biases, groupSize: groupSize,
+                bits: bits, mode: mode, globalScale: globalScale)
+            linear.freeze()
+            return linear
+        }
     }
 
     /// A copy of the depthwise `conv` that keeps the channels of this process.

@@ -209,11 +209,10 @@ struct TensorParallelInputShardTests {
         let x = MLXRandom.normal([1, Self.length, Self.inputs], key: MLXRandom.key(Self.seed))
         let inputs = x.split(parts: Self.groupSize, axis: -1)
 
-        var sum = MLXArray.zeros(like: whole(x))
-        for rank in 0 ..< Self.groupSize {
+        let sum = try TensorParallelShares.sum(over: Self.groupSize) { rank in
             let shard = try TensorParallel.makeInputShard(
                 whole, at: "proj", rank: rank, groupSize: Self.groupSize)
-            sum = sum + shard(inputs[rank])
+            return shard(inputs[rank])
         }
 
         #expect(maxAbsDiff(sum, whole(x)) < Self.tolerance)

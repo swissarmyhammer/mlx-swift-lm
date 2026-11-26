@@ -75,6 +75,26 @@ open class HadamardQuantizedLinear: QuantizedLinear {
         freeze()
     }
 
+    /// The share of process `rank` of `groupSize` processes of `other`: the packed columns and
+    /// the signs of the inputs of that process, whose rotation is the rotation of those inputs
+    /// alone when they hold whole blocks.
+    ///
+    /// - Parameters:
+    ///   - other: The whole rotated projection. It does not change.
+    ///   - rank: The process whose inputs the share keeps.
+    ///   - groupSize: The number of processes.
+    ///   - bias: The bias of the share, or nil.
+    init(inputShareOf other: HadamardQuantizedLinear, rank: Int, groupSize: Int, bias: MLXArray?) {
+        let packed = TensorParallel.QuantizedInputShare(
+            of: other, rank: rank, groupSize: groupSize)
+        self.rotation = other.rotation
+        self.signs = TensorParallel.inputShare(of: other.signs, rank: rank, groupSize: groupSize)
+        super.init(
+            weight: packed.weight, bias: bias, scales: packed.scales, biases: packed.biases,
+            groupSize: packed.groupSize, bits: packed.bits, mode: packed.mode)
+        freeze()
+    }
+
     /// A placeholder shaped like the checkpoint's arrays, which the loader fills.
     public convenience init(
         replacing linear: Linear, groupSize: Int, bits: Int, mode: QuantizationMode = .affine,
@@ -139,15 +159,8 @@ public final class ShardedToAllHadamardQuantizedLinear: HadamardQuantizedLinear 
         group: MLXDistributed.Group
     ) throws {
         try TensorParallel.requireWholeInputs(of: other, at: path, across: groupSize)
-        func share(_ array: MLXArray) -> MLXArray {
-            TensorParallel.inputShare(of: array, rank: rank, groupSize: groupSize)
-        }
         self.group = group
-        super.init(
-            weight: share(other.weight), bias: other.bias, scales: share(other.scales),
-            biases: other.biases.map(share), signs: share(other.signs),
-            groupSize: other.groupSize, bits: other.bits, mode: other.mode,
-            rotation: other.rotation)
+        super.init(inputShareOf: other, rank: rank, groupSize: groupSize, bias: other.bias)
     }
 
     /// The sum across ``group`` of the partial outputs of every process, plus the bias once.
