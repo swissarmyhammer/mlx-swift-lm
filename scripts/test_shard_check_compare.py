@@ -211,6 +211,33 @@ class LoadPeakTests(unittest.TestCase):
             compare.load_peak_passes({"loadPeakBytes": WHOLE_PEAK}, {"loadPeakBytes": WHOLE_PEAK})
         )
 
+    def test_ungated_peak_passes_whatever_it_reads(self) -> None:
+        """The tiny checkpoints of `shard-check.sh --tiny` load a few megabytes, so both peaks
+        read about 0.00 GiB and the 75% gate says nothing about the layer-by-layer load; the
+        tiny mode turns the gate off, and a peak as high as the reference's then passes."""
+        self.assertTrue(
+            compare.peak_pass(
+                {"loadPeakBytes": WHOLE_PEAK}, {"loadPeakBytes": WHOLE_PEAK}, gated=False
+            )
+        )
+
+    def test_gated_peak_fails_a_whole_model_peak(self) -> None:
+        """Without --no-load-peak-gate the gate holds, so a whole-model peak still fails."""
+        self.assertFalse(
+            compare.peak_pass(
+                {"loadPeakBytes": WHOLE_PEAK}, {"loadPeakBytes": WHOLE_PEAK}, gated=True
+            )
+        )
+
+    def test_command_line_gates_the_peak_by_default(self) -> None:
+        """A run of a real checkpoint keeps the gate unless the command line turns it off."""
+        self.assertTrue(compare.parse_arguments(["reference.npy", "sharded.npy"]).load_peak_gate)
+
+    def test_command_line_turns_the_gate_off(self) -> None:
+        """--no-load-peak-gate is the explicit switch of the tiny mode."""
+        arguments = compare.parse_arguments(["--no-load-peak-gate", "reference.npy", "sharded.npy"])
+        self.assertFalse(arguments.load_peak_gate)
+
 
 class ForcedInputTests(unittest.TestCase):
     """A teacher-forced run must have been fed the tokens of this reference."""

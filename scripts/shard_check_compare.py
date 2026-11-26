@@ -1,7 +1,7 @@
 """Compare the logits and greedy tokens of a sharded ShardCheck run with a reference run.
 
-Usage: shard_check_compare.py <reference.npy> <sharded.npy>
-       shard_check_compare.py --tokens-only <reference.json> <sharded.json>
+Usage: shard_check_compare.py [--no-load-peak-gate] <reference.npy> <sharded.npy>
+       shard_check_compare.py --tokens-only [--no-load-peak-gate] <reference.json> <sharded.json>
 
 Each .npy holds the last-position logits of each step, and the .json beside it holds the
 greedy tokens. The gate is the top-k check of vLLM's `check_logprobs_close` with
@@ -22,7 +22,9 @@ tokens, so its own tokens need not equal them; its inputs must be those of the r
 A free-running sharded run must produce the reference tokens.
 
 The load of the sharded run must also peak at most 75% of the reference's load peak: each rank
-loads its share layer by layer, so it never holds the whole model.
+loads its share layer by layer, so it never holds the whole model. With --no-load-peak-gate the
+peaks are printed and not gated: `shard-check.sh --tiny` passes it, because a checkpoint of a
+few megabytes loads in about 0.00 GiB on both sides, where the gate says nothing.
 
 With --tokens-only, the two reports of a generation are compared, and the check passes when
 their tokens are equal.
@@ -30,6 +32,7 @@ their tokens are equal.
 Self-check: python3 -I scripts/test_shard_check_compare.py
 """
 
+import argparse
 import enum
 import json
 import math
@@ -266,7 +269,7 @@ def tokens_pass(reference_report: dict, sharded_report: dict) -> bool:
     return matched
 
 
-def main(reference_path: Path, sharded_path: Path) -> int:
+def main(reference_path: Path, sharded_path: Path, load_peak_gate: bool) -> int:
     """Print the comparison and return the exit status."""
     reference, reference_report = load_run(reference_path)
     sharded, sharded_report = load_run(sharded_path)
@@ -281,7 +284,7 @@ def main(reference_path: Path, sharded_path: Path) -> int:
     print_gate(steps)
     print_timings(reference_report, sharded_report)
 
-    peak_ok = peak_pass(reference_report, sharded_report)
+    peak_ok = peak_pass(reference_report, sharded_report, gated=load_peak_gate)
     return verdict(tokens_ok and peak_ok and run_passes(steps))
 
 
@@ -291,15 +294,23 @@ def load_peak_passes(reference_report: dict, sharded_report: dict) -> bool:
     return sharded_report["loadPeakBytes"] <= limit
 
 
-def peak_pass(reference_report: dict, sharded_report: dict) -> bool:
-    """Print the load peaks, and whether the sharded one is within its limit."""
+def peak_pass(reference_report: dict, sharded_report: dict, gated: bool) -> bool:
+    """Print the load peaks, and whether the sharded one is within its limit.
+
+    An ungated peak passes: the tiny checkpoints of `shard-check.sh --tiny` are too small for
+    the limit to say anything.
+    """
     gib = float(1 << 30)
+    limit = (
+        f"limit {LOAD_PEAK_FRACTION:.0%} of the reference"
+        if gated
+        else "not gated: --no-load-peak-gate"
+    )
     print(
         f"load peak: reference {reference_report['loadPeakBytes'] / gib:.2f} GiB, "
-        f"sharded rank 0 {sharded_report['loadPeakBytes'] / gib:.2f} GiB "
-        f"(limit {LOAD_PEAK_FRACTION:.0%} of the reference)"
+        f"sharded rank 0 {sharded_report['loadPeakBytes'] / gib:.2f} GiB ({limit})"
     )
-    return load_peak_passes(reference_report, sharded_report)
+    return not gated or load_peak_passes(reference_report, sharded_report)
 
 
 def print_timings(reference_report: dict, sharded_report: dict) -> None:
@@ -322,17 +333,38 @@ def print_timing(name: str, report: dict) -> None:
     )
 
 
-def compare_tokens(reference_path: Path, sharded_path: Path) -> int:
+def compare_tokens(reference_path: Path, sharded_path: Path, load_peak_gate: bool) -> int:
     """Print the tokens of two generation reports and return the exit status."""
     reference_report = json.loads(reference_path.read_text())
     sharded_report = json.loads(sharded_path.read_text())
     print_tokens(reference_report, sharded_report)
     print_timings(reference_report, sharded_report)
-    peak_ok = peak_pass(reference_report, sharded_report)
+    peak_ok = peak_pass(reference_report, sharded_report, gated=load_peak_gate)
     return verdict(peak_ok and reference_report["tokens"] == sharded_report["tokens"])
 
 
+def parse_arguments(arguments: list[str]) -> argparse.Namespace:
+    """The command line: the two runs, and the switches of the comparison."""
+    parser = argparse.ArgumentParser(
+        description="Compare a sharded ShardCheck run with its reference."
+    )
+    parser.add_argument(
+        "--tokens-only", action="store_true", help="compare the tokens of two generation reports"
+    )
+    parser.add_argument(
+        "--no-load-peak-gate",
+        dest="load_peak_gate",
+        action="store_false",
+        help="print the load peaks without gating them, for checkpoints of a few megabytes",
+    )
+    parser.add_argument(
+        "reference", type=Path, help="the reference .npy, or .json with --tokens-only"
+    )
+    parser.add_argument("sharded", type=Path, help="the sharded .npy, or .json with --tokens-only")
+    return parser.parse_args(arguments)
+
+
 if __name__ == "__main__":
-    if sys.argv[1] == "--tokens-only":
-        sys.exit(compare_tokens(Path(sys.argv[2]), Path(sys.argv[3])))
-    sys.exit(main(Path(sys.argv[1]), Path(sys.argv[2])))
+    ARGUMENTS = parse_arguments(sys.argv[1:])
+    COMPARE = compare_tokens if ARGUMENTS.tokens_only else main
+    sys.exit(COMPARE(ARGUMENTS.reference, ARGUMENTS.sharded, ARGUMENTS.load_peak_gate))

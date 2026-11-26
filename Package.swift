@@ -216,9 +216,10 @@ let package = Package(
         // Test doubles shared by the MLXLMTests bundle and the
         // MLXFoundationModelsTests bundle: the tiny Qwen 3.5 target with its
         // MTP drafter on seeded random weights, its tokenizer stub, and the
-        // JSON of the small Qwen 3.5 configurations. A test bundle cannot
-        // import another test bundle, thus the doubles live in this target.
-        // Not a product: only the test bundles of this package link it.
+        // JSON of the small Qwen 3.5 configurations, and the tiny checkpoint of
+        // each shardable family. A test bundle cannot import another test
+        // bundle, thus the doubles live in this target. Not a product: only the
+        // test bundles of this package and the ShardCheck tool link it.
         .target(
             name: "MLXLMTestSupport",
             dependencies: [
@@ -245,6 +246,7 @@ let package = Package(
             exclude: ["README.md"]
         ),
         // Compares tensor-parallel logits with unsharded ones; scripts/shard-check.sh runs it.
+        // It writes the tiny checkpoints of MLXLMTestSupport for scripts/shard-check.sh --tiny.
         // Not a product, so packages that depend on this one do not get it.
         .executableTarget(
             name: "ShardCheck",
@@ -252,7 +254,7 @@ let package = Package(
                 "MLXLMCommon",
                 "MLXLLM",
                 "MLXVLM",
-                "MLXScriptedLM",
+                "MLXLMTestSupport",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "tools/ShardCheck",

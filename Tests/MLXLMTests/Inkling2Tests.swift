@@ -549,27 +549,8 @@ struct Inkling2KernelTests {
 @Suite("Inkling2 model")
 struct Inkling2ModelTests {
 
-    /// Six layers in blocks of two; layers 2 and 3 loop twice. Layers 3 and 5 attend to all
-    /// positions, the others to a window of 8.
-    static let tinyJSON = """
-        {
-          "model_type": "inkling2_loop",
-          "text_config": {
-            "hidden_size": 64, "num_hidden_layers": 6, "vocab_size": 50,
-            "unpadded_vocab_size": 48, "num_attention_heads": 4, "num_key_value_heads": 2,
-            "head_dim": 32, "sliding_window_size": 8, "local_layer_ids": [0, 1, 2, 4],
-            "d_rel": 8, "rel_extent": 16, "log_scaling_n_floor": 4, "log_scaling_alpha": 0.1,
-            "rms_norm_eps": 1e-06, "qk_l2_clip_threshold": 22.6, "rel_l2_clip_threshold": 8.0,
-            "sconv_kernel_size": 4, "n_layers_per_attn_res_block": 2, "n_routed_experts": 4,
-            "num_experts_per_tok": 2, "intermediate_size": 32, "mlp_gate_softcap": 4.0,
-            "mlp_up_softcap": 25.0, "route_scale": 2.0, "final_logit_softcapping": 30.0,
-            "loop_config": {
-              "core_start": 2, "core_end": 4, "num_passes": 2, "gate_rank": 8,
-              "is_varloop": false
-            }
-          }
-        }
-        """
+    /// The `config.json` of the tiny target; see ``Inkling2TinyModels/targetJSON``.
+    static let tinyJSON = Inkling2TinyModels.targetJSON
 
     /// A tiny model with random weights and NVFP4 experts. In bfloat16, the tensors that the
     /// checkpoint stores in float32 stay float32, and the model is prepared as after a load.

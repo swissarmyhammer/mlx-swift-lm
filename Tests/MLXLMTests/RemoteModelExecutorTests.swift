@@ -5,7 +5,6 @@ import MLX
 import MLXLLM
 import MLXLMTestSupport
 import MLXNN
-import MLXVLM
 import Testing
 
 @testable import MLXLMCommon
@@ -133,7 +132,7 @@ struct RemoteModelExecutorTests {
         "each shardable model family loads a model that shards",
         arguments: RemoteModelExecutor.shardableModelFamilies)
     func eachShardableModelFamilyLoadsAModelThatShards(family: String) async throws {
-        let model = try await ShardableFamilyConfiguration.makeModel(of: family)
+        let model = try await TinyShardCheckpoint.makeModel(of: family)
 
         let shardable = try #require(model as? TensorParallelShardable)
         #expect(throws: Never.self) { try shardable.shard(group: MLXDistributed.initialize()) }
@@ -564,56 +563,6 @@ private final class ConfigurationDirectory {
 
     deinit {
         try? FileManager.default.removeItem(at: url)
-    }
-}
-
-/// The small configuration of each shardable model family, made from the fixtures of its model.
-private enum ShardableFamilyConfiguration {
-
-    /// The model of `family`, from the LLM factory, or from the VLM factory for a type only it
-    /// knows, as a worker loads it.
-    static func makeModel(of family: String) async throws -> any LanguageModel {
-        let configuration = Data(try json(of: family).utf8)
-        do {
-            return try await LLMTypeRegistry.shared.createModel(
-                configuration: configuration, modelType: family)
-        } catch ModelFactoryError.unsupportedModelType {
-            return try await VLMTypeRegistry.shared.createModel(
-                configuration: configuration, modelType: family)
-        }
-    }
-
-    /// The experts of each MoE layer of the mixture-of-experts fixture.
-    private static let moeExperts = 2
-
-    /// The fixture `config.json` of the Qwen 3.5 mixture-of-experts families, and the model type
-    /// it names.
-    private static let qwen35MoEFixture = (
-        json: Qwen35FixtureJSON.wrappedText(
-            modelType: "qwen3_5_moe",
-            textConfigJSON: Qwen35FixtureJSON.text(mtpLayers: 0, numExperts: moeExperts)),
-        modelType: "qwen3_5_moe"
-    )
-
-    /// The fixture `config.json` of each family, and the model type the fixture names.
-    private static let fixtures: [String: (json: String, modelType: String)] = [
-        "qwen3_5": (Qwen35FixtureJSON.visionLanguage(mtpLayers: 0), "qwen3_5"),
-        "qwen3_8": (Qwen35FixtureJSON.visionLanguage(mtpLayers: 0), "qwen3_5"),
-        "qwen3_5_text": (Qwen35FixtureJSON.text(mtpLayers: 0), "qwen3_5_text"),
-        "qwen3_8_text": (Qwen35FixtureJSON.text(mtpLayers: 0), "qwen3_5_text"),
-        "inkling2": (Inkling2ModelTests.tinyJSON, "inkling2_loop"),
-        "inkling2_loop": (Inkling2ModelTests.tinyJSON, "inkling2_loop"),
-        "qwen3_5_moe": qwen35MoEFixture,
-        "qwen3_8_moe": qwen35MoEFixture,
-        "prism_hadamard_qwen35": (HadamardQuantizedTests.packConfig, "prism_hadamard_qwen35"),
-    ]
-
-    /// A small `config.json` of `family`.
-    private static func json(of family: String) throws -> String {
-        let fixture = try #require(fixtures[family], "no fixture configuration for \(family)")
-        return fixture.json.replacingOccurrences(
-            of: "\"model_type\": \"\(fixture.modelType)\"",
-            with: "\"model_type\": \"\(family)\"")
     }
 }
 

@@ -4,7 +4,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
-import MLXScriptedLM
+import MLXLMTestSupport
 import MLXVLM
 
 /// Runs a prefill and greedy decode steps, and writes the last-position logits of each step.
@@ -26,16 +26,24 @@ import MLXVLM
 /// Without `--tokens` the prompt is the one of ``DefaultPrompt``, or the prompt of the reference
 /// run.
 ///
+/// `ShardCheck tiny-families` and `ShardCheck tiny-checkpoint <family> <directory>` write tiny
+/// checkpoints instead; see ``TinyCheckpointCommand``.
+///
 /// Usage: `ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8]
 /// [--teacher-forcing reference.json | --announce]`
 @main
 struct ShardCheck {
 
-    /// Runs the check, and exits with status 1 on any error.
+    /// Runs the check, or the command that writes tiny checkpoints, and exits with status 1 on
+    /// any error.
     static func main() async {
         do {
-            let arguments = try Arguments(CommandLine.arguments.dropFirst())
-            try await run(arguments)
+            let commandLine = CommandLine.arguments.dropFirst()
+            if let command = try TinyCheckpointCommand(commandLine) {
+                try await command.run()
+                return
+            }
+            try await run(try Arguments(commandLine))
         } catch {
             FileHandle.standardError.write(Data("ShardCheck: \(error)\n".utf8))
             exit(1)
@@ -306,7 +314,9 @@ enum ShardCheckError: Error, CustomStringConvertible {
         switch self {
         case .usage:
             "usage: ShardCheck <model-directory> <output.npy> [--tokens 1,2,3] [--decode-steps 8] "
-                + "[--teacher-forcing reference.json | --announce]"
+                + "[--teacher-forcing reference.json | --announce]\n"
+                + "       ShardCheck tiny-families\n"
+                + "       ShardCheck tiny-checkpoint <family> <directory>"
         case .noDefaultPrompt(let modelType):
             "no default prompt for model type \(modelType); pass --tokens"
         case .promptDiffersFromReference:
@@ -515,14 +525,6 @@ enum NumpyFile {
         data.append(Data(header.utf8))
         array.asArray(Float.self).withUnsafeBufferPointer { data.append(Data(buffer: $0)) }
         try data.write(to: url)
-    }
-}
-
-/// Loads a pseudo-word tokenizer: the check feeds token ids, so the text does not matter.
-struct PseudoWordTokenizerLoader: TokenizerLoader {
-    /// A pseudo-word tokenizer; `directory` is not read.
-    func load(from directory: URL) async throws -> any Tokenizer {
-        PseudoWordTokenizer()
     }
 }
 

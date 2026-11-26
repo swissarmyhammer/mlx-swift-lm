@@ -200,6 +200,23 @@ KL divergence is printed but not gated. It also checks that the layer-by-layer l
 of the unsharded load. `--announce` instead generates through a ``ClusterLanguageModel`` whose
 transport announces each op to the other rank, and compares the tokens with a local generation.
 
+`scripts/shard-check.sh --tiny` needs no model directory and no download. For each model type of
+``RemoteModelExecutor/shardableModelFamilies`` (or each one named after `--tiny`), `ShardCheck
+tiny-checkpoint <family> <directory>` writes a tiny checkpoint on seeded random weights,
+`config.json` and `model.safetensors` of 1 to 5 MB, with a configuration that splits across two
+processes. The script then runs the teacher-forced check and the `--announce` check on it, with
+prompt ids the tiny vocabulary holds, and prints one `PASS` or `FAIL` line for each family and
+check. `ShardCheck tiny-families` lists the families. A family added to
+``RemoteModelExecutor/shardableModelFamilies`` with no tiny checkpoint fails the check, so each
+new family gets a logits check that runs on one Mac.
+
+The 75% load-peak gate says nothing about a checkpoint of a few megabytes: both load peaks read
+about 0.00 GiB. The tiny mode alone turns the gate off (the `--no-load-peak-gate` option of
+`scripts/shard_check_compare.py`) and prints the peaks. A check of a real checkpoint keeps the
+gate. No CI job runs the tiny mode: it needs a Mac GPU, and the Mac jobs of
+`.github/workflows/pull_request.yml` run only in `ml-explore/mlx-swift-lm`, on its self-hosted
+runner. Run it on a Mac before a change to sharding or to a shardable family lands.
+
 ## Topics
 
 ### Sharding

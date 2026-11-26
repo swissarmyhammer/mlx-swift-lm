@@ -129,8 +129,11 @@ ranks can wait without polling. The executor is not thread-safe.
 scripts/shard-check.sh <model-directory>              # teacher-forced logits, top-5 gate
 scripts/shard-check.sh --free-running <model-directory>
 scripts/shard-check.sh --announce <model-directory>   # generation through ClusterLanguageModel
+scripts/shard-check.sh --tiny [<family>...]           # every shardable family, no download
 python3 -I scripts/test_shard_check_compare.py         # self-check of the comparator
 ```
+
+`--tiny` writes a tiny random checkpoint (1 to 5 MB, a configuration that splits across two processes) for each family of `RemoteModelExecutor.shardableModelFamilies` with `ShardCheck tiny-checkpoint <family> <directory>` (the builder is `TinyShardCheckpoint` in `Tests/MLXLMTestSupport`), runs the teacher-forced and the `--announce` check on each, and prints one PASS or FAIL line per family and check. A new shardable family needs a recipe in `TinyShardCheckpoint`, or the tiny mode and `TinyShardCheckpointTests` fail. The 75% load-peak gate means nothing for megabyte checkpoints (both peaks read 0.00 GiB), so the tiny mode alone passes `--no-load-peak-gate` to the comparator; a real checkpoint keeps the gate. No CI job runs it: it needs a Mac GPU, and the Mac jobs of `.github/workflows/pull_request.yml` run only in `ml-explore/mlx-swift-lm`, on its self-hosted runner; run it on a Mac before a sharding change lands.
 
 A step passes when each run's argmax is in the other run's top-5 tokens, or within 2 bf16 ulps of the other run's 5th-highest logit, as in vLLM's [`check_logprobs_close`](https://github.com/vllm-project/vllm/blob/main/tests/models/utils.py); KL is printed but not gated.
 
