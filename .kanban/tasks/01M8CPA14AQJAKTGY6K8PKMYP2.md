@@ -21,8 +21,24 @@ comments:
     - evidence: 2 files — scripts/shard-check.sh (build_shard_check: tee to $WORK/build.log, fail on `error:` line before any check; header doc), scripts/test_shard_check_compare.py (tiny_run helper with optional fake xcodebuild on PATH + ran-marker; BuildErrorTests: 4 tests). `python3 -I scripts/test_shard_check_compare.py`: 31 tests OK. Real `scripts/shard-check.sh --tiny` (with build): exit 0, 18/18 PASS, build.log has no `error:` line. bash -n ok; ruff format applied. No Swift change; no build state deleted.
     - next: review
   timestamp: 2026-11-26T20:22:12.234564+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m8crfs5c9j22a89eagv2haw5
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (a8dfe3d2) — 0 findings (9 validator pairs attempted, 0 failed); reviewed scripts/shard-check.sh, scripts/test_shard_check_compare.py; 4 .kanban files matched no validator
+    - next: none — moved to done
+  timestamp: 2026-11-26T20:24:26.028219+00:00
+- actor: claude-code
+  id: 01m8crg4csdpffa753jhfymfxp
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — scripts/shard-check.sh, scripts/test_shard_check_compare.py
+    - test: green — python 31 OK, bash -n ok, --tiny 18/18 PASS, build.log 0 error: lines, usage paths exit 2
+    - commit: a8dfe3d2
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-26T20:24:37.529441+00:00
+position_column: done
+position_ordinal: ffffff8280
 title: 'shard-check.sh: a ShardCheck build that logs "error:" but exits 0 leaves a stale binary'
 ---
 Found in ^727pxfp. Twice, `xcodebuild build -scheme ShardCheck -configuration Release ... -quiet` (the build step of `scripts/shard-check.sh`) printed `error: the following command failed with exit code 0 but produced no further output` for `SwiftCompile normal arm64 (in target 'MLXVLM')`, exited 0, and kept the old MLXVLM objects. The script went on with a stale binary: a temporary mutation of `Libraries/MLXVLM/Models/Inkling2MoE.swift` produced sharded logits bit-identical to the unmutated run. A rebuild after that worked.

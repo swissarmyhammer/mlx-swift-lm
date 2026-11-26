@@ -126,10 +126,6 @@ public enum Inkling2TinyModels {
             for (key, value) in model.parameters().flattened() where value.dtype == .float32 {
                 parameters[key] = MLXRandom.normal(value.shape) * weightScale
             }
-            for (key, value) in model.parameters().flattened() where key.hasSuffix(".global_scale")
-            {
-                parameters[key] = MLXArray.ones(value.shape)
-            }
             for (key, value) in model.parameters().flattened()
             where key.hasSuffix("_proj.weight") && value.dtype == .uint32 {
                 let prefix = String(key.dropLast(".weight".count))
@@ -137,10 +133,10 @@ public enum Inkling2TinyModels {
                 let dense =
                     MLXRandom.normal([value.dim(expertAxis), rows, packed * valuesPerPackedWord])
                     * weightScale
-                let (weight, scales, _) = MLX.quantized(
-                    dense, groupSize: expertGroupSize, bits: expertBits, mode: .nvfp4)
-                parameters[key] = weight
-                parameters["\(prefix).scales"] = scales
+                let experts = (0 ..< dense.dim(expertAxis)).map { quantizedExpert(dense[$0]) }
+                parameters[key] = stacked(experts.map(\.weight))
+                parameters["\(prefix).scales"] = stacked(experts.map(\.scales))
+                parameters["\(prefix).global_scale"] = stacked(experts.map(\.globalScale))
             }
             if bfloat16 {
                 for (key, value) in parameters
@@ -156,6 +152,24 @@ public enum Inkling2TinyModels {
             eval(model)
         }
         return model
+    }
+
+    /// One expert's `[rows, columns]` weights in NVFP4 with the global scale of a checkpoint:
+    /// the largest magnitude of the weights, which the dequantization multiplies the group
+    /// scales by. Without it, `MLX.quantized` writes group scales that a global scale of 1
+    /// shrinks by `6 * 448`, the largest FP4 value times the largest FP8 scale, so the experts
+    /// would output almost zero.
+    ///
+    /// - Parameter dense: the weights of one expert.
+    /// - Returns: the packed weights, the group scales and the global scale.
+    private static func quantizedExpert(_ dense: MLXArray) -> (
+        weight: MLXArray, scales: MLXArray, globalScale: MLXArray
+    ) {
+        let globalScale = abs(dense).max()
+        let (weight, scales, _) = MLX.quantized(
+            dense, groupSize: expertGroupSize, bits: expertBits, mode: .nvfp4,
+            globalScale: globalScale)
+        return (weight, scales, globalScale)
     }
 
     /// A DSpark drafter of the `mtp_config` of `json` with random weights.

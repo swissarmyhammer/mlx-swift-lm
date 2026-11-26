@@ -570,6 +570,34 @@ struct Inkling2ModelTests {
         #expect(model.defaultPrefillStepSize == Inkling2.prefillStepSize)
     }
 
+    /// The least change of a logit that zeroing every expert must cause. An expert output that
+    /// the tiny target rounds away leaves the logits bit-identical, and then no test sees a
+    /// break of the expert path, such as a dropped all-sum of sharded experts.
+    private static let expertLogitEffect: Float = 0.1
+
+    /// The tiny target with the scales of every expert down projection zeroed, so that every
+    /// expert outputs zero.
+    private static func makeModelWithoutExperts(bfloat16: Bool) throws -> Inkling2 {
+        let model = try makeModel(bfloat16: bfloat16)
+        let zeroed = model.parameters().flattened()
+            .filter { $0.0.hasSuffix("mlp.experts.down_proj.scales") }
+            .map { ($0.0, MLXArray.zeros(like: $0.1)) }
+        try model.update(
+            parameters: ModuleParameters.unflattened(Dictionary(uniqueKeysWithValues: zeroed)),
+            verify: .none)
+        eval(model)
+        return model
+    }
+
+    @Test("The experts of the tiny target reach its logits", arguments: [false, true])
+    func expertsReachTheLogits(bfloat16: Bool) throws {
+        let tokens = MLXArray((0 ..< 8).map { Int32(($0 * 7 + 3) % 48) }).reshaped(1, -1)
+        let logits = try Self.makeModel(bfloat16: bfloat16)(tokens, cache: nil)
+        let withoutExperts = try Self.makeModelWithoutExperts(bfloat16: bfloat16)(
+            tokens, cache: nil)
+        #expect(maxAbsoluteDifference(logits, withoutExperts) > Self.expertLogitEffect)
+    }
+
     @Test("Pinned keys keep their positions in the reference distances")
     func pinnedDistances() {
         let masks = Inkling2DecodeMasks()
