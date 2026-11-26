@@ -28,6 +28,36 @@ comments:
     - evidence: 4 files — Libraries/MLXLMCommon/GatedDelta.swift, Libraries/MLXLMCommon/GatedDeltaDecodeKernel.swift, Libraries/MLXLLM/Models/Qwen35.swift, Tests/MLXLMTests/GatedDeltaGPUStreamTests.swift (new, 3 tests). `swift build --build-tests` clean apart from the SwiftBuild Cmlx-bundle "missing creator" warning that also appears on a no-op build. xctest: MLXLMTests 1261 XCTest + 2749 Swift Testing passed (3 known issues, all pre-existing withKnownIssue: AttentionKernelToleranceTests, MiniCPM5 CDATA); MLXFoundationModelsTests 618 passed; MLXGuidedGenerationTests 95 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 passed. All existing GatedDelta tests pass, including testGatedDeltaOpsPathIsDifferentiable and the fast-path gradient test.
     - next: /review
   timestamp: 2026-11-26T15:55:37.617403+00:00
+- actor: claude-code
+  id: 01m8cbfv4mq83jsb3hvpj79wff
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (e8b5ea42), 3 findings (3 confirmed, 0 refuted) — Tests/MLXLMTestSupport/Inkling2TinyModels.swift:93, Tests/MLXLMTestSupport/Inkling2TinyModels.swift:104, Tests/MLXLMTests/GatedDeltaGPUStreamTests.swift:157
+    - next: /implement 4hdr1n6 to resolve the three unchecked items in "Review Findings (2026-11-26 10:35)", then re-review
+  timestamp: 2026-11-26T16:37:16.564147+00:00
+- actor: claude-code
+  id: 01m8cbge6hpkc9p0fhz6jg650n
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — GatedDelta.swift, GatedDeltaDecodeKernel.swift, Qwen35.swift, GatedDeltaGPUStreamTests.swift (new)
+    - test: green — 5 bundles (MLXLMTests 1261 XCTest + 2749 ST, FM 618, Guided 95, CXGrammar 7, Macros 11), verify-docs 0; flaky ClusterInklingParityTests fixed in Inkling2TinyModels.swift (task-local random state)
+    - commit: e8b5ea42
+    - review: findings — Tests/MLXLMTestSupport/Inkling2TinyModels.swift:93, Tests/MLXLMTestSupport/Inkling2TinyModels.swift:104, Tests/MLXLMTests/GatedDeltaGPUStreamTests.swift:157
+  timestamp: 2026-11-26T16:37:36.081925+00:00
+- actor: claude-code
+  id: 01m8cc2wd174vee8cac6mkkcky
+  text: |-
+    Resolved the three findings of "Review Findings (2026-11-26 10:35)":
+    - Inkling2TinyModels.swift: changed `[String: MLXArray]()` to `: [String: MLXArray] = [:]`. It was the only empty-collection init in the file; the drafter's `Dictionary(uniqueKeysWithValues:)` is not an empty init. Added the named constants `expertAxis` (0), `rowAxis` (1) and `packedAxis` (2) for the packed NVFP4 weight dims. `swiftlint lint --only-rule no_magic_numbers` reports the finding at line 104 on the HEAD copy of the file and 0 violations on the new one.
+    - maxAbsDiff: added one public `maxAbsDiff(_:_:)` (it casts to float32) in the new Tests/MLXLMTestSupport/MaxAbsDiff.swift. Deleted `ContinuationAssertions.maxAbsDiff` and the four private `continuation.maxAbsDiff` wrappers (Qwen3VL, Qwen35, Qwen3VLMoE, GlmOcr continuation tests); their call sites now resolve to the shared function. GatedDeltaGPUStreamTests now uses it instead of `largestDifference`. Gemma2Tests and NanbeigeTests keep their own private pre-existing copies because they were out of scope.
+  timestamp: 2026-11-26T16:47:40.449070+00:00
+- actor: claude-code
+  id: 01m8cc2zcdxfqce5gywbp5vywf
+  text: |-
+    ### implement — changed
+    - evidence: 9 files — Tests/MLXLMTestSupport/MaxAbsDiff.swift (new), Tests/MLXLMTestSupport/Inkling2TinyModels.swift, Tests/MLXLMTests/GatedDeltaGPUStreamTests.swift, ContinuationAssertions.swift, Qwen3VLContinuationTests.swift, Qwen35ContinuationTests.swift, Qwen3VLMoEContinuationTests.swift, GlmOcrContinuationTests.swift. swift-format applied. `swift build --build-tests` reported no warnings other than the known SwiftBuild Cmlx "missing creator" warning. xctest MLXLMTests: 1261 XCTest, 0 failures; 2749 Swift Testing passed (the 3 known issues are pre-existing withKnownIssue). MLXFoundationModelsTests: 618 passed. All 3 findings are checked.
+    - next: /review
+  timestamp: 2026-11-26T16:47:43.501585+00:00
 position_column: doing
 position_ordinal: '80'
 title: GatedDelta ops fallback uses CustomFunction, which creates a second GPU stream
@@ -40,3 +70,15 @@ Found by FoundationModelsCluster's GPU-stream guard (wevkejv, 13d83dd).
 Fix: when a distributed group is active, keep the ops fallback off CustomFunction (plain ops with no VJP wrapper), or pass the stream explicitly. Add a test that asserts one GPU stream after a forward through the fallback, using `mlx_get_streams`. Low priority. It matters only if training or an odd Dk ever runs clustered.
 
 #cluster
+
+## Review Findings (2026-11-26 10:35)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 5 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M88ZG19EXA9WYCFTG4HDR1N6.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M88ZG19EXA9WYCFTG4HDR1N6.md` — no validator matches this file
+
+- [x] `Tests/MLXLMTestSupport/Inkling2TinyModels.swift:93` `code-hygiene/idioms-swift` — AlwaysUseLiteralForEmptyCollectionInit: replace '[String: MLXArray]()' with ': [String: MLXArray] = [:]'.
+- [x] `Tests/MLXLMTestSupport/Inkling2TinyModels.swift:104` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXLMTests/GatedDeltaGPUStreamTests.swift:157` `reuse/reuse` — `largestDifference` reimplements the max-absolute-difference helper that the test suite already has in several places. It is a fresh private copy of `abs(a - b).max().item(Float.self)`, so the same logic now lives in another file, and the repo's shared helper is left unused. Call the existing `maxAbsDiff` (or make a shared, file-independent version of it in MLXLMTestSupport and use it here). If the float32 cast matters for bf16 gradients, add it to the shared helper, or keep the cast at the call site: `Self.maxAbsDiff($0.asType(.float32), $1.asType(.float32))`.

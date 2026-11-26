@@ -77,9 +77,6 @@ final class GlmOcrContinuationTests: XCTestCase {
     private func lastLogits(_ result: PrepareResult) throws -> (MLXArray, LMOutput.State?) {
         try continuation.lastLogits(result)
     }
-    private func maxAbsDiff(_ a: MLXArray, _ b: MLXArray) -> Float {
-        continuation.maxAbsDiff(a, b)
-    }
 
     private let ropeDeltasKey = LMOutput.Key<MLXArray>("glmocr.ropeDeltas")
 

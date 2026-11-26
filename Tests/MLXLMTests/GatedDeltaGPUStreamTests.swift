@@ -10,6 +10,7 @@
 import Cmlx
 import Foundation
 import MLX
+import MLXLMTestSupport
 import Testing
 
 @testable import MLXLLM
@@ -153,11 +154,6 @@ struct GatedDeltaGPUStreamTests {
         return gradients
     }
 
-    /// The largest difference between `lhs` and `rhs`, in float32.
-    private static func largestDifference(_ lhs: MLXArray, _ rhs: MLXArray) -> Float {
-        abs(lhs.asType(.float32) - rhs.asType(.float32)).max().item(Float.self)
-    }
-
     @Test("a forward through the ops fallback without chunk recompute makes no GPU stream")
     func opsForwardMakesNoGPUStream() async {
         let inputs = Self.makeEvaluatedInputs()
@@ -176,7 +172,7 @@ struct GatedDeltaGPUStreamTests {
         let inputs = Self.makeEvaluatedInputs()
         let recomputed = Self.opsGradients(of: inputs, recomputeChunks: true)
         let plain = Self.opsGradients(of: inputs, recomputeChunks: false)
-        let differences = zip(recomputed, plain).map { Self.largestDifference($0, $1) }
+        let differences = zip(recomputed, plain).map { maxAbsDiff($0, $1) }
         #expect(differences == Array(repeating: 0, count: recomputed.count))
     }
 

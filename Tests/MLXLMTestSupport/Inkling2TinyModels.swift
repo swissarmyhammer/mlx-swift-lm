@@ -28,6 +28,15 @@ public enum Inkling2TinyModels {
     /// The values one `uint32` of an NVFP4 weight packs.
     private static let valuesPerPackedWord = 8
 
+    /// The axis of the experts of a packed NVFP4 expert weight.
+    private static let expertAxis = 0
+
+    /// The axis of the output rows of a packed NVFP4 expert weight.
+    private static let rowAxis = 1
+
+    /// The axis of the packed `uint32` words of a packed NVFP4 expert weight.
+    private static let packedAxis = 2
+
     /// The tensors a loaded checkpoint keeps in float32 when the rest is bfloat16.
     private static let float32Suffixes = [
         ".query", "mlp.gate.weight", "e_score_correction_bias",
@@ -90,7 +99,7 @@ public enum Inkling2TinyModels {
         // Task-local rather than MLXRandom.seed: parallel tests must not share (or perturb) the
         // global random stream, or the weights differ from run to run.
         try withRandomState(MLXRandom.RandomState(seed: targetSeed)) {
-            var parameters = [String: MLXArray]()
+            var parameters: [String: MLXArray] = [:]
             for (key, value) in model.parameters().flattened() where value.dtype == .float32 {
                 parameters[key] = MLXRandom.normal(value.shape) * weightScale
             }
@@ -101,9 +110,9 @@ public enum Inkling2TinyModels {
             for (key, value) in model.parameters().flattened()
             where key.hasSuffix("_proj.weight") && value.dtype == .uint32 {
                 let prefix = String(key.dropLast(".weight".count))
-                let (rows, packed) = (value.dim(1), value.dim(2))
+                let (rows, packed) = (value.dim(rowAxis), value.dim(packedAxis))
                 let dense =
-                    MLXRandom.normal([value.dim(0), rows, packed * valuesPerPackedWord])
+                    MLXRandom.normal([value.dim(expertAxis), rows, packed * valuesPerPackedWord])
                     * weightScale
                 let (weight, scales, _) = MLX.quantized(
                     dense, groupSize: expertGroupSize, bits: expertBits, mode: .nvfp4)

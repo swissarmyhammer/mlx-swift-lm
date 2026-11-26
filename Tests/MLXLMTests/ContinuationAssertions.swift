@@ -2,6 +2,7 @@
 
 import MLX
 import MLXLMCommon
+import MLXLMTestSupport
 import MLXVLM
 import XCTest
 
@@ -58,10 +59,6 @@ struct ContinuationAssertions {
             throw XCTSkip("expected .logits from prepare")
         }
         return (out.logits[0..., -1, 0...], out.state)
-    }
-
-    func maxAbsDiff(_ a: MLXArray, _ b: MLXArray) -> Float {
-        abs(a - b).max().item(Float.self)
     }
 
     /// Prefill `tokens` on a fresh cache and return the final-position logits and resume state.
