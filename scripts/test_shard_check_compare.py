@@ -11,6 +11,7 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -269,30 +270,57 @@ class ForcedInputTests(unittest.TestCase):
 _SCRIPT_PATH = Path(__file__).resolve().parent / "shard-check.sh"
 # Where shard-check.sh looks for ShardCheck, relative to the repository root.
 _BINARY_PATH = Path(".build/shard-check/Build/Products/Release/ShardCheck")
-# The mode of the fake ShardCheck: executable, as a build product is.
+# The mode of a fake tool: executable, as a build product is.
 _EXECUTABLE_MODE = 0o755
+# The file the fake ShardCheck creates beside itself each time it runs.
+_RAN_MARKER_SUFFIX = ".ran"
+# The last stderr line of a run whose build logged an `error:` line.
+_BUILD_ERROR_MESSAGE = "the ShardCheck build logged an error: line, so no check ran"
+# The fake xcodebuild of ^8pkmyp2: it logs a failed compile and still exits 0.
+_SPURIOUS_FAILURE_BUILD = (
+    'echo "error: the following command failed with exit code 0 but produced no further'
+    ' output"\nexit 0'
+)
 
 
-def tiny_run_outcome(fake_binary: str) -> tuple[int, str]:
-    """The exit status and the last stderr line of `shard-check.sh --tiny`, against a fake
-    ShardCheck whose body is `fake_binary`.
+@dataclass(frozen=True)
+class TinyRun:
+    """What one `shard-check.sh --tiny` run against fake tools did."""
+
+    status: int
+    last_error_line: str
+    shard_check_ran: bool
+
+
+def write_tool(path: Path, body: str) -> None:
+    """Writes an executable bash script with `body` at `path`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/bash\n{body}\n")
+    path.chmod(_EXECUTABLE_MODE)
+
+
+def tiny_run(fake_binary: str, fake_xcodebuild: str | None = None) -> TinyRun:
+    """Runs `shard-check.sh --tiny` against a fake ShardCheck whose body is `fake_binary`.
 
     The script runs from a copy in a temporary tree that holds the fake binary where the
-    script looks for ShardCheck, and the build is skipped, so no Swift build is touched.
+    script looks for ShardCheck. With no `fake_xcodebuild`, the build is skipped; with one, an
+    `xcodebuild` of that body comes first on PATH, so no Swift build is touched either way.
+    The fake ShardCheck creates a marker beside itself, so the run reports whether it ran.
     """
     with tempfile.TemporaryDirectory() as root:
         script = Path(root) / "scripts" / _SCRIPT_PATH.name
         script.parent.mkdir()
         shutil.copy(_SCRIPT_PATH, script)
         binary = Path(root) / _BINARY_PATH
-        binary.parent.mkdir(parents=True)
-        binary.write_text(f"#!/bin/bash\n{fake_binary}\n")
-        binary.chmod(_EXECUTABLE_MODE)
-        environment = {
-            **os.environ,
-            "SHARD_CHECK_SKIP_BUILD": "1",
-            "SHARD_CHECK_WORK": str(Path(root) / "work"),
-        }
+        marker = binary.with_name(binary.name + _RAN_MARKER_SUFFIX)
+        write_tool(binary, f'touch "{marker}"\n{fake_binary}')
+        environment = {**os.environ, "SHARD_CHECK_WORK": str(Path(root) / "work")}
+        if fake_xcodebuild is None:
+            environment["SHARD_CHECK_SKIP_BUILD"] = "1"
+        else:
+            tools = Path(root) / "bin"
+            write_tool(tools / "xcodebuild", fake_xcodebuild)
+            environment["PATH"] = f"{tools}{os.pathsep}{environment['PATH']}"
         result = subprocess.run(
             ["/bin/bash", str(script), "--tiny"],
             env=environment,
@@ -301,7 +329,13 @@ def tiny_run_outcome(fake_binary: str) -> tuple[int, str]:
             check=False,
         )
         stderr_lines = result.stderr.splitlines() or [""]
-        return result.returncode, stderr_lines[-1]
+        return TinyRun(result.returncode, stderr_lines[-1], marker.exists())
+
+
+def tiny_run_outcome(fake_binary: str) -> tuple[int, str]:
+    """The exit status and the last stderr line of a skipped-build `--tiny` run."""
+    run = tiny_run(fake_binary)
+    return run.status, run.last_error_line
 
 
 class TinyFamilyListTests(unittest.TestCase):
@@ -319,6 +353,31 @@ class TinyFamilyListTests(unittest.TestCase):
         self.assertEqual(
             tiny_run_outcome("exit 0"), (1, "ShardCheck tiny-families listed no family to check")
         )
+
+
+class BuildErrorTests(unittest.TestCase):
+    """A ShardCheck build that logs `error:` but exits 0 stops the script (^8pkmyp2).
+
+    xcodebuild logged a failed MLXVLM compile, exited 0 and kept the old objects, so the
+    script ran a stale binary and a source mutation looked uncaught.
+    """
+
+    def test_logged_build_error_fails_the_run(self) -> None:
+        """The exit status of xcodebuild is not enough: an `error:` line fails the run."""
+        run = tiny_run("exit 1", _SPURIOUS_FAILURE_BUILD)
+        self.assertEqual((run.status, run.last_error_line), (1, _BUILD_ERROR_MESSAGE))
+
+    def test_logged_build_error_runs_no_check(self) -> None:
+        """A possibly stale ShardCheck must not run at all, not even to list the families."""
+        self.assertFalse(tiny_run("exit 1", _SPURIOUS_FAILURE_BUILD).shard_check_ran)
+
+    def test_failing_build_runs_no_check(self) -> None:
+        """The log goes through `tee`, whose status must not hide a failed xcodebuild."""
+        self.assertFalse(tiny_run("exit 1", "exit 65").shard_check_ran)
+
+    def test_clean_build_runs_the_checks(self) -> None:
+        """A build that logs no `error:` line goes on to ShardCheck, as before."""
+        self.assertTrue(tiny_run("exit 1", "echo 'warning: a warning is no error'").shard_check_ran)
 
 
 if __name__ == "__main__":

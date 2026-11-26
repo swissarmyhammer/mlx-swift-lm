@@ -26,6 +26,10 @@
 # (--no-load-peak-gate of shard_check_compare.py). The script prints one PASS or FAIL line per
 # family and check, and fails when any check fails, or when ShardCheck lists no family to check.
 #
+# The script builds ShardCheck first, keeps the build output in build.log of the output
+# directory, and fails before any check when that output holds an `error:` line, even when
+# xcodebuild exits 0.
+#
 # Usage: scripts/shard-check.sh [--free-running | --announce] <model-directory>
 #        scripts/shard-check.sh --tiny [<family>...]
 # Env: SHARD_CHECK_WORK (output directory), SHARD_CHECK_PORT (first ring port),
@@ -68,13 +72,34 @@ PORTS_PER_CHECK=2
 # The checks of each family in the tiny mode.
 TINY_MODES=(teacher-forced announce)
 
+# The output of the ShardCheck build, kept for the failure report.
+BUILD_LOG="$WORK/build.log"
+# A diagnostic line of an error, from xcodebuild or from a compiler it ran.
+BUILD_ERROR_PATTERN='(^|[[:space:]])error:'
+
 mkdir -p "$WORK"
 
-# xcodebuild puts mlx-swift_Cmlx.bundle, which holds the metallib, beside the binary.
-if [[ "${SHARD_CHECK_SKIP_BUILD:-0}" != "1" ]]; then
+# Builds ShardCheck, shows the output, and keeps it in BUILD_LOG. Exits with status 1 when the
+# output holds an `error:` line, even when xcodebuild exits 0: xcodebuild has logged `error:
+# the following command failed with exit code 0 but produced no further output` for an MLXVLM
+# compile, exited 0 and kept the old objects, so the checks ran a stale binary (^8pkmyp2).
+build_shard_check() {
+    # xcodebuild puts mlx-swift_Cmlx.bundle, which holds the metallib, beside the binary.
+    # -quiet still prints each warning and error; `pipefail` keeps the status of xcodebuild.
     xcodebuild build -scheme ShardCheck -configuration Release \
         -destination 'platform=macOS' -skipPackagePluginValidation \
-        -derivedDataPath "$DERIVED" -quiet
+        -derivedDataPath "$DERIVED" -quiet 2>&1 | tee "$BUILD_LOG"
+    local errors
+    if errors="$(grep -E "$BUILD_ERROR_PATTERN" "$BUILD_LOG")"; then
+        echo "the ShardCheck build exited 0 but logged (full log: $BUILD_LOG):" >&2
+        echo "$errors" >&2
+        echo "the ShardCheck build logged an error: line, so no check ran" >&2
+        exit 1
+    fi
+}
+
+if [[ "${SHARD_CHECK_SKIP_BUILD:-0}" != "1" ]]; then
+    build_shard_check
 fi
 
 # Runs one check, and returns its status.

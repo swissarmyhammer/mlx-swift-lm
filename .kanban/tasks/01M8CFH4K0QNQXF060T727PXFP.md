@@ -56,8 +56,24 @@ comments:
     - evidence: 2 files — scripts/shard-check.sh, scripts/test_shard_check_compare.py. Fake ShardCheck `exit 1` -> --tiny status 1 "could not list the tiny families (ShardCheck tiny-families)"; fake `exit 0` (empty list) -> status 1 "ShardCheck tiny-families listed no family to check". Real `scripts/shard-check.sh --tiny` (with build): status 0, 18/18 PASS (9 families x teacher-forced/announce), build log has no `error:` line (^8pkmyp2). python3 -I scripts/test_shard_check_compare.py: 27 tests OK. No Swift change. Finding flipped to [x].
     - next: review
   timestamp: 2026-11-26T20:14:43.281167+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m8cr118eb61b6j27zyttdyq1
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (53f6644b) — 0 findings (9 validator pairs attempted, 0 failed); 2 files reviewed; the .kanban task files matched no validator. The prior 14:07 finding is checked.
+    - next: none — task moved to done
+  timestamp: 2026-11-26T20:16:22.798666+00:00
+- actor: claude-code
+  id: 01m8cr1bnfay88zbp5xtzx0sdb
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — scripts/shard-check.sh, scripts/test_shard_check_compare.py
+    - test: green — python 27 OK, bash -n ok, --tiny 18/18 PASS, no build error: lines
+    - commit: 53f6644b
+    - review: clean — 0 findings; task done
+  timestamp: 2026-11-26T20:16:33.455613+00:00
+position_column: done
+position_ordinal: ffffff8180
 title: 'ShardCheck: write tiny random checkpoints so shard-check runs with no real checkpoint'
 ---
 Found in ^ze3xffb. `scripts/shard-check.sh` (2 ring processes on localhost vs the unsharded logits) is the only sharded-vs-local logits check that runs the production `shard` path end to end, but it needs a model directory. For ^ze3xffb a throwaway test wrote tiny random `qwen3_5_moe` (4-bit affine, 8 experts) and `prism_hadamard_qwen35` (4-bit rotated, blocks 32/64/128) checkpoints (config.json + model.safetensors, ~2-5 MB) and both passed shard-check (teacher-forced and --announce); a per-shard signs mutation and an MoE missing-all-sum mutation each failed 9/9 steps. The writer is not committed.
