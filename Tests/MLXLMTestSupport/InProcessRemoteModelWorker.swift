@@ -13,6 +13,28 @@ public struct InProcessWorkerFault: Error, Equatable, CustomStringConvertible {
     public var description: String { "the in-process worker is down" }
 }
 
+/// A failure an ``InProcessRemoteModelWorker`` throws that conforms to ``ClusterMemberLoss``, as
+/// a cluster package throws its own errors: one that lost members of the cluster, or one that
+/// lost no member.
+public struct InProcessMemberLoss: ClusterMemberLoss, Equatable, CustomStringConvertible {
+
+    /// The members that are gone, in words, or nil when the failure lost no member.
+    public let lostMember: String?
+
+    /// Makes the failure that lost `lostMember`.
+    ///
+    /// - Parameter lostMember: The members that are gone, in words, or nil for a failure that
+    ///   lost no member.
+    public init(lostMember: String?) {
+        self.lostMember = lostMember
+    }
+
+    /// The failure in words.
+    public var description: String {
+        lostMember.map { "the cluster lost \($0)" } ?? "the cluster failed and lost no member"
+    }
+}
+
 // The directive sits above the documentation, which must stay next to the declaration.
 // swiftlint:disable no_unchecked_sendable every access to a stored var holds `lock`
 /// A worker that runs a real local model in this process, behind the ``RemoteModelTransport``
@@ -39,6 +61,9 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
 
     /// The requests the worker still runs before each op fails, or nil for no limit.
     private var remainingSuccesses: Int?
+
+    /// The error each op throws after ``remainingSuccesses`` runs out.
+    private var fault: any Error = InProcessWorkerFault()
 
     /// The number of times the transport was closed.
     private var closes = 0
@@ -80,25 +105,30 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         lock.withLock { closes += 1 }
     }
 
-    /// Makes every op after the next `count` throw ``InProcessWorkerFault``.
+    /// Makes every op after the next `count` throw `fault`.
     ///
-    /// - Parameter count: The ops that still succeed.
-    public func failOps(after count: Int) {
-        lock.withLock { remainingSuccesses = count }
+    /// - Parameters:
+    ///   - count: The ops that still succeed.
+    ///   - fault: The error each later op throws.
+    public func failOps(after count: Int, with fault: any Error = InProcessWorkerFault()) {
+        lock.withLock {
+            remainingSuccesses = count
+            self.fault = fault
+        }
     }
 
     /// Runs `request` on the executor.
     ///
     /// - Parameter request: The request.
     /// - Returns: The reply.
-    /// - Throws: ``InProcessWorkerFault`` after ``failOps(after:)``, or the error of the
+    /// - Throws: The fault of ``failOps(after:with:)`` after its ops, or the error of the
     ///   announce words.
     public func send(_ request: RemoteModelRequest) throws -> RemoteModelReply {
         try lock.withLock {
             let announced = try RemoteOpAnnouncement.decode(RemoteOpAnnouncement.encode(request))
             received.append(announced)
             if let remaining = remainingSuccesses {
-                guard remaining > 0 else { throw InProcessWorkerFault() }
+                guard remaining > 0 else { throw fault }
                 remainingSuccesses = remaining - 1
             }
             return reported(try executor.handle(announced))

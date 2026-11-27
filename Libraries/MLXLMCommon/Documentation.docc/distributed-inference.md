@@ -124,6 +124,17 @@ A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cach
 not throw. The model then cancels the task that runs it, which ends the generation, and keeps
 the failure: every later op fails, and the next throwing op reports it.
 
+A transport that loses members of the cluster, for example a Mac that shut down, throws an
+error that conforms to ``ClusterMemberLoss`` and whose ``ClusterMemberLoss/lostMember`` is not
+nil. The model then fails with ``ClusterModelError/memberLost(_:)`` and not with
+``ClusterModelError/transportFailed(_:)``. A host can tell the two apart: it drops the model and
+loads a local one. The words of the member loss are for a log or a message, and a host does not
+parse them for a single host: when the cluster cannot tell which member is gone, for example
+after a hang, they list the `.local` name of every member, separated by commas. An error that
+conforms to ``ClusterMemberLoss`` but whose ``ClusterMemberLoss/lostMember`` is nil lost no
+member, and the model fails with ``ClusterModelError/transportFailed(_:)``, as for any other
+error of the transport.
+
 ### The cache
 
 ``ClusterLanguageModel/newCache(parameters:)`` makes one ``RemoteKVCache``, which names the
@@ -235,6 +246,7 @@ runner. Run it on a Mac before a change to sharding or to a shardable family lan
 - ``RemoteModelTransport``
 - ``RemoteKVCache``
 - ``ClusterModelError``
+- ``ClusterMemberLoss``
 - ``ClusterModelFeature``
 
 ### The protocol

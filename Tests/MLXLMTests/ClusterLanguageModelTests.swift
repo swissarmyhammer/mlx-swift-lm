@@ -457,6 +457,58 @@ struct ClusterLanguageModelTests {
         }
     }
 
+    @Test("a lost member fails the op with memberLost")
+    func aLostMemberFailsTheOpWithMemberLost() throws {
+        let fixture = try Qwen35MTPFixture()
+        let worker = fixture.makeWorker()
+        let model = try ClusterLanguageModel.connect(over: worker)
+        worker.failOps(after: 0, with: InProcessMemberLoss(lostMember: Self.lostMember))
+
+        #expect(throws: ClusterModelError.memberLost(Self.lostMember)) {
+            try model.newCache(parameters: nil)
+        }
+    }
+
+    @Test("a lost member fails every later op of the model with memberLost")
+    func aLostMemberFailsEveryLaterOpOfTheModelWithMemberLost() throws {
+        let fixture = try Qwen35MTPFixture()
+        let worker = fixture.makeWorker()
+        let model = try ClusterLanguageModel.connect(over: worker)
+        let cache = try model.newCache(parameters: nil)
+        worker.failOps(after: 0, with: InProcessMemberLoss(lostMember: Self.lostMember))
+        _ = cache[0].trim(1)
+        // The member comes back, yet the state of the workers is lost: the model sends nothing.
+        worker.failOps(after: .max)
+
+        #expect(throws: ClusterModelError.memberLost(Self.lostMember)) {
+            try model.newCache(parameters: nil)
+        }
+    }
+
+    @Test("a member-loss error that names no member fails the op with transportFailed")
+    func aMemberLossErrorThatNamesNoMemberFailsTheOpWithTransportFailed() throws {
+        let fixture = try Qwen35MTPFixture()
+        let worker = fixture.makeWorker()
+        let model = try ClusterLanguageModel.connect(over: worker)
+        let fault = InProcessMemberLoss(lostMember: nil)
+        worker.failOps(after: 0, with: fault)
+
+        #expect(throws: ClusterModelError.transportFailed(String(describing: fault))) {
+            try model.newCache(parameters: nil)
+        }
+    }
+
+    @Test("the description of a lost member names the member")
+    func theDescriptionOfALostMemberNamesTheMember() {
+        let description = ClusterModelError.memberLost(Self.lostMember).errorDescription ?? ""
+
+        #expect(description.contains(Self.lostMember))
+    }
+
+    /// The members a ``InProcessMemberLoss`` loses, in the comma-separated words a cluster
+    /// package gives when it cannot tell which one of them is gone.
+    private static let lostMember = "mac-studio-1.local, mac-studio-2.local"
+
     // MARK: - Teardown
 
     @Test("closing a cluster model closes its transport one time")

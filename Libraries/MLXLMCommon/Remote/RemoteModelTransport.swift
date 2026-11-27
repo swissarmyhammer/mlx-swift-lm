@@ -47,6 +47,25 @@ public enum ClusterModelFeature: String, Sendable, Hashable {
     case batchedInput
 }
 
+/// An error of a ``RemoteModelTransport`` that can say that members of the cluster are gone, for
+/// example a Mac that shut down or dropped off the network.
+///
+/// A cluster package conforms the error type it throws, even when most of its errors lose no
+/// member. When ``lostMember`` is not nil, a ``ClusterLanguageModel`` fails with
+/// ``ClusterModelError/memberLost(_:)`` and not with ``ClusterModelError/transportFailed(_:)``.
+/// A host can then drop the model and load a local one. When ``lostMember`` is nil, the model
+/// fails with ``ClusterModelError/transportFailed(_:)``, as for any other error.
+public protocol ClusterMemberLoss: Error {
+
+    /// The members that are gone, in words for a log or a message, or nil when the error lost no
+    /// member.
+    ///
+    /// The words name one member or several, for example a comma-separated list of the `.local`
+    /// names of every member when the cluster cannot tell which one of them is gone. A host shows
+    /// or logs them, and does not parse them for a single host.
+    var lostMember: String? { get }
+}
+
 /// The errors of a ``ClusterLanguageModel``.
 public enum ClusterModelError: Error, Hashable, LocalizedError {
 
@@ -61,6 +80,11 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
 
     /// The transport failed. Every later op of the model fails with this error too.
     case transportFailed(String)
+
+    /// The transport lost members of the cluster, which the words of
+    /// ``ClusterMemberLoss/lostMember`` describe for a log or a message. Every later op of the
+    /// model fails with this error too, and the model must load again.
+    case memberLost(String)
 
     /// The worker answered an op with ``RemoteModelReply/failed(_:)``.
     case workerFailed(String)
@@ -87,6 +111,8 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
             "A cluster model does not run \(Self.describe(feature))."
         case .transportFailed(let reason):
             "The connection to the cluster worker failed: \(reason)"
+        case .memberLost(let member):
+            "The cluster lost \(member). Load the model again to use it."
         case .workerFailed(let reason):
             "The cluster worker failed: \(reason)"
         case .unexpectedReply(let op, let reply):
@@ -172,8 +198,9 @@ final class RemoteModelSession: @unchecked Sendable {
     /// - Parameter op: The op.
     /// - Returns: The reply of the worker, never ``RemoteModelReply/failed(_:)``.
     /// - Throws: The failure of an earlier op, or ``ClusterModelError/closed`` after
-    ///   ``close()``, without sending; ``ClusterModelError/transportFailed(_:)`` for a failure of
-    ///   the transport; ``ClusterModelError/workerFailed(_:)`` for a failed reply.
+    ///   ``close()``, without sending; ``ClusterModelError/memberLost(_:)`` when the transport
+    ///   lost members of the cluster; ``ClusterModelError/transportFailed(_:)`` for another
+    ///   failure of the transport; ``ClusterModelError/workerFailed(_:)`` for a failed reply.
     func perform(_ op: RemoteModelOp) throws -> RemoteModelReply {
         try lock.withLock { try send(op) }
     }
@@ -248,8 +275,12 @@ final class RemoteModelSession: @unchecked Sendable {
         return reply
     }
 
-    /// `error` as a ``ClusterModelError``: itself when it is one, else a transport failure.
+    /// `error` as a ``ClusterModelError``: itself when it is one, a lost member for a
+    /// ``ClusterMemberLoss`` whose ``ClusterMemberLoss/lostMember`` is not nil, else a transport
+    /// failure.
     private static func clusterError(_ error: any Error) -> ClusterModelError {
-        error as? ClusterModelError ?? .transportFailed(String(describing: error))
+        if let error = error as? ClusterModelError { return error }
+        if let member = (error as? any ClusterMemberLoss)?.lostMember { return .memberLost(member) }
+        return .transportFailed(String(describing: error))
     }
 }
