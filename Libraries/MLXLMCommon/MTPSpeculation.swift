@@ -74,7 +74,8 @@ package struct MTPSpeculation {
 
     /// The token iterator of one generation: an ``MTPSpeculativeTokenIterator`` when
     /// `speculation` names a drafter that can draft for `model` and whose rounds the cache can
-    /// stage, else a ``TokenIterator``.
+    /// stage, a ``ClusterMTPTokenIterator`` when it names the drafter rank 0 of a cluster model
+    /// holds, else a ``TokenIterator``.
     ///
     /// The MTP iterator decides before the prefill whether the stream speculates, thus an
     /// incompatible drafter or a cache that cannot stage a round leaves the cache untouched for
@@ -109,15 +110,12 @@ package struct MTPSpeculation {
                 input: input, model: diffusionModel, cache: cache, parameters: parameters,
                 components: components)
         }
-        if speculation != nil {
-            try ClusterModelError.refuseSpeculativeDecoding(on: model)
-        }
         var fallback = speculation.flatMap {
             MTPDrafterFallback.incompatibility(of: $0.drafter, with: model)
         }
         if let speculation, fallback == nil {
             do {
-                return try MTPSpeculativeTokenIterator(
+                return try makeMTPIterator(
                     input: input, mainModel: model, drafter: speculation.drafter,
                     mainCache: cache, mainState: state, mtpContinuation: mtpContinuation,
                     parameters: parameters, blockSize: speculation.blockSize,

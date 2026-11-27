@@ -171,24 +171,73 @@ struct ClusterExecutorTests {
         #expect(clustered.turn.usage == local.turn.usage)
     }
 
+    /// The turns of a clustered model whose rank 0 holds the drafter of the fixture, and of the
+    /// local model that decodes plainly.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func speculativeTurns(weights: URL) async throws -> (
+        clustered: [MTPTurn], local: [MTPTurn]
+    ) {
+        let fixture = try Qwen35MTPFixture()
+        let (clustered, _) = try fixture.makeClusteredLanguageModel(
+            weights: weights,
+            speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding(), drafting: true)
+        let prompts = [Self.prompt, Self.followUp].map(fixture.text(for:))
+        return (
+            try await Self.respond(clustered, to: prompts),
+            try await Self.respond(fixture.makeLanguageModel(weights: weights), to: prompts)
+        )
+    }
+
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
-    func aClusteredModelWithADrafterIsRefused() async throws {
+    func aClusteredModelWithADrafterWritesTheLocalText() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let turns = try await Self.speculativeTurns(weights: weights)
+
+        #expect(turns.clustered.map(\.responseText) == turns.local.map(\.responseText))
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aClusteredModelWithADrafterSpeculatesEachTurn() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let turns = try await Self.speculativeTurns(weights: weights)
+
+        #expect(turns.clustered.allSatisfy { $0.speculated })
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aClusteredModelWithADrafterReportsItsAcceptedDrafts() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let turns = try await Self.speculativeTurns(weights: weights)
+
+        #expect(
+            (turns.clustered[0].metadata[
+                SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount] as? Int ?? 0) > 0)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aClusteredModelWithoutADrafterReportsAnIncompatibleDrafter() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
         let fixture = try Qwen35MTPFixture()
         let (model, _) = try fixture.makeClusteredLanguageModel(
             weights: weights,
             speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding())
-        let request = makeExecutorRequest(
-            transcript: Self.transcript(prompt: Self.prompt, tokenizer: fixture.tokenizer),
-            generationOptions: Self.greedy)
 
-        let turn = try await MTPExecutorTurns.respond(to: request, model: model)
+        let turns = try await Self.respond(model, to: [fixture.text(for: Self.prompt)])
 
         #expect(
-            turn.failure
-                == String(describing: ClusterModelError.unsupported(.speculativeDecoding)))
+            turns[0].metadata[SpeculativeDecodingOutcome.MetadataKey.fallbackReason] as? String
+                == "incompatibleDrafter")
     }
 
     /// The forwards a worker runs before it loses a member: the prompt and a few decode steps,

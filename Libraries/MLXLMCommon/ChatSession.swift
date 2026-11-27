@@ -1859,11 +1859,6 @@ public final class ChatSession {
                             configuration: modelConfiguration,
                             primedInside: reasoningPrimedInside)
 
-                        // A model whose forward runs in a worker cannot verify drafts.
-                        if speculativeDecoding != nil {
-                            try ClusterModelError.refuseSpeculativeDecoding(on: model)
-                        }
-
                         // The memory policy's verdict on a deferred draft model, from its byte
                         // estimate before it loads. The error of a fail action is kept until
                         // the draft-model branch is taken.
@@ -1888,7 +1883,11 @@ public final class ChatSession {
                         // admits its byte estimate; a fail action throws here, before the load.
                         let usesMTP = speculativeDecoding?.mtpDrafterSource != nil
                         let mtpDrafter: (any MTPDrafterModel)?
-                        if let source = speculativeDecoding?.mtpDrafterSource,
+                        if let cluster = model as? ClusterLanguageModel {
+                            // A cluster model drafts with the drafter its rank 0 holds, and the
+                            // session loads none.
+                            mtpDrafter = usesMTP ? cluster.mtpDrafter : nil
+                        } else if let source = speculativeDecoding?.mtpDrafterSource,
                             try draftAdmissionBeforeLoading?.get() != false
                         {
                             mtpDrafter = try await Self.mtpDrafterModel(
@@ -2430,25 +2429,45 @@ public final class ChatSession {
                                 speculativeDecoding.strategy,
                             let drafter = mtpDrafter
                         {
-                            do {
-                                let iterator = try MTPSpeculativeTokenIterator(
-                                    input: input,
-                                    mainModel: model,
-                                    drafter: drafter,
-                                    mainCacheStorage: kvCache,
-                                    mainState: lmState,
-                                    mtpContinuation: mtpDrafterContinuation,
-                                    parameters: generateParameters,
-                                    blockSize: blockSize,
-                                    minimumDraftProbability: minimumDraftProbability,
-                                    components: components
-                                )
-                                generation = finishPrompt(
-                                    iterator, drafterContinuation: \.promptBoundaryContinuation)
-                            } catch MTPInitializationError.unsupportedSpeculativeCache {
-                                mtpDrafterContinuation = nil
-                                speculativeDecodingFallbackReason = .unsupportedCache
-                                generation = try defaultGeneration()
+                            if let remoteDrafter = drafter as? RemoteMTPDrafter,
+                                let cluster = model as? ClusterLanguageModel
+                            {
+                                // Each token of a stream that asks for log probabilities reports
+                                // them from plain decode, as the MTP iterator stands down for it.
+                                if generateParameters.logProbabilities != nil {
+                                    speculativeDecodingFallbackReason = .unsupportedSampling
+                                    generation = try defaultGeneration()
+                                } else {
+                                    generation = finishPrompt(
+                                        try ClusterMTPTokenIterator(
+                                            input: input, model: cluster, drafter: remoteDrafter,
+                                            cacheStorage: kvCache, parameters: generateParameters,
+                                            blockSize: blockSize,
+                                            minimumDraftProbability: minimumDraftProbability,
+                                            components: components),
+                                        drafterContinuation: { _ in nil })
+                                }
+                            } else {
+                                do {
+                                    let iterator = try MTPSpeculativeTokenIterator(
+                                        input: input,
+                                        mainModel: model,
+                                        drafter: drafter,
+                                        mainCacheStorage: kvCache,
+                                        mainState: lmState,
+                                        mtpContinuation: mtpDrafterContinuation,
+                                        parameters: generateParameters,
+                                        blockSize: blockSize,
+                                        minimumDraftProbability: minimumDraftProbability,
+                                        components: components
+                                    )
+                                    generation = finishPrompt(
+                                        iterator, drafterContinuation: \.promptBoundaryContinuation)
+                                } catch MTPInitializationError.unsupportedSpeculativeCache {
+                                    mtpDrafterContinuation = nil
+                                    speculativeDecodingFallbackReason = .unsupportedCache
+                                    generation = try defaultGeneration()
+                                }
                             }
                         } else if let speculativeDecoding {
                             let shouldFallBackBeforeLoadingDraft =
@@ -3086,7 +3105,7 @@ extension ChatSession {
     /// - Parameters:
     ///   - drafter: the MTP drafter of the session, or nil when the memory policy
     ///     did not admit the byte estimate of a deferred drafter, which thus never
-    ///     loaded.
+    ///     loaded, or when rank 0 of a cluster model holds no drafter.
     ///   - drafterIsCompatible: whether `drafter` can draft for `model`.
     ///   - model: the model the drafter speculates for.
     ///   - parameters: the generation parameters of the turn.
@@ -3101,7 +3120,10 @@ extension ChatSession {
         parameters: GenerateParameters, memoryPolicy: SpeculativeDecodingMemoryPolicy?,
         continuation: MTPDrafterContinuation?
     ) throws -> SpeculativeDecodingFallbackReason? {
-        guard let drafter else { return .memoryBudgetExceeded }
+        guard let drafter else {
+            // A cluster model without a drafter on its rank 0 loads none to weigh.
+            return model is ClusterLanguageModel ? .incompatibleDrafter : .memoryBudgetExceeded
+        }
         guard drafterIsCompatible else { return .incompatibleDrafter }
         guard !drafter.requiresGreedySampling || parameters.temperature == 0 else {
             return .unsupportedSampling
@@ -3148,6 +3170,7 @@ private protocol PromptPrefillTimedIterator: TokenIteratorProtocol {
 
 extension TokenIterator: PromptPrefillTimedIterator {}
 extension MTPSpeculativeTokenIterator: PromptPrefillTimedIterator {}
+extension ClusterMTPTokenIterator: PromptPrefillTimedIterator {}
 
 /// Errors thrown by ``ChatSession``.
 public enum ChatSessionError: LocalizedError {

@@ -149,6 +149,22 @@ public final class RemoteKVCache: KVCache {
         return rows.count == 1 ? rows[0] : concatenated(rows, axis: 1)
     }
 
+    /// Runs `round` on the worker: see ``RemoteModelOp/speculate(_:)``.
+    ///
+    /// - Parameter round: The round, of this cache.
+    /// - Returns: The drafts of rank 0, and the logits of each verified position, shape
+    ///   `[1, drafts + 1, vocabulary]`.
+    /// - Throws: The ``ClusterModelError`` of the op, or the error of the logits.
+    func speculate(_ round: RemoteDraftRound) throws -> (drafts: [Int32], logits: MLXArray) {
+        let reply = try session.perform(.speculate(round))
+        guard case .drafted(let status, let drafts, let logits) = reply else {
+            throw ClusterModelError.unexpectedReply(
+                op: "speculate", reply: String(describing: reply))
+        }
+        self.status = status
+        return (drafts, try logits.array())
+    }
+
     // MARK: - What a layer would read
 
     /// Never called: the worker runs the attention.

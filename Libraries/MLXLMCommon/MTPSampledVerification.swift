@@ -54,6 +54,31 @@ enum BatchedMTPVerification {
         matching(targetTokens: sampler.sample(logits: logits), draftTokens: draftTokens)
     }
 
+    /// Verifies `draftTokens` row by row: draws the target token of each verify row in turn,
+    /// and stops at the first that differs from its draft, so a processor that learns of each
+    /// drawn token learns of the emitted tokens alone.
+    ///
+    /// - Parameters:
+    ///   - draftTokens: The drafts.
+    ///   - draw: Draws the target token of the verify row it is given, shape `[1]`.
+    /// - Returns: The accepted drafts, and the emitted tokens: the target token of each
+    ///   accepted draft, then the final token of the round.
+    static func walk(draftTokens: [Int], draw: (Int) -> MLXArray) -> (
+        accepted: Int, emitted: [MLXArray]
+    ) {
+        var emitted: [MLXArray] = []
+        emitted.reserveCapacity(draftTokens.count + 1)
+        for (row, draft) in draftTokens.enumerated() {
+            let token = draw(row)
+            eval(token)
+            emitted.append(token)
+            guard token.item(Int.self) == draft else { return (row, emitted) }
+        }
+        // Every draft matched: the final verify row predicts one extra target-only token.
+        emitted.append(draw(draftTokens.count))
+        return (draftTokens.count, emitted)
+    }
+
     /// Accepts the longest prefix of `draftTokens` that `targetTokens` matches.
     ///
     /// - Parameters:

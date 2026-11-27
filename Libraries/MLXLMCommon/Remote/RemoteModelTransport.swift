@@ -37,9 +37,6 @@ public enum ClusterModelFeature: String, Sendable, Hashable {
     /// Image, video or audio input: the workers would need the embeddings.
     case mediaInput
 
-    /// MTP or draft-model speculative decoding: a verify needs the target's hidden states.
-    case speculativeDecoding
-
     /// A KV-cache configuration or `maxKVSize`: the worker makes its caches itself.
     case cacheConfiguration
 
@@ -128,21 +125,10 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
     private static func describe(_ feature: ClusterModelFeature) -> String {
         switch feature {
         case .mediaInput: "image, video or audio input"
-        case .speculativeDecoding: "speculative decoding"
         case .cacheConfiguration:
             "a KV-cache configuration or maxKVSize; the worker sets its caches"
         case .batchedInput: "a batch of more than one sequence"
         }
-    }
-
-    /// Throws ``unsupported(_:)`` of ``ClusterModelFeature/speculativeDecoding`` when `model`
-    /// runs its forward pass in a worker.
-    ///
-    /// - Parameter model: The target model of a speculative generation.
-    /// - Throws: ``unsupported(_:)`` for a ``ClusterLanguageModel``.
-    package static func refuseSpeculativeDecoding(on model: any LanguageModel) throws {
-        guard model.capabilities.contains(.remoteForward) else { return }
-        throw ClusterModelError.unsupported(.speculativeDecoding)
     }
 }
 

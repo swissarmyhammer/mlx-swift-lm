@@ -23,6 +23,7 @@ import Foundation
 /// | ``RemoteModelOp/copy(_:into:)`` | ``RemoteModelReply/cache(_:)`` | Copies a cache under a second handle the app chose. |
 /// | ``RemoteModelOp/reset(_:)`` | ``RemoteModelReply/cache(_:)`` | Empties a cache and keeps its handle. |
 /// | ``RemoteModelOp/release(_:)`` | ``RemoteModelReply/done`` | Frees a cache and forgets its handle. |
+/// | ``RemoteModelOp/speculate(_:)`` | ``RemoteModelReply/drafted(_:drafts:logits:)`` | Rewinds the drafts the last round rejected, drafts on rank 0, and verifies the round's token and drafts. |
 ///
 /// Any op can get ``RemoteModelReply/failed(_:)`` instead.
 ///
@@ -43,6 +44,24 @@ import Foundation
 /// read of ``KVCache/offset`` or ``KVCache/maxTrimCount`` costs no round trip. A worker builds
 /// it with ``RemoteCacheStatus/init(describing:)``.
 ///
+/// ## Speculative rounds
+///
+/// Rank 0 can hold the MTP drafter of the model (``RemoteModelCapabilities/drafter``). Each
+/// rank keeps the drafter state beside each cache, fed by every forward, on rank 0 alone. One
+/// ``RemoteModelOp/speculate(_:)`` is one round, in one round trip:
+///
+/// 1. Every rank rewinds the drafts the target rejected in the round before
+///    (``RemoteDraftRound/rejectedCount``).
+/// 2. Rank 0 drafts up to ``RemoteDraftRound/draftLimit`` tokens after
+///    ``RemoteDraftRound/token``, and hands them to every rank with one more all-sum (see
+///    ``RemoteDraftExchange``).
+/// 3. Every rank verifies the token and the drafts with one forward, and keeps them in its
+///    cache.
+///
+/// The app accepts drafts from the logits of every verified position, and names the rejects in
+/// the next round, or trims them with ``RemoteModelOp/trim(_:count:)`` when the generation
+/// ends. A round of no drafts is one decode step.
+///
 /// ## Between turns
 ///
 /// ``ClusterLanguageModel`` sends ``RemoteModelOp/end`` only when the next
@@ -57,8 +76,9 @@ public enum RemoteModelProtocol {
     ///
     /// Version 2 adds the `model_type` and the quantization of the loaded model to
     /// ``RemoteModelCapabilities``. Version 3 adds
-    /// ``RemoteModelCapabilities/preparesEveryPrompt``.
-    public static let version: Int32 = 3
+    /// ``RemoteModelCapabilities/preparesEveryPrompt``. Version 4 adds the drafter of rank 0
+    /// (``RemoteModelCapabilities/drafter``) and ``RemoteModelOp/speculate(_:)``.
+    public static let version: Int32 = 4
 
     /// The most tokens one forward carries. A prefill longer than this goes in several forwards.
     public static let maximumChunkTokenCount = 1024
@@ -143,6 +163,96 @@ public enum RemoteModelOp: Codable, Sendable, Hashable {
 
     /// Frees the cache, and forgets its handle.
     case release(RemoteCacheID)
+
+    /// Runs one speculative round on the cache: see ``RemoteDraftRound``.
+    case speculate(RemoteDraftRound)
+}
+
+/// One speculative round of ``RemoteModelOp/speculate(_:)``.
+public struct RemoteDraftRound: Codable, Sendable, Hashable {
+
+    /// The cache of the round.
+    public let cache: RemoteCacheID
+
+    /// The token the round starts from: the token the app sampled last, which no forward fed.
+    public let token: Int32
+
+    /// The drafts of the round before that the target rejected, which every rank rewinds
+    /// before this round drafts.
+    public let rejectedCount: Int
+
+    /// The most drafts rank 0 proposes. Zero makes the round one decode step.
+    public let draftLimit: Int
+
+    /// The drafter top-1 probability below which a chaining drafter stops the round's chain.
+    public let minimumDraftProbability: Float
+
+    /// Makes a round.
+    ///
+    /// - Parameters:
+    ///   - cache: The cache of the round.
+    ///   - token: The token the round starts from.
+    ///   - rejectedCount: The drafts of the round before that the target rejected.
+    ///   - draftLimit: The most drafts rank 0 proposes.
+    ///   - minimumDraftProbability: The confidence floor of a chaining drafter.
+    public init(
+        cache: RemoteCacheID, token: Int32, rejectedCount: Int, draftLimit: Int,
+        minimumDraftProbability: Float
+    ) {
+        self.cache = cache
+        self.token = token
+        self.rejectedCount = rejectedCount
+        self.draftLimit = draftLimit
+        self.minimumDraftProbability = minimumDraftProbability
+    }
+
+    /// The tokens the verify of a round of `drafts` drafts feeds: the token and the drafts.
+    ///
+    /// - Parameter drafts: The drafts of the round.
+    /// - Returns: The verified tokens.
+    func verifiedTokens(drafts: [Int32]) -> [Int32] {
+        [token] + drafts
+    }
+
+    /// Whether the verify of the most drafts fits in one forward of
+    /// ``RemoteModelProtocol/maximumChunkTokenCount`` tokens.
+    var verifyFitsAChunk: Bool {
+        (0 ..< RemoteModelProtocol.maximumChunkTokenCount).contains(draftLimit)
+    }
+}
+
+/// The MTP drafter rank 0 of a worker holds, as ``RemoteModelCapabilities/drafter`` names it.
+public struct RemoteDrafterCapabilities: Codable, Sendable, Hashable {
+
+    /// The identity of the drafter: ``ResumableMTPDrafterModel/drafterID``.
+    public let drafterID: String
+
+    /// The largest verification block the drafter produces: ``MTPDrafterModel/maximumBlockSize``.
+    public let maximumBlockSize: Int?
+
+    /// The block the drafter decodes fastest with: ``MTPDrafterModel/preferredBlockSize``.
+    public let preferredBlockSize: Int?
+
+    /// Makes the capabilities of a drafter.
+    ///
+    /// - Parameters:
+    ///   - drafterID: The identity of the drafter.
+    ///   - maximumBlockSize: The largest verification block, or nil for none.
+    ///   - preferredBlockSize: The fastest block, or nil for none.
+    public init(drafterID: String, maximumBlockSize: Int?, preferredBlockSize: Int?) {
+        self.drafterID = drafterID
+        self.maximumBlockSize = maximumBlockSize
+        self.preferredBlockSize = preferredBlockSize
+    }
+
+    /// The capabilities of `drafter`.
+    ///
+    /// - Parameter drafter: The drafter rank 0 holds.
+    init(_ drafter: any ResumableMTPDrafterModel) {
+        self.init(
+            drafterID: drafter.drafterID.rawValue, maximumBlockSize: drafter.maximumBlockSize,
+            preferredBlockSize: drafter.preferredBlockSize)
+    }
 }
 
 /// One op with the identifiers that order it.
@@ -229,6 +339,9 @@ public struct RemoteModelCapabilities: Codable, Sendable, Hashable {
     /// The default quantization of the loaded model, or nil for a model with no quantization.
     public let quantization: BaseConfiguration.Quantization?
 
+    /// The MTP drafter rank 0 holds, or nil when it holds none and the model does not speculate.
+    public let drafter: RemoteDrafterCapabilities?
+
     /// Makes the capabilities of a worker.
     ///
     /// - Parameters:
@@ -242,11 +355,13 @@ public struct RemoteModelCapabilities: Codable, Sendable, Hashable {
     ///   - preparesEveryPrompt: Whether the model prefills every prompt but its last token.
     ///   - modelType: The `model_type` of the loaded model, or nil.
     ///   - quantization: The default quantization of the loaded model, or nil.
+    ///   - drafter: The MTP drafter rank 0 holds, or nil.
     public init(
         protocolVersion: Int32, modelFamilies: [String], supportsSharding: Bool, rankCount: Int,
         vocabularySize: Int, defaultPrefillStepSize: Int, maximumPrefillStepSize: Int?,
         preparesEveryPrompt: Bool,
-        modelType: String?, quantization: BaseConfiguration.Quantization?
+        modelType: String?, quantization: BaseConfiguration.Quantization?,
+        drafter: RemoteDrafterCapabilities? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.modelFamilies = modelFamilies
@@ -258,6 +373,7 @@ public struct RemoteModelCapabilities: Codable, Sendable, Hashable {
         self.preparesEveryPrompt = preparesEveryPrompt
         self.modelType = modelType
         self.quantization = quantization
+        self.drafter = drafter
     }
 }
 
@@ -278,6 +394,10 @@ public enum RemoteModelReply: Codable, Sendable, Hashable {
 
     /// The status of the cache after a forward, and the logits the forward asked for.
     case forwarded(RemoteCacheStatus, logits: RemoteLogits?)
+
+    /// The status of the cache after a speculative round, the drafts of rank 0, and the logits
+    /// of each verified position: shape `[1, drafts + 1, vocabulary]`.
+    case drafted(RemoteCacheStatus, drafts: [Int32], logits: RemoteLogits)
 
     /// The worker could not run the op. The text says why.
     case failed(String)

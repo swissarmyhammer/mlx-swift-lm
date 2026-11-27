@@ -367,10 +367,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
     ///   - minimumDraftProbability: The drafter top-1 probability below which a chaining
     ///     drafter stops a round's chain, from 0 (draft every step) to 1.
     ///   - components: Optional behavioral components, e.g. a custom ``LogitProcessor``.
-    /// - Throws: ``ClusterModelError/unsupported(_:)`` when `mainModel` runs its forward pass
-    ///   in a cluster worker, an ``MTPDrafterCompatibilityError`` when `drafter` cannot draft
-    ///   for `mainModel`, a ``SpeculativeDecodingConfigurationError`` for a floor outside 0 to
-    ///   1, or the error of the prefill.
+    /// - Throws: An ``MTPDrafterCompatibilityError`` when `mainModel` runs its forward pass in a
+    ///   cluster worker, whose rounds a ``ClusterMTPTokenIterator`` runs, or when `drafter`
+    ///   cannot draft for `mainModel`, a ``SpeculativeDecodingConfigurationError`` for a floor
+    ///   outside 0 to 1, or the error of the prefill.
     public init(
         input: LMInput,
         mainModel: any LanguageModel,
@@ -436,17 +436,22 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
     }
 
     /// Checks that `drafter` can draft for `mainModel`, and that `mainModel` runs its forward
-    /// pass in this process, which a verify needs.
+    /// pass in this process, which the drafter reads the hidden states of.
     ///
     /// - Parameters:
     ///   - drafter: The MTP drafter.
     ///   - mainModel: The target model.
-    /// - Throws: ``ClusterModelError/unsupported(_:)`` for a target whose forward runs in a
+    /// - Throws: An ``MTPDrafterCompatibilityError`` for a target whose forward runs in a
     ///   cluster worker, or the ``MTPDrafterCompatibilityError`` of the drafter.
     private static func validate(
         _ drafter: any MTPDrafterModel, for mainModel: any LanguageModel
     ) throws {
-        try ClusterModelError.refuseSpeculativeDecoding(on: mainModel)
+        guard !mainModel.capabilities.contains(.remoteForward) else {
+            throw MTPDrafterCompatibilityError.incompatibleTarget(
+                drafter: String(describing: type(of: drafter)),
+                expected: "a target whose forward pass runs in this process",
+                actual: String(describing: type(of: mainModel)))
+        }
         try drafter.validateCompatibility(with: mainModel)
     }
 
@@ -1413,23 +1418,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProcessing {
         // block up front and discarding the tail would make a reference-type
         // processor record proposals that never reached the consumer.
         eval(draftTokens)
-        let draftTokenList = draftTokens.asArray(Int.self)
-        var emitted: [MLXArray] = []
-        emitted.reserveCapacity(draftCount + 1)
-
-        for i in 0 ..< draftCount {
-            let token = sampleToken(from: targetLogits, at: targetStart + i)
-            eval(token)
-            emitted.append(token)
-            guard token.item(Int.self) == draftTokenList[i] else {
-                return (i, emitted)
-            }
+        return BatchedMTPVerification.walk(
+            draftTokens: Array(draftTokens.asArray(Int.self).prefix(draftCount))
+        ) { row in
+            sampleToken(from: targetLogits, at: targetStart + row)
         }
-
-        // Every draft matched: the final verifier position predicts one extra
-        // target-only bonus token.
-        emitted.append(sampleToken(from: targetLogits, at: targetStart + draftCount))
-        return (draftCount, emitted)
     }
 
     /// Distribution-preserving speculative sampling (Leviathan et al.).

@@ -16,6 +16,11 @@ public enum Inkling2TinyModels {
     /// The seed of the drafter's random weights.
     private static let drafterSeed: UInt64 = 11
 
+    /// The seed of the initial weights the layers of a model draw before the random weights
+    /// replace them. A task-local state of its own keeps those draws off the global random
+    /// stream, whose lazy key every later draw of any test would otherwise extend.
+    private static let initializerSeed: UInt64 = 13
+
     /// The scale of the random normal weights.
     private static let weightScale: Float = 0.3
 
@@ -118,7 +123,9 @@ public enum Inkling2TinyModels {
     public static func target(json: String, bfloat16: Bool = false) throws -> Inkling2 {
         let config = try JSONDecoder().decode(
             Inkling2Configuration.self, from: Data(json.utf8))
-        let model = Inkling2(config)
+        let model = withRandomState(MLXRandom.RandomState(seed: initializerSeed)) {
+            Inkling2(config)
+        }
         // Task-local rather than MLXRandom.seed: parallel tests must not share (or perturb) the
         // global random stream, or the weights differ from run to run.
         try withRandomState(MLXRandom.RandomState(seed: targetSeed)) {
@@ -178,8 +185,11 @@ public enum Inkling2TinyModels {
     /// - Returns: the drafter.
     /// - Throws: when `json` does not decode, or the weights do not fit the drafter.
     public static func drafter(json: String) throws -> Inkling2DraftModel {
-        let drafter = Inkling2DraftModel(
-            try JSONDecoder().decode(Inkling2DraftConfiguration.self, from: Data(json.utf8)))
+        let configuration = try JSONDecoder().decode(
+            Inkling2DraftConfiguration.self, from: Data(json.utf8))
+        let drafter = withRandomState(MLXRandom.RandomState(seed: initializerSeed)) {
+            Inkling2DraftModel(configuration)
+        }
         // Task-local rather than MLXRandom.seed: parallel tests must not share (or perturb) the
         // global random stream.
         let parameters = withRandomState(MLXRandom.RandomState(seed: drafterSeed)) {

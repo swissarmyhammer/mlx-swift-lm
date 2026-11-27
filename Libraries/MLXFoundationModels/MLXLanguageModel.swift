@@ -189,16 +189,23 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// `SpeculativeDecodingFallbackReason.memoryBudgetExceeded`; a drafter the estimate does
     /// not admit never loads.
     ///
+    /// A target whose forward runs in a cluster worker drafts with the drafter its rank 0
+    /// holds, and loads none here; one whose rank 0 holds none gives `nil`, and the call
+    /// reports `SpeculativeDecodingFallbackReason.incompatibleDrafter`.
+    ///
     /// - Parameter container: the loaded target, from ``loadContainer()``.
     /// - Returns: the speculation, or `nil`.
-    /// - Throws: the error of the drafter load, `SpeculativeDecodingMemoryError` when the
-    ///   memory policy does not admit the drafter and its action is `.fail`, and
-    ///   `ClusterModelError.unsupported(.speculativeDecoding)` for a target whose forward runs in
-    ///   a cluster worker.
+    /// - Throws: the error of the drafter load, and `SpeculativeDecodingMemoryError` when the
+    ///   memory policy does not admit the drafter and its action is `.fail`.
     func loadMTPSpeculation(for container: ModelContainer) async throws -> MTPSpeculation? {
         guard let speculativeDecoding else { return nil }
+        let clusterDrafter = await container.perform { context in
+            SendableBox((context.model as? ClusterLanguageModel).map { $0.mtpDrafter })
+        }.consume()
+        if let clusterDrafter {
+            return Self.clusterSpeculation(of: clusterDrafter, speculativeDecoding)
+        }
         let (loadDrafter, admitsDrafter) = try await container.perform { context in
-            try ClusterModelError.refuseSpeculativeDecoding(on: context.model)
             return (
                 speculativeDecoding.drafterLoader(for: context.model),
                 try speculativeDecoding.admitsDrafterBeforeLoading(beside: context.model)
@@ -216,6 +223,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             try speculativeDecoding.admitsLoadedDrafter(speculation.drafter, beside: context.model)
         }
         return admitsLoadedDrafter ? speculation : Self.memoryBudgetFallback()
+    }
+
+    /// The speculation of a cluster model with the drafter `drafter` of its rank 0, in the
+    /// rounds of `speculativeDecoding`: none when rank 0 holds no drafter, which the call reports
+    /// as `SpeculativeDecodingFallbackReason.incompatibleDrafter`.
+    ///
+    /// - Parameters:
+    ///   - drafter: The drafter of rank 0, or nil.
+    ///   - speculativeDecoding: The speculative decoding of the model.
+    /// - Returns: The speculation, or `nil`.
+    private static func clusterSpeculation(
+        of drafter: RemoteMTPDrafter?, _ speculativeDecoding: MLXSpeculativeDecoding
+    ) -> MTPSpeculation? {
+        guard let drafter else {
+            SpeculativeDecodingOutcome.current?.record(fallbackReason: .incompatibleDrafter)
+            return nil
+        }
+        return MTPSpeculation(
+            drafter: drafter, blockSize: speculativeDecoding.blockSize,
+            minimumDraftProbability: speculativeDecoding.minimumDraftProbability)
     }
 
     /// The speculation of a call whose memory policy did not admit the drafter: none. The

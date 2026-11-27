@@ -800,18 +800,11 @@ public func generateTask(
     // Read the prompt before the iterator queues its prefill, which this would wait for.
     let reasoningPrimedInside = promptPrimesReasoning(
         input: input, modelConfiguration: context.configuration, tokenizer: context.tokenizer)
-    let iterator = try MTPSpeculativeTokenIterator(
-        input: input,
-        mainModel: context.model,
-        drafter: mtpDrafter,
-        mainCache: cache,
-        mainState: state,
-        mtpContinuation: mtpContinuation,
-        parameters: parameters,
-        blockSize: blockSize,
-        minimumDraftProbability: minimumDraftProbability,
-        components: components
-    )
+    let iterator = try MTPSpeculation.makeMTPIterator(
+        input: input, mainModel: context.model, drafter: mtpDrafter, mainCache: cache,
+        mainState: state, mtpContinuation: mtpContinuation, parameters: parameters,
+        blockSize: blockSize, minimumDraftProbability: minimumDraftProbability,
+        components: components)
     return generateTextStream(
         iterator: iterator, input: input, parameters: parameters, context: context,
         wiredMemoryTicket: wiredMemoryTicket, tools: tools,

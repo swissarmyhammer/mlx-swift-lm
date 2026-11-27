@@ -37,7 +37,16 @@ struct RemoteModelProtocolTests {
         .copy(cache, into: copyTarget),
         .reset(cache),
         .release(cache),
+        .speculate(round(draftLimit: 3)),
+        .speculate(round(draftLimit: 0)),
     ]
+
+    /// A round of ``cache`` with a token, rejected drafts and a confidence floor in each field.
+    private static func round(draftLimit: Int) -> RemoteDraftRound {
+        RemoteDraftRound(
+            cache: cache, token: 41, rejectedCount: 2, draftLimit: draftLimit,
+            minimumDraftProbability: 0.25)
+    }
 
     @Test("every op survives its announce words", arguments: everyOp)
     func everyOpSurvivesItsAnnounceWords(op: RemoteModelOp) throws {
@@ -68,6 +77,27 @@ struct RemoteModelProtocolTests {
 
         #expect(throws: RemoteModelProtocolError.chunkTooLong(tokenCount: tokens.count)) {
             try RemoteOpAnnouncement.encode(request)
+        }
+    }
+
+    @Test("a round whose verify does not fit a chunk has no announce")
+    func aRoundWhoseVerifyDoesNotFitAChunkHasNoAnnounce() {
+        let draftLimit = RemoteModelProtocol.maximumChunkTokenCount
+        let request = Self.request(.speculate(Self.round(draftLimit: draftLimit)))
+
+        #expect(throws: RemoteModelProtocolError.invalidCount(Int32(draftLimit))) {
+            try RemoteOpAnnouncement.encode(request)
+        }
+    }
+
+    @Test("a round that rewinds a negative count has no announce")
+    func aRoundThatRewindsANegativeCountHasNoAnnounce() {
+        let round = RemoteDraftRound(
+            cache: Self.cache, token: 1, rejectedCount: -1, draftLimit: 1,
+            minimumDraftProbability: 0)
+
+        #expect(throws: RemoteModelProtocolError.invalidCount(-1)) {
+            try RemoteOpAnnouncement.encode(Self.request(.speculate(round)))
         }
     }
 
@@ -155,6 +185,34 @@ struct RemoteModelProtocolTests {
         let reply = RemoteModelReply.forwarded(
             Self.status,
             logits: RemoteLogits(shape: [1, 1, 2], elementType: .float32, bytes: Data([1, 2])))
+
+        let data = try JSONEncoder().encode(reply)
+
+        #expect(try JSONDecoder().decode(RemoteModelReply.self, from: data) == reply)
+    }
+
+    @Test("a drafted reply survives JSON")
+    func aDraftedReplySurvivesJSON() throws {
+        let reply = RemoteModelReply.drafted(
+            Self.status, drafts: [4, 9],
+            logits: RemoteLogits(shape: [1, 3, 2], elementType: .float32, bytes: Data([1, 2])))
+
+        let data = try JSONEncoder().encode(reply)
+
+        #expect(try JSONDecoder().decode(RemoteModelReply.self, from: data) == reply)
+    }
+
+    @Test("the capabilities of a worker with a drafter survive JSON")
+    func theCapabilitiesOfAWorkerWithADrafterSurviveJSON() throws {
+        let reply = RemoteModelReply.capabilities(
+            RemoteModelCapabilities(
+                protocolVersion: RemoteModelProtocol.version, modelFamilies: ["inkling2"],
+                supportsSharding: true, rankCount: 2, vocabularySize: 64,
+                defaultPrefillStepSize: 512, maximumPrefillStepSize: nil,
+                preparesEveryPrompt: true, modelType: "inkling2", quantization: nil,
+                drafter: RemoteDrafterCapabilities(
+                    drafterID: "Inkling2DraftModel#1f", maximumBlockSize: 4,
+                    preferredBlockSize: 3)))
 
         let data = try JSONEncoder().encode(reply)
 

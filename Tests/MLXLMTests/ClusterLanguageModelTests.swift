@@ -371,41 +371,74 @@ struct ClusterLanguageModelTests {
         }
     }
 
-    @Test("an MTP generation is refused")
-    func anMTPGenerationIsRefused() throws {
+    @Test("an MTP generation with a drafter of this process throws its incompatibility")
+    func anMTPGenerationWithADrafterOfThisProcessThrowsItsIncompatibility() throws {
         let fixture = try Qwen35MTPFixture()
-        let context = try fixture.makeClusteredModelContext(worker: fixture.makeWorker())
+        let context = try fixture.makeClusteredModelContext(
+            worker: fixture.makeWorker(drafting: true))
 
-        #expect(throws: ClusterModelError.unsupported(.speculativeDecoding)) {
+        #expect(throws: MTPDrafterCompatibilityError.self) {
             try generateTokens(
                 input: Self.input(Self.prompt), parameters: Self.greedy, context: context,
                 mtpDrafter: fixture.drafter)
         }
     }
 
-    @Test("a draft-model generation is refused")
-    func aDraftModelGenerationIsRefused() throws {
+    @Test("a draft-model generation on a cache that trims writes the local tokens")
+    func aDraftModelGenerationWritesTheLocalTokens() async throws {
+        let model = try AttentionOnlyTarget.make()
         let fixture = try Qwen35MTPFixture()
-        let context = try fixture.makeClusteredModelContext(worker: fixture.makeWorker())
+        var localContext = fixture.makeModelContext()
+        localContext.model = model
+        var clusteredContext = localContext
+        clusteredContext.model = try ClusterLanguageModel.connect(
+            over: InProcessRemoteModelWorker(
+                model: model, vocabularySize: Qwen35MTPFixture.vocabularySize))
+        let local = try await Self.decode(Self.prompt, context: localContext)
 
-        #expect(throws: ClusterModelError.unsupported(.speculativeDecoding)) {
+        let clustered = try await Qwen35MTPFixture.collect(
             try generateTokens(
-                input: Self.input(Self.prompt), parameters: Self.greedy, context: context,
-                draftModel: fixture.target)
-        }
+                input: Self.input(Self.prompt), parameters: Self.greedy,
+                context: clusteredContext, draftModel: try AttentionOnlyTarget.make()))
+
+        #expect(clustered.tokens == local.tokens)
     }
 
-    @Test("a chat session with speculative decoding is refused")
-    func aChatSessionWithSpeculativeDecodingIsRefused() async throws {
-        let fixture = try Qwen35MTPFixture()
-        let session = ChatSession(
-            try fixture.makeClusteredModelContext(worker: fixture.makeWorker()),
+    @Test("a chat session with MTP reuses its prompt cache as the local MTP session does")
+    func aChatSessionWithMTPReusesItsPromptCacheAsTheLocalMTPSessionDoes() async throws {
+        let fixture = try Qwen35MTPFixture(drafter: .independent)
+        let local = try fixture.makeChatSession(speculative: true, maxTokens: Self.maxTokens)
+        let clustered = ChatSession(
+            try fixture.makeClusteredModelContext(
+                worker: fixture.makeWorker(drafting: true, followerCount: 1)),
             speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(),
             generateParameters: Self.greedy)
 
-        await #expect(throws: ClusterModelError.unsupported(.speculativeDecoding)) {
-            try await session.respond(to: fixture.text(for: Self.prompt))
+        var localTurns: [ChatTurn] = []
+        var clusteredTurns: [ChatTurn] = []
+        for prompt in [[3, 14, 15], [9, 2, 6], [5, 35, 8]] {
+            localTurns.append(try await ChatTurn(local, prompt: fixture.text(for: prompt)))
+            clusteredTurns.append(try await ChatTurn(clustered, prompt: fixture.text(for: prompt)))
         }
+
+        #expect(clusteredTurns == localTurns)
+        #expect(clusteredTurns.dropFirst().allSatisfy { $0.cachedPromptTokenCount > 0 })
+    }
+
+    @Test("a chat session with MTP on a cluster model proposes drafts")
+    func aChatSessionWithMTPOnAClusterModelProposesDrafts() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let session = ChatSession(
+            try fixture.makeClusteredModelContext(worker: fixture.makeWorker(drafting: true)),
+            speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(),
+            generateParameters: Self.greedy)
+
+        var proposed: Int?
+        for try await item in session.streamDetails(to: fixture.text(for: Self.prompt)) {
+            proposed = item.info?.proposedDraftTokens ?? proposed
+        }
+
+        #expect((proposed ?? 0) > 0)
     }
 
     @Test("a prompt cache file cannot hold a remote cache")

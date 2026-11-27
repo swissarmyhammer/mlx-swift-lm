@@ -234,6 +234,103 @@ struct ExecutorPromptCacheMTPTests {
 
     // MARK: - Reuse
 
+    /// What a clustered conversation left between its two passes: the check-out of the entry
+    /// of the first pass, and the offsets its remote cache stands at on each rank.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private struct ClusteredConversation {
+
+        /// The conversation of the clustered model, whose rank 0 holds the drafter.
+        let conversation: Conversation
+
+        /// The conversation of the local model that decodes plainly.
+        let plain: Conversation
+
+        /// Whether the check-out between the passes found the entry in memory.
+        let checkedOutFromMemory: Bool
+
+        /// The ledger of the entry the first pass checked in.
+        let ledgerCount: Int
+
+        /// The offset of the remote cache of that entry on rank 0, and on the other rank.
+        let offsets: [Int]
+    }
+
+    /// Runs a follow-up conversation on a clustered model of two ranks whose rank 0 holds the
+    /// drafter, checks the entry of the first pass out and back in between the passes, and runs
+    /// the same conversation on the local model that decodes plainly.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func clusteredConversation() async throws -> ClusteredConversation {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let fixture = try Qwen35MTPFixture(drafter: .independent)
+        let (model, worker) = try fixture.makeClusteredLanguageModel(
+            weights: weights,
+            speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding(), drafting: true,
+            followerCount: 1)
+        var checkedOutFromMemory = false
+        var ledgerCount = 0
+        var offsets: [Int] = []
+        let conversation = try await converse(model, fixture: fixture, secondTurn: .followUp) {
+            store, key in
+            let checkout = await store.checkOut(key)
+            let entry = try #require(checkout.entry)
+            let remote = try #require(entry.caches.first as? RemoteKVCache)
+            checkedOutFromMemory = true
+            ledgerCount = entry.tokens.count
+            offsets = [remote.offset] + worker.followerStatuses(of: remote.id).map(\.offset)
+            await store.checkIn(key, entry)
+        }
+        let plain = try await converse(
+            fixture.makeLanguageModel(weights: weights), fixture: fixture, secondTurn: .followUp)
+        return ClusteredConversation(
+            conversation: conversation, plain: plain, checkedOutFromMemory: checkedOutFromMemory,
+            ledgerCount: ledgerCount, offsets: offsets)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func theEntryOfAClusteredMTPPassChecksOutFromMemory() async throws {
+        let clustered = try await clusteredConversation()
+
+        #expect(clustered.checkedOutFromMemory)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func everyRankOfAClusteredMTPPassHoldsTheLedgerOfItsEntry() async throws {
+        let clustered = try await clusteredConversation()
+
+        #expect(clustered.offsets == [clustered.ledgerCount, clustered.ledgerCount])
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aFollowUpTurnOnAClusteredModelReusesTheCacheOfAnMTPTurn() async throws {
+        let clustered = try await clusteredConversation()
+
+        #expect(
+            clustered.conversation.second.usage.first?.cachedPromptTokenCount
+                == clustered.ledgerCount)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aFollowUpTurnOnAClusteredModelSpeculates() async throws {
+        let clustered = try await clusteredConversation()
+
+        #expect(clustered.conversation.second.speculated)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aClusteredMTPConversationWritesThePlainText() async throws {
+        let clustered = try await clusteredConversation()
+
+        #expect(
+            [clustered.conversation.first.responseText, clustered.conversation.second.responseText]
+                == [clustered.plain.first.responseText, clustered.plain.second.responseText])
+    }
+
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func aFollowUpTurnResumesTheDrafterStateOfTheFirstTurn() async throws {

@@ -22,6 +22,16 @@ import MLX
 /// not on another blocks both, or mixes their buffers. Thus a rank other than 0 runs each
 /// forward too, although nobody reads its logits.
 ///
+/// ## The drafter of rank 0
+///
+/// Rank 0 can hold the MTP drafter of the model. Its executor then keeps a drafter state beside
+/// each handle and feeds it every forward of the handle, so the state stands where the cache
+/// stands across the turns of a prompt cache. A ``RemoteModelOp/speculate(_:)`` round drafts on
+/// rank 0 alone, and hands the drafts to every rank through the ``RemoteDraftExchange`` each
+/// executor was given, the one collective an op runs outside its forward pass. Every rank runs
+/// the exchange of a round whose draft limit is above zero, a rank with no drafter too, and no
+/// rank runs it for a round of no drafts.
+///
 /// ## The rules of the stream
 ///
 /// Each request must carry the sequence number after the last one, starting at 1. A request
@@ -70,13 +80,31 @@ public final class RemoteModelExecutor {
     /// The caches and model state of each handle.
     private var handles: [RemoteCacheID: RemoteCacheHandle] = [:]
 
+    /// The drafting of rank 0, or nil on a rank that holds no drafter.
+    private let drafting: RemoteDrafting?
+
+    /// Hands the drafts of rank 0 to every rank inside a round.
+    private let draftExchange: RemoteDraftExchange
+
     /// Makes an executor over `model`.
+    ///
+    /// Rank 0 passes the MTP drafter of the model, when it holds one, and every rank passes the
+    /// same kind of draft exchange: ``RemoteDraftExchange/group(_:)`` over the group of the
+    /// ranks, or ``RemoteDraftExchange/alone`` for a model on one rank.
     ///
     /// - Parameters:
     ///   - model: The loaded model, sharded already when it runs on several ranks.
     ///   - configuration: The vocabulary and the rank count of the model.
-    public init(model: any LanguageModel, configuration: Configuration) {
+    ///   - drafter: The MTP drafter of rank 0, or nil on every other rank and for a model that
+    ///     does not speculate.
+    ///   - draftExchange: Hands the drafts of rank 0 to every rank.
+    public init(
+        model: any LanguageModel, configuration: Configuration,
+        drafter: (any ResumableMTPDrafterModel)? = nil, draftExchange: RemoteDraftExchange = .alone
+    ) {
         self.model = model
+        self.drafting = drafter.map { RemoteDrafting(drafter: $0, target: model) }
+        self.draftExchange = draftExchange
         self.modelCapabilities = RemoteModelCapabilities(
             protocolVersion: Self.capabilities.protocolVersion,
             modelFamilies: Self.capabilities.modelFamilies,
@@ -86,7 +114,8 @@ public final class RemoteModelExecutor {
             defaultPrefillStepSize: model.defaultPrefillStepSize,
             maximumPrefillStepSize: model.maximumPrefillStepSize,
             preparesEveryPrompt: model.preparesEveryPrompt,
-            modelType: configuration.modelType, quantization: configuration.quantization)
+            modelType: configuration.modelType, quantization: configuration.quantization,
+            drafter: drafter.map(RemoteDrafterCapabilities.init))
     }
 
     /// The cache handles the executor holds.
@@ -150,7 +179,7 @@ public final class RemoteModelExecutor {
             return .done
         case .newCache(let id):
             guard handles[id] == nil else { throw RemoteModelExecutorError.cacheExists(id) }
-            handles[id] = RemoteCacheHandle(layers: try model.newCache(parameters: nil))
+            handles[id] = try emptyHandle()
             return .cache(try status(of: id))
         case .forward(let tokens, let id, let scope):
             return try forward(tokens, cache: id, scope: scope)
@@ -160,13 +189,22 @@ public final class RemoteModelExecutor {
             return try copy(id, into: target)
         case .reset(let id):
             _ = try handle(of: id)
-            handles[id] = RemoteCacheHandle(layers: try model.newCache(parameters: nil))
+            handles[id] = try emptyHandle()
             return .cache(try status(of: id))
         case .release(let id):
             _ = try handle(of: id)
             handles[id] = nil
             return .done
+        case .speculate(let round):
+            return try speculate(round)
         }
+    }
+
+    /// The caches of an empty sequence, and the drafter state rank 0 keeps beside them.
+    private func emptyHandle() throws -> RemoteCacheHandle {
+        RemoteCacheHandle(
+            layers: try model.newCache(parameters: nil),
+            drafter: drafting.map(RemoteDrafterTrack.init))
     }
 
     /// Runs `tokens` into the caches of `id`, as a local generation runs them.
@@ -178,16 +216,40 @@ public final class RemoteModelExecutor {
             throw RemoteModelProtocolError.chunkTooLong(tokenCount: tokens.count)
         }
         let handle = try handle(of: id)
-        let input = LMInput.Text(tokens: MLXArray(tokens)[.newAxis])
-        let output =
-            scope == .allPositions
-            ? model(input, cache: handle.layers, state: handle.state)
-            : model.nextTokenLogits(input, cache: handle.layers, state: handle.state)
-        handles[id]?.state = output.state
-        eval([output.logits] + handle.layers.flatMap(\.evaluationState))
+        // A verify keeps the snapshot slots of its tokens until the op after it.
+        discardSpeculativePromptCacheCheckpoints(handle.layers)
+        let position = Self.position(of: handle)
+        let output = run(
+            tokens, on: handle, allPositions: scope == .allPositions,
+            state: handle.drafter?.emitting(handle.state) ?? handle.state)
+        handles[id]?.drafter?.didForward(
+            tokens, at: position, hidden: output.state?[mtpLastHiddenStatesKey])
         return .forwarded(
-            RemoteCacheStatus(describing: handle.layers),
+            try settle(id, after: output),
             logits: scope == .none ? nil : RemoteLogits(output.logits))
+    }
+
+    /// Runs `tokens` into the caches of `handle` with `state`: the logits of every position
+    /// when `allPositions` is true, else of the last.
+    private func run(
+        _ tokens: [Int32], on handle: RemoteCacheHandle, allPositions: Bool,
+        state: LMOutput.State?
+    ) -> LMOutput {
+        let input = LMInput.Text(tokens: MLXArray(tokens)[.newAxis])
+        return allPositions
+            ? model(input, cache: handle.layers, state: state)
+            : model.nextTokenLogits(input, cache: handle.layers, state: state)
+    }
+
+    /// Keeps the model state `output` left for `id`, evaluates the logits, the caches and the
+    /// drafter state, and returns the status of the caches.
+    private func settle(_ id: RemoteCacheID, after output: LMOutput) throws -> RemoteCacheStatus {
+        handles[id]?.state = output.state?.withoutMTPExchange
+        let handle = try handle(of: id)
+        eval(
+            [output.logits] + handle.layers.flatMap(\.evaluationState)
+                + (handle.drafter?.heldArrays ?? []))
+        return status(of: handle)
     }
 
     /// Drops the newest `count` positions of the caches of `id`.
@@ -196,17 +258,93 @@ public final class RemoteModelExecutor {
             throw RemoteModelProtocolError.invalidCount(Int32(clamping: count))
         }
         let layers = try handle(of: id).layers
-        let trimmed = trimPromptCache(layers, numTokens: count)
-        return .trimmed(trimmed, status: RemoteCacheStatus(describing: layers))
+        let trimmed = Self.rewind(layers, count: count)
+        discardSpeculativePromptCacheCheckpoints(layers)
+        handles[id]?.drafter?.didTrim(trimmed)
+        return .trimmed(trimmed, status: try status(of: id))
     }
 
-    /// Copies the caches and the model state of `id` under `target`.
+    /// Drops the newest `count` positions of `layers`: by a trim, or, for the drafts of a verify
+    /// that a recurrent layer cannot trim, by its snapshot slots.
+    ///
+    /// - Returns: The positions dropped: `count`, or 0 when the layers cannot drop them.
+    private static func rewind(_ layers: [KVCache], count: Int) -> Int {
+        let trimmed = trimPromptCache(layers, numTokens: count)
+        guard trimmed == 0, count > 0 else { return trimmed }
+        return rewindSpeculativePromptCache(layers, numTokens: count)
+    }
+
+    /// Copies the caches, the model state and the drafter state of `id` under `target`.
     private func copy(_ id: RemoteCacheID, into target: RemoteCacheID) throws -> RemoteModelReply {
         let source = try handle(of: id)
         guard handles[target] == nil else { throw RemoteModelExecutorError.cacheExists(target) }
+        discardSpeculativePromptCacheCheckpoints(source.layers)
         handles[target] = RemoteCacheHandle(
-            layers: source.layers.map { $0.copy() }, state: source.state)
+            layers: source.layers.map { $0.copy() }, state: source.state,
+            drafter: source.drafter?.copy())
         return .cache(try status(of: target))
+    }
+
+    // MARK: - Rounds
+
+    /// Runs one speculative round on every rank: rewinds the drafts the round before rejected,
+    /// takes the drafts of rank 0 through the draft exchange, and verifies the round's token and
+    /// its drafts with one forward.
+    ///
+    /// Every rank checks the round the same way before the exchange, so a round that fails does
+    /// so on every rank, and none of them waits in the exchange.
+    private func speculate(_ round: RemoteDraftRound) throws -> RemoteModelReply {
+        guard round.verifyFitsAChunk else {
+            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.draftLimit))
+        }
+        guard round.rejectedCount >= 0 else {
+            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.rejectedCount))
+        }
+        let id = round.cache
+        let layers = try handle(of: id).layers
+        let rewound = Self.rewind(layers, count: round.rejectedCount)
+        guard rewound == round.rejectedCount else {
+            throw RemoteModelExecutorError.rewind(requested: round.rejectedCount, rewound: rewound)
+        }
+        discardSpeculativePromptCacheCheckpoints(layers)
+        let position = Self.position(of: try handle(of: id))
+        let proposed = handles[id]?.drafter?.propose(
+            after: round.token, rejectedCount: round.rejectedCount,
+            draftLimit: drafting?.rewindableDraftLimit(round.draftLimit, cache: layers) ?? 0,
+            minimumDraftProbability: round.minimumDraftProbability, position: position)
+        let drafts =
+            round.draftLimit > 0
+            ? try draftExchange.drafts(proposed, draftLimit: round.draftLimit) : []
+        let output = run(
+            round.verifiedTokens(drafts: drafts), on: try handle(of: id),
+            allPositions: !drafts.isEmpty, state: try verifyState(of: id, drafting: !drafts.isEmpty)
+        )
+        handles[id]?.drafter?.didVerify(
+            round.token, drafts: drafts, at: position,
+            hidden: output.state?[mtpLastHiddenStatesKey])
+        return .drafted(
+            try settle(id, after: output), drafts: drafts, logits: RemoteLogits(output.logits))
+    }
+
+    /// The model state of the verify of a round on `id`: on every rank, a verify of drafts keeps
+    /// the snapshot slots of its recurrent layers, which the next op rewinds; on rank 0, it
+    /// emits the hidden rows the drafter reads.
+    private func verifyState(of id: RemoteCacheID, drafting drafts: Bool) throws
+        -> LMOutput.State?
+    {
+        let handle = try handle(of: id)
+        var state = handle.state
+        if drafts {
+            state = state ?? LMOutput.State()
+            state?[mtpEmitFlagKey] = true
+            state?[mtpVerifyKeepsSnapshotsKey] = true
+        }
+        return handle.drafter?.emitting(state) ?? state
+    }
+
+    /// The position the caches of `handle` stand at, as their status reports it.
+    private static func position(of handle: RemoteCacheHandle) -> Int {
+        handle.layers.first?.offset ?? 0
     }
 
     /// The caches and state of `id`.
@@ -217,7 +355,13 @@ public final class RemoteModelExecutor {
 
     /// The status of the caches of `id`.
     private func status(of id: RemoteCacheID) throws -> RemoteCacheStatus {
-        RemoteCacheStatus(describing: try handle(of: id).layers)
+        status(of: try handle(of: id))
+    }
+
+    /// The status of the caches of `handle`, whose bytes count the drafter state too.
+    private func status(of handle: RemoteCacheHandle) -> RemoteCacheStatus {
+        RemoteCacheStatus(describing: handle.layers)
+            .addingResidentBytes(handle.drafter?.residentByteCount ?? 0)
     }
 }
 
@@ -320,7 +464,8 @@ struct CheckpointFields: Decodable {
     }
 }
 
-/// The caches of every layer of one handle, and the model state the last forward left.
+/// The caches of every layer of one handle, the model state the last forward left, and the
+/// drafter state rank 0 keeps beside them.
 private struct RemoteCacheHandle {
 
     /// The cache of each layer.
@@ -329,10 +474,14 @@ private struct RemoteCacheHandle {
     /// The model state the last forward left, or nil before one.
     var state: LMOutput.State?
 
+    /// The drafter state of rank 0, or nil on a rank without a drafter.
+    var drafter: RemoteDrafterTrack?
+
     /// Makes a handle of `layers`.
-    init(layers: [any KVCache], state: LMOutput.State? = nil) {
+    init(layers: [any KVCache], state: LMOutput.State? = nil, drafter: RemoteDrafterTrack?) {
         self.layers = layers
         self.state = state
+        self.drafter = drafter
     }
 }
 
@@ -435,6 +584,14 @@ public enum RemoteModelExecutorError: Error, Hashable, LocalizedError {
     /// The `config.json` names no vocabulary size.
     case missingVocabularySize
 
+    /// The draft exchange gave words that do not hold the drafts of the round: their first word
+    /// is `count`.
+    case draftWords(count: Int)
+
+    /// A round asked to rewind `requested` rejected drafts, and the caches could rewind
+    /// `rewound`.
+    case rewind(requested: Int, rewound: Int)
+
     /// A description of the error.
     public var errorDescription: String? {
         switch self {
@@ -456,6 +613,10 @@ public enum RemoteModelExecutorError: Error, Hashable, LocalizedError {
             "A remote forward needs at least one token."
         case .missingVocabularySize:
             "The config.json of the model names no vocab_size."
+        case .draftWords(let count):
+            "The draft exchange gave words of \(count) drafts, which the round cannot hold."
+        case .rewind(let requested, let rewound):
+            "The worker rewound \(rewound) of the \(requested) rejected drafts of a round."
         }
     }
 }

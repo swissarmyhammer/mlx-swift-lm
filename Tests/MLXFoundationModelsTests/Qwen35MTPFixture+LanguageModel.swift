@@ -57,13 +57,16 @@ extension Qwen35MTPFixture {
     ///   - tokenizer: The tokenizer that renders the prompts and decodes the replies, or `nil`
     ///     for the fixture's own.
     ///   - speculativeDecoding: The MTP drafter of the model, or `nil` for plain decode.
+    ///   - drafting: Whether rank 0 of the worker holds the drafter of the fixture.
+    ///   - followerCount: The ranks other than 0 the worker stands for.
     /// - Returns: The model, and the worker that runs its target.
     /// - Throws: The error of the worker handshake.
     func makeClusteredLanguageModel(
         weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
-        tokenizer: (any Tokenizer)? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil
+        tokenizer: (any Tokenizer)? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil,
+        drafting: Bool = false, followerCount: Int = 0
     ) throws -> (model: MLXLanguageModel, worker: InProcessRemoteModelWorker) {
-        let worker = makeWorker()
+        let worker = makeWorker(drafting: drafting, followerCount: followerCount)
         var context = makeLanguageContext(
             eosTokenIds: [], tokenizer: tokenizer, toolCallFormat: nil)
         context.model = try ClusterLanguageModel.connect(over: worker)

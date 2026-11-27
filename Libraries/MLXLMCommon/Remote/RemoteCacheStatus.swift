@@ -136,6 +136,18 @@ public struct RemoteCacheStatus: Codable, Sendable, Hashable {
             canLoseRewind: PromptCacheCheckpoint.applies(to: caches),
             residentByteCount: caches.reduce(0) { $0 + $1.residentByteCount })
     }
+
+    /// This status with `bytes` more on the worker, which state beside the caches holds, such
+    /// as the drafter state of rank 0.
+    ///
+    /// - Parameter bytes: The bytes to add.
+    /// - Returns: The status.
+    func addingResidentBytes(_ bytes: Int) -> RemoteCacheStatus {
+        RemoteCacheStatus(
+            offset: offset, maxSize: maxSize, evictedTokenCount: evictedTokenCount,
+            isTrimmable: isTrimmable, maxTrimCount: maxTrimCount, rewindLimit: rewindLimit,
+            canLoseRewind: canLoseRewind, residentByteCount: residentByteCount + bytes)
+    }
 }
 
 /// The element type of ``RemoteLogits``.

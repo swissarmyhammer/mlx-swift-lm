@@ -14,14 +14,14 @@ import MLX
 ///
 /// | Word | Holds |
 /// |---|---|
-/// | 0 | The opcode: 1 describe, 2 begin, 3 end, 4 newCache, 5 forward, 6 trim, 7 copy, 8 reset, 9 release, 10 park. |
+/// | 0 | The opcode: 1 describe, 2 begin, 3 end, 4 newCache, 5 forward, 6 trim, 7 copy, 8 reset, 9 release, 10 park, 11 speculate. |
 /// | 1 | The flags: bit 0 is the stop flag, which only ``RemoteModelOp/end`` raises; bits 1 and 2 hold the ``RemoteLogitsScope`` of a forward. |
-/// | 2 | The count: the tokens of a forward, the positions of a trim, else 0. |
+/// | 2 | The count: the tokens of a forward, the positions of a trim, the draft limit of a round, else 0. |
 /// | 3, 4 | ``RemoteModelRequest/sequence``, low half then high half. |
 /// | 5, 6 | ``RemoteModelRequest/requestID``, low half then high half. |
 /// | 7, 8 | The cache handle of the op, low half then high half, else 0. |
 /// | 9, 10 | The target handle of a copy, low half then high half, else 0. |
-/// | 11 ... | The tokens of a forward, then zeros, ``RemoteModelProtocol/maximumChunkTokenCount`` words. |
+/// | 11 ... | The tokens of a forward, then zeros, ``RemoteModelProtocol/maximumChunkTokenCount`` words. A round puts its token, its rejected drafts and the bits of its confidence floor in the first three. |
 ///
 /// No opcode is 0, thus a buffer of zeros never decodes to an op.
 ///
@@ -45,7 +45,12 @@ public enum RemoteOpAnnouncement {
     /// The opcode of each op.
     private enum Opcode: Int32 {
         case describe = 1
-        case begin, end, newCache, forward, trim, copy, reset, release, park
+        case begin, end, newCache, forward, trim, copy, reset, release, park, speculate
+    }
+
+    /// The payload words of a ``RemoteDraftRound``, after the header.
+    private enum RoundWord: Int {
+        case token, rejectedCount, minimumDraftProbability
     }
 
     /// The stop flag in the flags word.
@@ -117,9 +122,57 @@ public enum RemoteOpAnnouncement {
         case .release(let cache):
             opcode = .release
             set(.cacheLow, .cacheHigh, cache.rawValue)
+        case .speculate(let round):
+            opcode = .speculate
+            try write(round, into: &words)
         }
         set(.opcode, opcode.rawValue)
         return words
+    }
+
+    /// Writes the count, the cache and the payload words of `round` into `words`.
+    ///
+    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` for a draft limit whose verify
+    ///   does not fit a chunk, or a rejected count outside `0 ... Int32.max`.
+    private static func write(_ round: RemoteDraftRound, into words: inout [Int32]) throws {
+        guard round.verifyFitsAChunk else {
+            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.draftLimit))
+        }
+        guard let rejected = Int32(exactly: round.rejectedCount), rejected >= 0 else {
+            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.rejectedCount))
+        }
+        words[Word.count.rawValue] = Int32(round.draftLimit)
+        write(round.cache.rawValue, into: &words, low: .cacheLow, high: .cacheHigh)
+        words[payloadIndex(.token)] = round.token
+        words[payloadIndex(.rejectedCount)] = rejected
+        words[payloadIndex(.minimumDraftProbability)] = Int32(
+            bitPattern: round.minimumDraftProbability.bitPattern)
+    }
+
+    /// The round of the count, the cache and the payload words of `words`.
+    ///
+    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` for a draft limit whose verify
+    ///   does not fit a chunk, or a negative rejected count.
+    private static func round(of words: [Int32]) throws -> RemoteDraftRound {
+        let round = RemoteDraftRound(
+            cache: RemoteCacheID(rawValue: read(words, low: .cacheLow, high: .cacheHigh)),
+            token: words[payloadIndex(.token)],
+            rejectedCount: Int(words[payloadIndex(.rejectedCount)]),
+            draftLimit: Int(words[Word.count.rawValue]),
+            minimumDraftProbability: Float(
+                bitPattern: UInt32(bitPattern: words[payloadIndex(.minimumDraftProbability)])))
+        guard round.verifyFitsAChunk else {
+            throw RemoteModelProtocolError.invalidCount(Int32(round.draftLimit))
+        }
+        guard round.rejectedCount >= 0 else {
+            throw RemoteModelProtocolError.invalidCount(Int32(round.rejectedCount))
+        }
+        return round
+    }
+
+    /// The index in the announce words of the payload word `word` of a round.
+    private static func payloadIndex(_ word: RoundWord) -> Int {
+        headerWordCount + word.rawValue
     }
 
     /// The request of announce `words`.
@@ -161,6 +214,7 @@ public enum RemoteOpAnnouncement {
             op = .copy(cache, into: RemoteCacheID(rawValue: joined(.targetLow, .targetHigh)))
         case .reset: op = .reset(cache)
         case .release: op = .release(cache)
+        case .speculate: op = .speculate(try round(of: words))
         case .park: throw RemoteModelProtocolError.parkHasNoRequest
         }
         return RemoteModelRequest(
@@ -228,8 +282,19 @@ public enum RemoteOpAnnouncement {
         guard local.count == wordCount else {
             throw RemoteModelProtocolError.announceLength(local.count)
         }
-        return try withError {
-            let summed = MLXDistributed.allSum(MLXArray(local), group: group)
+        return try sum(local, group: group)
+    }
+
+    /// Sums `words` across `group` with one all-sum, and gives the sum to every rank.
+    ///
+    /// - Parameters:
+    ///   - words: The words of this rank. Every rank passes as many.
+    ///   - group: The group of the ranks.
+    /// - Returns: The sum of the words of every rank.
+    /// - Throws: The error of the communication.
+    static func sum(_ words: [Int32], group: MLXDistributed.Group) throws -> [Int32] {
+        try withError {
+            let summed = MLXDistributed.allSum(MLXArray(words), group: group)
             try checkedEval(summed)
             return summed.asArray(Int32.self)
         }

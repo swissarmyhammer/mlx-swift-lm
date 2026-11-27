@@ -210,18 +210,11 @@ public func generateTokensTask(
     components: GenerationComponents = .init(),
     wiredMemoryTicket: WiredMemoryTicket? = nil
 ) throws -> (AsyncStream<TokenGeneration>, Task<MTPDrafterContinuation?, Never>) {
-    let iterator = try MTPSpeculativeTokenIterator(
-        input: input,
-        mainModel: context.model,
-        drafter: mtpDrafter,
-        mainCache: cache,
-        mainState: state,
-        mtpContinuation: mtpContinuation,
-        parameters: parameters,
-        blockSize: blockSize,
-        minimumDraftProbability: minimumDraftProbability,
-        components: components
-    )
+    let iterator = try MTPSpeculation.makeMTPIterator(
+        input: input, mainModel: context.model, drafter: mtpDrafter, mainCache: cache,
+        mainState: state, mtpContinuation: mtpContinuation, parameters: parameters,
+        blockSize: blockSize, minimumDraftProbability: minimumDraftProbability,
+        components: components)
     return generateRawTokenStream(
         iterator: iterator, input: input, context: context, wiredMemoryTicket: wiredMemoryTicket,
         tokenCollector: MTPContinuationCollector())

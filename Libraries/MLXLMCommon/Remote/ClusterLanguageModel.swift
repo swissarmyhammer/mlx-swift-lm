@@ -19,8 +19,9 @@ private let clusterLogger = MLXLogger(label: "cluster-language-model")
 /// names the caches of every layer on the worker.
 ///
 /// It refuses what a worker cannot run, each with a ``ClusterModelError``: image, video and
-/// audio input, speculative decoding, a KV-cache configuration, and a batch of several
-/// sequences. A prompt cache file cannot hold its cache.
+/// audio input, a KV-cache configuration, and a batch of several sequences. A prompt cache file
+/// cannot hold its cache. It speculates with the MTP drafter of rank 0 (``mtpDrafter``), and a
+/// draft model of this process verifies on it as on a local model.
 ///
 /// A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cache:state:)``
 /// does not throw. The model then cancels the task that runs it, which ends the generation, and
@@ -38,10 +39,19 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     /// What the worker reported it runs.
     public let workerCapabilities: RemoteModelCapabilities
 
+    /// The MTP drafter rank 0 of the worker holds, or nil when it holds none.
+    ///
+    /// Pass it as the MTP drafter of a generation of this model; a drafter of this process
+    /// cannot draft for a model whose forward runs in a worker.
+    public let mtpDrafter: RemoteMTPDrafter?
+
     /// Makes a model over `session`, whose worker reported `capabilities`.
     private init(session: RemoteModelSession, capabilities: RemoteModelCapabilities) {
         self.session = session
         self.workerCapabilities = capabilities
+        self.mtpDrafter = capabilities.drafter.map {
+            RemoteMTPDrafter(capabilities: $0, session: session)
+        }
         super.init()
     }
 
@@ -225,11 +235,43 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
             let logits = try remote.forward(Self.tokenIDs(of: tokens), logits: scope)
             return LMOutput(logits: logits ?? placeholderLogits(of: tokens, scope: .lastPosition))
         } catch {
-            session.recordFailure(error)
-            clusterLogger.error("A cluster forward failed, cancelling the generation: \(error)")
-            withUnsafeCurrentTask { $0?.cancel() }
+            failGeneration(with: error)
             return LMOutput(logits: placeholderLogits(of: tokens, scope: scope))
         }
+    }
+
+    /// Runs one speculative round on `cache`: see ``RemoteModelOp/speculate(_:)``. A failure
+    /// cancels the current task, which ends its generation, and keeps the failure on the model.
+    ///
+    /// - Parameters:
+    ///   - cache: The one ``RemoteKVCache`` of ``newCache(parameters:)``.
+    ///   - token: The token the round starts from.
+    ///   - rejectedCount: The drafts of the round before that the target rejected.
+    ///   - draftLimit: The most drafts of the round.
+    ///   - minimumDraftProbability: The confidence floor of a chaining drafter.
+    /// - Returns: The drafts and the logits of each verified position, or nil when the round
+    ///   failed.
+    func speculate(
+        on cache: RemoteKVCache, from token: Int32, rejectedCount: Int, draftLimit: Int,
+        minimumDraftProbability: Float
+    ) -> (drafts: [Int32], logits: MLXArray)? {
+        do {
+            return try cache.speculate(
+                RemoteDraftRound(
+                    cache: cache.id, token: token, rejectedCount: rejectedCount,
+                    draftLimit: draftLimit, minimumDraftProbability: minimumDraftProbability))
+        } catch {
+            failGeneration(with: error)
+            return nil
+        }
+    }
+
+    /// Keeps `error` as the failure of the model, and cancels the current task, which ends its
+    /// generation: an op of a forward pass cannot throw.
+    private func failGeneration(with error: any Error) {
+        session.recordFailure(error)
+        clusterLogger.error("A cluster forward failed, cancelling the generation: \(error)")
+        withUnsafeCurrentTask { $0?.cancel() }
     }
 
     /// Zero logits of the shape a forward of `tokens` returns for `scope`, which a failed
@@ -242,7 +284,11 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     }
 
     /// The one remote cache of `cache`, which this model made.
-    private func remoteCache(of cache: [KVCache]) throws -> RemoteKVCache {
+    ///
+    /// - Parameter cache: The caches a generation of this model runs on.
+    /// - Returns: The remote cache.
+    /// - Throws: ``ClusterModelError/foreignCache`` for other caches.
+    func remoteCache(of cache: [KVCache]) throws -> RemoteKVCache {
         guard cache.count == 1, let remote = cache.first as? RemoteKVCache,
             remote.session === session
         else {

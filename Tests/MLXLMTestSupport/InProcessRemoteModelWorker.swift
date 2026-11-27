@@ -44,11 +44,28 @@ public struct InProcessMemberLoss: ClusterMemberLoss, Equatable, CustomStringCon
 /// other ranks, so a value the words cannot carry fails the test. A ``RemoteModelExecutor``
 /// runs the decoded request, as a cluster worker runs it. The worker records every request it
 /// received.
+///
+/// A worker can also stand for the other ranks of a cluster: each follower is an executor of its
+/// own over the same model, with no drafter, that applies the announce words of every op after
+/// rank 0 ran it, and takes the drafts of rank 0 from its draft exchange, as a rank other than 0
+/// does. The worker records the cache status each follower last reported.
 public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked Sendable {
     // swiftlint:enable no_unchecked_sendable
 
-    /// The executor that runs each op.
+    /// The executor that runs each op: rank 0.
     private let executor: RemoteModelExecutor
+
+    /// The executors of the other ranks, which apply the announce words of each op.
+    private let followers: [RemoteModelExecutor]
+
+    /// The draft words rank 0 exchanged in the op that runs, which each follower takes.
+    private let draftWords: DraftWordsRelay
+
+    /// The cache status each follower last reported for each handle, one map per follower.
+    private var followerStatuses: [[RemoteCacheID: RemoteCacheStatus]]
+
+    /// The failed replies of the followers, in order.
+    private var followerFailureReasons: [String] = []
 
     /// The protocol version the worker reports in place of the executor's.
     private let protocolVersion: Int32
@@ -79,14 +96,45 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     ///   - vocabularySize: The last dimension of the logits of `model`.
     ///   - protocolVersion: The protocol version the worker reports.
     ///   - modelType: The `model_type` the worker reports, or nil for none.
+    ///   - drafter: The MTP drafter rank 0 holds, or nil for none.
+    ///   - followerCount: The ranks other than 0 the worker stands for.
     public init(
         model: any LanguageModel, vocabularySize: Int,
-        protocolVersion: Int32 = RemoteModelProtocol.version, modelType: String? = nil
+        protocolVersion: Int32 = RemoteModelProtocol.version, modelType: String? = nil,
+        drafter: (any ResumableMTPDrafterModel)? = nil, followerCount: Int = 0
     ) {
+        let configuration = RemoteModelExecutor.Configuration(
+            vocabularySize: vocabularySize, rankCount: followerCount + 1, modelType: modelType)
+        let draftWords = DraftWordsRelay()
+        self.draftWords = draftWords
         self.executor = RemoteModelExecutor(
-            model: model,
-            configuration: .init(vocabularySize: vocabularySize, modelType: modelType))
+            model: model, configuration: configuration, drafter: drafter,
+            draftExchange: RemoteDraftExchange { words, _ in
+                let words = words ?? []
+                draftWords.words = words
+                return words
+            })
+        self.followers = (0 ..< followerCount).map { _ in
+            RemoteModelExecutor(
+                model: model, configuration: configuration,
+                draftExchange: RemoteDraftExchange { _, _ in draftWords.words })
+        }
+        self.followerStatuses = Array(repeating: [:], count: followerCount)
         self.protocolVersion = protocolVersion
+    }
+
+    /// The status each follower last reported for the caches of `cache`, one per follower.
+    ///
+    /// - Parameter cache: The handle of the caches.
+    /// - Returns: The statuses, in the order of the followers; a follower that reported none
+    ///   for `cache` is missing.
+    public func followerStatuses(of cache: RemoteCacheID) -> [RemoteCacheStatus] {
+        lock.withLock { followerStatuses.compactMap { $0[cache] } }
+    }
+
+    /// The reasons of the failed replies of the followers, in order.
+    public var followerFailures: [String] {
+        lock.withLock { followerFailureReasons }
     }
 
     /// Every request the worker received, in order.
@@ -148,7 +196,27 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
             if case .forward = announced.op {
                 try spend(&remainingForwards)
             }
-            return reported(try executor.handle(announced))
+            let reply = try executor.handle(announced)
+            try follow(RemoteOpAnnouncement.encode(announced))
+            return reported(reply)
+        }
+    }
+
+    /// Applies announce `words` on each follower, and records the status or the failure of its
+    /// reply. The caller holds ``lock``.
+    ///
+    /// - Parameter words: The announce words of the op rank 0 ran.
+    /// - Throws: The error of a follower's executor.
+    private func follow(_ words: [Int32]) throws {
+        for (index, follower) in followers.enumerated() {
+            switch try follower.apply(announcement: words) {
+            case .failed(let reason): followerFailureReasons.append(reason)
+            case .cache(let status), .trimmed(_, let status), .forwarded(let status, _),
+                .drafted(let status, _, _):
+                let cache = try RemoteOpAnnouncement.decode(words).op.cache
+                followerStatuses[index][cache] = status
+            case .capabilities, .done, nil: break
+            }
         }
     }
 
@@ -174,7 +242,31 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
                 defaultPrefillStepSize: capabilities.defaultPrefillStepSize,
                 maximumPrefillStepSize: capabilities.maximumPrefillStepSize,
                 preparesEveryPrompt: capabilities.preparesEveryPrompt,
-                modelType: capabilities.modelType, quantization: capabilities.quantization))
+                modelType: capabilities.modelType, quantization: capabilities.quantization,
+                drafter: capabilities.drafter))
+    }
+}
+
+/// The draft words rank 0 exchanged in the op that runs, which each follower of an
+/// ``InProcessRemoteModelWorker`` takes as its exchange gives them to a rank other than 0.
+// swiftlint:disable:next no_unchecked_sendable the worker's lock guards every op, thus every access
+private final class DraftWordsRelay: @unchecked Sendable {
+
+    /// The words of the last exchange.
+    var words: [Int32] = []
+}
+
+extension RemoteModelOp {
+
+    /// The cache handle the op names, which a reply's status describes.
+    fileprivate var cache: RemoteCacheID {
+        switch self {
+        case .newCache(let cache), .forward(_, let cache, _), .trim(let cache, _),
+            .copy(_, into: let cache), .reset(let cache), .release(let cache):
+            cache
+        case .speculate(let round): round.cache
+        case .describe, .begin, .end: RemoteCacheID(rawValue: 0)
+        }
     }
 }
 
@@ -182,9 +274,16 @@ extension Qwen35MTPFixture {
 
     /// A worker that runs the target of the fixture.
     ///
+    /// - Parameters:
+    ///   - drafting: Whether rank 0 of the worker holds the drafter of the fixture.
+    ///   - followerCount: The ranks other than 0 the worker stands for.
     /// - Returns: The worker.
-    public func makeWorker() -> InProcessRemoteModelWorker {
-        InProcessRemoteModelWorker(model: target, vocabularySize: Self.vocabularySize)
+    public func makeWorker(drafting: Bool = false, followerCount: Int = 0)
+        -> InProcessRemoteModelWorker
+    {
+        InProcessRemoteModelWorker(
+            model: target, vocabularySize: Self.vocabularySize,
+            drafter: drafting ? drafter : nil, followerCount: followerCount)
     }
 
     /// The context of ``makeModelContext(eosTokenIds:)`` with a cluster model over `worker` in

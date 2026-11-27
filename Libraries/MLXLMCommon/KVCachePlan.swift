@@ -196,6 +196,19 @@ package final class KVCacheStorage {
         lastRound = nil
     }
 
+    /// Takes back `count` positions that the cache already dropped itself, as a worker drops the
+    /// rejected drafts of a speculative round inside the op of the next round, or as a
+    /// ``RemoteKVCache/trim(_:)`` drops them when the guard of ``trim(_:)`` would not.
+    ///
+    /// - Parameter count: The positions the cache dropped.
+    package func commitDroppedTokens(_ count: Int) {
+        precondition(
+            (0 ... processedTokenCount).contains(count),
+            "Cache dropped more tokens than its processed-token timeline")
+        processedTokenCount -= count
+        lastRound = nil
+    }
+
     /// Trim cache state and the shared logical timeline atomically.
     @discardableResult
     package func trim(_ count: Int) -> Int {
