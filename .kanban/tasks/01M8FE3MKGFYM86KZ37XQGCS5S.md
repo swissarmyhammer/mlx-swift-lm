@@ -70,8 +70,24 @@ comments:
     - evidence: swift build --build-tests clean (no warnings from sources; only a SwiftPM build-system "missing creator for mutated node" note, not from code). swift-format lint clean on all 6 changed files. xcrun xctest: MLXLMTests 1261 XCTest + 2788 Swift Testing passed, 0 failed (3 intentional withKnownIssue expectations in untouched AttentionKernelToleranceTests/ToolTests); MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 644 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed. 0 skipped.
     - next: review
   timestamp: 2026-11-27T22:14:47.031379+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8fh9cw7m8s5vyngmjna22dy
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (66df73a8): 0 findings (7 attempted, 0 confirmed, 1 refuted, 0 failed); 6 files reviewed, 2 .kanban files skipped (no validator). All 4 prior findings (2026-11-27 15:48) checked.
+    - next: none — task moved to done
+  timestamp: 2026-11-27T22:16:20.103199+00:00
+- actor: claude-code
+  id: 01m8fh9n5h8y7bk20bakxywsm4
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 6 files, all 4 findings checked
+    - test: green — all 5 bundles (MLXLMTests 2788+1261, MLXFoundationModelsTests 644, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 66df73a8
+    - review: clean — 0 findings
+  timestamp: 2026-11-27T22:16:28.593978+00:00
+position_column: done
+position_ordinal: ffffff8980
 title: 'Clustered models: bound the worker memory that kept RemoteKVCache entries hold in the prompt cache store'
 ---
 ## What
