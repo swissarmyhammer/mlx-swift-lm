@@ -24,8 +24,24 @@ comments:
     - evidence: swift build --build-tests clean (only the SwiftPM "missing creator for mutated node" build-system notice, no compiler warnings); xcrun xctest per bundle, all exit 0. MLXLMTests: Swift Testing 2788 tests / 279 suites passed, XCTest 1261 executed 0 failures. MLXFoundationModelsTests: 629 tests / 87 suites passed (the 6 new ExecutorPromptCacheRemoteEntryTests ran and passed). MLXGuidedGenerationTests: 96 tests / 23 suites passed. CXGrammarTests: 7 tests / 5 suites passed. MLXHuggingFaceMacrosTests: 11 XCTest executed 0 failures. swift-format lint on all 7 changed files exit 0. No skipped tests. Three pre-existing withKnownIssue records in MLXLMTests (ToolTests MiniCPM5 CDATA, AttentionKernelToleranceTests near tie) are in files this change does not touch.
     - next: review/commit
   timestamp: 2026-11-27T21:17:36.520641+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8fe23jrvapyc2288tey4zak
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (b15b6209): 0 findings (7 files attempted, 1 refuted, 0 failed; 2 .kanban files matched no validator)
+    - next: none — task moved to done
+  timestamp: 2026-11-27T21:19:55.480375+00:00
+- actor: claude-code
+  id: 01m8fe2dwy36qmacvcw0b86exs
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 7 files, 6 remote-entry store tests + 2 tier tests
+    - test: green — all 5 bundles (MLXLMTests 2788+1261, MLXFoundationModelsTests 629, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: b15b6209
+    - review: clean — 0 findings
+  timestamp: 2026-11-27T21:20:06.046877+00:00
+position_column: done
+position_ordinal: ffffff8880
 title: 'Clustered models: the prompt cache store drops a RemoteKVCache at every check-in, so each turn re-prefills'
 ---
 ## What
