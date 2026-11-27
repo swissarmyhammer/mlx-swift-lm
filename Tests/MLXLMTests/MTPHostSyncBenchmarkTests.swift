@@ -3,8 +3,8 @@
 import Foundation
 import MLX
 import MLXLMTestSupport
+import Synchronization
 import Testing
-import os
 
 @testable import MLXLLM
 @testable import MLXLMCommon
@@ -55,18 +55,21 @@ struct MTPHostSyncBenchmarkTests {
     }
 
     @Test("a floor every step reaches drafts the ungated chain on every path, timed")
+    @available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, *)
     func gatedChainsDraftTheUngatedChain() throws {
         let fixture = try Qwen35MTPFixture()
         var quiet: [ChainKind: (tokens: [Int], milliseconds: Double)] = [:]
         for kind in ChainKind.allCases {
             quiet[kind] = try Self.time(kind, fixture: fixture)
         }
-        let load = BusyLoad(threads: ProcessInfo.processInfo.activeProcessorCount)
         var loaded: [ChainKind: Double] = [:]
-        for kind in ChainKind.allCases {
-            loaded[kind] = try Self.time(kind, fixture: fixture).milliseconds
+        do {
+            let load = BusyLoad(threads: ProcessInfo.processInfo.activeProcessorCount)
+            defer { load.stop() }
+            for kind in ChainKind.allCases {
+                loaded[kind] = try Self.time(kind, fixture: fixture).milliseconds
+            }
         }
-        load.stop()
 
         let ungated = try #require(quiet[.ungated]).tokens
         #expect(ungated.count == Self.blockSize - 1)
@@ -174,22 +177,28 @@ struct MTPHostSyncBenchmarkTests {
 }
 
 /// Busy threads that keep every core of the host loaded until ``stop()``.
+///
+/// Each thread spins on a relaxed atomic load, which never leaves user space. Do not spin on a
+/// lock here: one thread per core contending one `os_unfair_lock` parks and wakes in the kernel
+/// (`__ulock_wait2` / `__ulock_wake`) without pause, and on a 32-core M5 that tripped the
+/// kernel's spinlock timeout and panicked the Mac (three panics, 2026-11-24 to 2026-11-26).
+@available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, *)
 private final class BusyLoad: Sendable {
 
     /// Whether the threads keep spinning.
-    private let running = OSAllocatedUnfairLock(initialState: true)
+    private let running = Atomic<Bool>(true)
 
     /// Starts `threads` spinning threads.
     init(threads: Int) {
         for _ in 0 ..< threads {
             Thread { [self] in
-                while running.withLock({ $0 }) {}
+                while running.load(ordering: .relaxed) {}
             }.start()
         }
     }
 
     /// Stops every thread.
     func stop() {
-        running.withLock { $0 = false }
+        running.store(false, ordering: .relaxed)
     }
 }
