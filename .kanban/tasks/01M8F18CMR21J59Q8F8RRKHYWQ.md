@@ -25,8 +25,24 @@ comments:
     - note: MLXLMTests reports 3 known issues, all deliberate withKnownIssue pins in untouched files (ToolTests.swift MiniCPM5 CDATA, 2 issues; AttentionKernelToleranceTests.swift near-tie, 1 issue), last changed in merge 99f1f242, not by this task.
     - next: review
   timestamp: 2026-11-27T20:42:13.747729+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8fc12eah7smyt8b10edwwz1
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (6468c3f0) — 0 findings (0 confirmed, 1 refuted, 7 attempted, 0 failed); 5 files reviewed, 4 .kanban files not matched by any validator; no prior Review Findings sections
+    - next: task moved to done
+  timestamp: 2026-11-27T20:44:24.394168+00:00
+- actor: claude-code
+  id: 01m8fc1f4td289vsz38vq17j07
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 5 files, 3 tests added in ClusterExecutorTests
+    - test: green — all 5 bundles (MLXLMTests 2788+1261, MLXGuidedGenerationTests 96, MLXFoundationModelsTests 621, CXGrammarTests 7, MLXHuggingFaceMacrosTests 21 suites)
+    - commit: 6468c3f0
+    - review: clean — 0 findings
+  timestamp: 2026-11-27T20:44:37.402436+00:00
+position_column: done
+position_ordinal: ffffff8780
 title: 'Clustered models: a generation whose forward fails returns its partial text instead of throwing the failure'
 ---
 ## What
