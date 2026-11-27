@@ -51,8 +51,12 @@ comments:
     - guard tests added (green on unchanged code): Tests/MLXLMTests/ArgMaxSamplerTieTests.swift, Tests/MLXGuidedGenerationTests/GuidedGreedyTieTests.swift; committed separately as test-only.
     - next (human decision): have the FoundationModelsCluster parity suite log each lane's free-running logits at each decision to find which moved (suspects: run-to-run GPU nondeterminism, prefill last-chunk path in free run vs recomputation, the closing/whitespace bias absent from teacher-forced rows), or close as not a sampler bug.
   timestamp: 2026-11-26T17:21:57.028853+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8ehvmg3q6m8ze0vfhs6qm6f
+  text: 'Closed by the user on 2026-11-27. This was not a sampler bug: ArgMaxSampler and the guided path already break exact ties toward the lowest token id, and the guard tests are in 4ab57005. The local and remote runs differed because their free-run logits differed, and the clustered output passes the check_logprobs_close parity bar. No further work.'
+  timestamp: 2026-11-27T13:07:03.299588+00:00
+position_column: done
+position_ordinal: ffffff8680
 title: Greedy argmax breaks exact bf16 ties differently on the local and remote paths
 ---
 Found by the FoundationModelsCluster parity suite (pne5cfr, 2026-11-25). Exact bf16 logit ties are common, and greedy decoding picks a different tied token depending on the path:
