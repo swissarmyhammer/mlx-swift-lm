@@ -747,14 +747,23 @@ actor ExecutorPromptCacheStore {
         }
     }
 
-    /// Releases the least recently used remote entries until
-    /// ``workerByteCount`` is at or below ``workerBudgetBytes``, and logs each
-    /// one. A released entry never goes to ``spill(_:_:)``: a prompt cache
-    /// file cannot hold it. The store drops its last reference, thus each of
-    /// its ``RemoteKVCache`` releases its caches on the worker. A local entry
-    /// never leaves here.
+    /// Whether the checked-in remote entries are over ``workerBudgetBytes``.
+    ///
+    /// A budget of zero or less keeps no remote entry, thus every remote
+    /// entry is over it, also one whose caches report zero bytes on the
+    /// workers. A positive budget is over when ``workerByteCount`` is past it.
+    private var isOverWorkerBudget: Bool {
+        workerBudgetBytes <= 0 || workerByteCount > workerBudgetBytes
+    }
+
+    /// Releases the least recently used remote entries until the store is no
+    /// longer over its worker budget (see ``isOverWorkerBudget``), and logs
+    /// each one. A released entry never goes to ``spill(_:_:)``: a prompt
+    /// cache file cannot hold it. The store drops its last reference, thus
+    /// each of its ``RemoteKVCache`` releases its caches on the worker. A local
+    /// entry never leaves here.
     private func releaseToWorkerBudget() {
-        while workerByteCount > workerBudgetBytes,
+        while isOverWorkerBudget,
             let oldest = entries.removeLeastRecentlyUsed(where: \.holdsRemoteCache)
         {
             ExecutorPromptCacheLog.info(

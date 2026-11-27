@@ -223,6 +223,16 @@ struct ExecutorPromptCacheWorkerBudgetTests: PromptCacheKeyFixtures, PromptCache
         #expect(fixture.releasedIDs == [cacheID])
     }
 
+    @Test("a zero worker budget releases a remote entry that reports zero worker bytes")
+    func aZeroWorkerBudgetReleasesAZeroByteRemoteEntry() async {
+        let fixture = RemoteCacheFixture(workerByteCount: 0)
+        let store = await Self.store(workerBudget: 0)
+
+        let cacheID = await Self.checkIn(Self.sessionKey(0), into: store, from: fixture)
+
+        #expect(fixture.releasedIDs == [cacheID])
+    }
+
     @Test("a smaller worker budget releases the remote entries over it at once")
     func aSmallerWorkerBudgetReleasesAtOnce() async {
         let fixture = RemoteCacheFixture(workerByteCount: Self.workerByteCount)

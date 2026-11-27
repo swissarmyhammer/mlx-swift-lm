@@ -38,6 +38,38 @@ comments:
     - note: MLXLMTests reports 3 known issues (withKnownIssue in AttentionKernelToleranceTests.swift and ToolTests.swift MiniCPM5 CDATA); neither file is in the working-tree diff, so they pre-exist and are not caused by this change.
     - next: review
   timestamp: 2026-11-27T21:47:36.646312+00:00
+- actor: claude-code
+  id: 01m8ffy0xwkwpebpxc1z9ckcx4
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (87017cea); 4 findings (4 confirmed, 7 refuted) — Libraries/MLXFoundationModels/ExecutorPromptCache.swift:729, Libraries/MLXFoundationModels/ExecutorPromptCacheStore.swift:383, Libraries/MLXLMCommon/PromptCacheCheckpoint.swift:122, Libraries/MLXLMCommon/Remote/RemoteKVCache.swift:210
+    - next: implement the four items in the 2026-11-27 15:48 Review Findings section, then re-review
+  timestamp: 2026-11-27T21:52:38.844833+00:00
+- actor: claude-code
+  id: 01m8ffygyap50bsg5m2rak1g38
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 10 files, 15 tests added
+    - test: green — all 5 bundles (MLXLMTests 2788+1261, MLXFoundationModelsTests 643, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 87017cea
+    - review: findings — ExecutorPromptCache.swift:729, ExecutorPromptCacheStore.swift:383, PromptCacheCheckpoint.swift:122, RemoteKVCache.swift:210
+  timestamp: 2026-11-27T21:52:55.242508+00:00
+- actor: claude-code
+  id: 01m8fgqbnmzz926ptgcncyf7r8
+  text: |-
+    ### implement — changed
+    - evidence: 6 files. ExecutorPromptCache.swift: private `byteCountLine(_:key:label:byteCount:)` now formats evictionLine, workerReleaseLine, diskEvictionLine and the shared prefix of spillLine (public names unchanged). ExecutorPromptCacheStore.swift: `isOverWorkerBudget` (budget <= 0 counts as over while any remote entry is checked in) drives releaseToWorkerBudget, so a zero budget also releases a remote entry that reports 0 worker bytes. PromptCacheCheckpoint.swift: `Saved.bytes(onWorker:)` and `Saved.bytes(of:onWorker:)` replace Saved.byteCount/workerByteCount and compute both checkpoint totals. RemoteKVCache.swift: `residentByteCount(onWorker:)` replaces localResidentByteCount/remoteResidentByteCount; callers in ExecutorPromptCacheEntry.swift and PromptCacheCheckpoint.swift updated (no other callers). Test: ExecutorPromptCacheRemoteEntryTests.swift "a zero worker budget releases a remote entry that reports zero worker bytes".
+    - TDD: RED seen (Expectation failed: fixture.releasedIDs == [cacheID]), then GREEN.
+    - swift build --build-tests clean (only the SwiftPM "missing creator for mutated node" notice). xcrun xctest: MLXLMTests 1261 XCT + 2788 ST, 0 failures (3 known issues are existing withKnownIssue); MLXFoundationModelsTests 644; MLXGuidedGenerationTests 96; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11. swift-format ran. All 4 findings checked. Not committed.
+    - next: /review
+  timestamp: 2026-11-27T22:06:29.044453+00:00
+- actor: claude-code
+  id: 01m8fh6hzqsfvzy7h1afxzwd7k
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (no warnings from sources; only a SwiftPM build-system "missing creator for mutated node" note, not from code). swift-format lint clean on all 6 changed files. xcrun xctest: MLXLMTests 1261 XCTest + 2788 Swift Testing passed, 0 failed (3 intentional withKnownIssue expectations in untouched AttentionKernelToleranceTests/ToolTests); MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 644 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed. 0 skipped.
+    - next: review
+  timestamp: 2026-11-27T22:14:47.031379+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Clustered models: bound the worker memory that kept RemoteKVCache entries hold in the prompt cache store'
@@ -55,3 +87,18 @@ Since ^xz9zxyp (b15b6209), ExecutorPromptCacheStore keeps a RemoteKVCache entry 
 - A single remote entry over the worker budget by itself is released at check-in.
 - Existing ExecutorPromptCacheRemoteEntryTests still pass; local spill behavior unchanged.
 #cluster
+
+## Review Findings (2026-11-27 15:48)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 10 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M8EPPVEJZWEPNS7MXRGZK56J.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8EPPVEJZWEPNS7MXRGZK56J.md` — no validator matches this file
+> - `.kanban/tasks/01M8FE3MKGFYM86KZ37XQGCS5S.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8FE3MKGFYM86KZ37XQGCS5S.md` — no validator matches this file
+
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:729` `reuse/reuse` — `workerReleaseLine` is a third copy of the same log-line formatter, `"prompt cache <verb> \(session(key)) <label>=\(bytes)"`, next to `evictionLine` (line 718) and `diskEvictionLine` (line 739). The near-match was extended by copying, not generalized, so the format now lives in three places. Add one private helper, e.g. `static func line(_ verb: String, key: ExecutorPromptCacheKey, label: String = "bytes", byteCount: Int) -> String`, and express the three report functions through it. Keep the public names so the call sites and tests do not change.
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCacheStore.swift:383` `completeness/public-output-contract` — The documented contract for a zero or negative worker budget does not hold for remote entries whose worker byte count is zero. The doc says a budget of zero or less keeps no remote entry, but the release loop only runs while `workerByteCount > workerBudgetBytes`. With a budget of 0, an entry reporting 0 worker bytes is never released, so it stays in memory and the caller's stated contract is broken. Either make the doc accurate, saying an entry with no worker bytes may stay, or make the release condition match the doc. For example, when `workerBudgetBytes <= 0`, release every remote entry regardless of its byte count. Add a test with a zero-byte remote entry and a zero budget.
+- [x] `Libraries/MLXLMCommon/PromptCacheCheckpoint.swift:122` `reuse/reuse` — `self.workerByteCount` repeats the `copies.reduce(0) { $0 + $1.<measure> }` pattern used for `byteCount` at line 120, so the two totals are built the same way in two places. Once `Saved` has a `bytes(onWorker:)` accessor (see the finding above), compute both totals through one `copies` helper that takes that measure.
+- [x] `Libraries/MLXLMCommon/Remote/RemoteKVCache.swift:210` `reuse/reuse` — `remoteResidentByteCount` is a copy of `localResidentByteCount` with the predicate inverted (`isRemote ? residentByteCount : 0` versus `isRemote ? 0 : residentByteCount`). Two accessors with the same shape now sit side by side, so a fix to one measure will not reach the other. One parameterized helper would give both. Add one helper, e.g. `package func residentByteCount(onWorker: Bool) -> Int { (isRemote == onWorker) ? residentByteCount : 0 }`, then define `localResidentByteCount` as `residentByteCount(onWorker: false)` and `remoteResidentByteCount` as `residentByteCount(onWorker: true)`. Or keep both names as thin wrappers over that helper.

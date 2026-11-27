@@ -143,11 +143,12 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         self.drafterState = drafterState
         self.holdsRemoteCache = caches.contains(where: \.isRemote)
         self.workerByteCount =
-            caches.reduce(0) { $0 + $1.remoteResidentByteCount }
+            caches.reduce(0) { $0 + $1.residentByteCount(onWorker: true) }
             + (checkpoint?.workerByteCount ?? 0)
         self.byteCount = max(
             minimumByteCount,
-            caches.reduce(0) { $0 + $1.localResidentByteCount } + (state?.residentByteCount ?? 0)
+            caches.reduce(0) { $0 + $1.residentByteCount(onWorker: false) }
+                + (state?.residentByteCount ?? 0)
                 + (checkpoint?.byteCount ?? 0) + (drafterState?.byteCount ?? 0))
     }
 

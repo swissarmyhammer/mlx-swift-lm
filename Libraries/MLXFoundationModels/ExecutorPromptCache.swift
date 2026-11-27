@@ -716,7 +716,7 @@ enum ExecutorPromptCacheReport {
     ///   - byteCount: the bytes the entry held in memory.
     /// - Returns: one line with the session and the bytes.
     static func evictionLine(key: ExecutorPromptCacheKey, byteCount: Int) -> String {
-        "prompt cache evict \(session(key)) bytes=\(byteCount)"
+        byteCountLine("evict", key: key, byteCount: byteCount)
     }
 
     /// The line that names a remote entry the store released for its worker
@@ -727,7 +727,7 @@ enum ExecutorPromptCacheReport {
     ///   - workerByteCount: the bytes the entry held on the workers.
     /// - Returns: one line with the session and the worker bytes.
     static func workerReleaseLine(key: ExecutorPromptCacheKey, workerByteCount: Int) -> String {
-        "prompt cache release \(session(key)) workerBytes=\(workerByteCount)"
+        byteCountLine("release", key: key, label: "workerBytes", byteCount: workerByteCount)
     }
 
     /// The line that names a file the store deleted for its disk budget.
@@ -737,7 +737,22 @@ enum ExecutorPromptCacheReport {
     ///   - byteCount: the size of the file.
     /// - Returns: one line with the session and the bytes.
     static func diskEvictionLine(key: ExecutorPromptCacheKey, byteCount: Int) -> String {
-        "prompt cache disk evict \(session(key)) bytes=\(byteCount)"
+        byteCountLine("disk evict", key: key, byteCount: byteCount)
+    }
+
+    /// The one format of the lines that name what the store removed from a
+    /// session and the bytes that left with it.
+    ///
+    /// - Parameters:
+    ///   - verb: what the store did, for example `evict`.
+    ///   - key: the session of the removed entry or file.
+    ///   - label: the name of the byte count in the line.
+    ///   - byteCount: the bytes that left.
+    /// - Returns: one line with the verb, the session and the bytes.
+    private static func byteCountLine(
+        _ verb: String, key: ExecutorPromptCacheKey, label: String = "bytes", byteCount: Int
+    ) -> String {
+        "prompt cache \(verb) \(session(key)) \(label)=\(byteCount)"
     }
 
     /// The line that names the end of one write of the spool.
@@ -753,8 +768,8 @@ enum ExecutorPromptCacheReport {
         key: ExecutorPromptCacheKey, byteCount: Int, duration: Duration,
         outcome: ExecutorPromptCacheSpillOutcome
     ) -> String {
-        "prompt cache spill \(session(key)) bytes=\(byteCount) seconds=\(seconds(duration)) "
-            + "result=\(outcome.description)"
+        byteCountLine("spill", key: key, byteCount: byteCount)
+            + " seconds=\(seconds(duration)) result=\(outcome.description)"
     }
 
     /// The line of a turn whose spilled cache did not read back. The turn

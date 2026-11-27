@@ -194,21 +194,18 @@ public final class RemoteKVCache: KVCache {
 
 extension KVCache {
 
-    /// The bytes the buffers of this cache hold in the memory of this process.
+    /// The bytes the buffers of this cache hold in one place: on its worker, or in the memory
+    /// of this process.
     ///
-    /// It is ``KVCache/residentByteCount`` for a local cache, and zero for a
-    /// ``RemoteKVCache``, whose buffers live on its worker: a budget of this process must not
-    /// count them.
-    package var localResidentByteCount: Int {
-        isRemote ? 0 : residentByteCount
-    }
-
-    /// The bytes the buffers of this cache hold on its worker.
+    /// It is ``KVCache/residentByteCount`` when the buffers live in that place, and zero
+    /// otherwise. The buffers of a ``RemoteKVCache`` live on its worker, and those of a local
+    /// cache in this process: a budget of one place must count only the bytes there.
     ///
-    /// It is ``KVCache/residentByteCount`` for a ``RemoteKVCache``, and zero for a local
-    /// cache: a budget of the worker memory must count only them.
-    package var remoteResidentByteCount: Int {
-        isRemote ? residentByteCount : 0
+    /// - Parameter onWorker: true for the bytes on the worker, false for the bytes of this
+    ///   process.
+    /// - Returns: the bytes this cache holds in that place.
+    package func residentByteCount(onWorker: Bool) -> Int {
+        isRemote == onWorker ? residentByteCount : 0
     }
 
     /// Whether this cache is a ``RemoteKVCache``, whose buffers live on its worker. A prompt

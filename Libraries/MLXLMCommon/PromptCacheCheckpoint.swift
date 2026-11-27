@@ -47,22 +47,29 @@ package struct PromptCacheCheckpoint {
         /// The raw tail of a variance-normalized cache.
         case tile(VarianceNormalizedKVCache.Checkpoint)
 
-        /// The bytes this layer holds in the memory of this process. A copy of a remote
-        /// cache lives on its worker, thus it counts none.
-        var byteCount: Int {
+        /// The bytes this layer holds in one place: on a worker, or in the memory of this
+        /// process. A copy of a remote cache lives on its worker; a copy of a local cache and
+        /// the tail of a tile live in this process.
+        ///
+        /// - Parameter onWorker: true for the bytes on a worker, false for the bytes of this
+        ///   process.
+        /// - Returns: the bytes this layer holds in that place.
+        func bytes(onWorker: Bool) -> Int {
             switch self {
             case .trim: 0
-            case .copy(let copy): copy.localResidentByteCount
-            case .tile(let checkpoint): checkpoint.retainedBytes
+            case .copy(let copy): copy.residentByteCount(onWorker: onWorker)
+            case .tile(let checkpoint): onWorker ? 0 : checkpoint.retainedBytes
             }
         }
 
-        /// The bytes this layer holds on a worker: those of a copy of a remote cache.
-        var workerByteCount: Int {
-            switch self {
-            case .trim, .tile: 0
-            case .copy(let copy): copy.remoteResidentByteCount
-            }
+        /// The sum of ``bytes(onWorker:)`` over `copies`.
+        ///
+        /// - Parameters:
+        ///   - copies: what a restore needs, one for each layer.
+        ///   - onWorker: true for the bytes on a worker, false for the bytes of this process.
+        /// - Returns: the bytes the layers hold in that place.
+        static func bytes(of copies: [Saved], onWorker: Bool) -> Int {
+            copies.reduce(0) { $0 + $1.bytes(onWorker: onWorker) }
         }
     }
 
@@ -117,9 +124,9 @@ package struct PromptCacheCheckpoint {
         self.state = state
         self.drafterContinuation = storedContinuation
         self.byteCount =
-            copies.reduce(0) { $0 + $1.byteCount }
+            Saved.bytes(of: copies, onWorker: false)
             + (state?.residentByteCount ?? 0) + (storedContinuation?.byteCount ?? 0)
-        self.workerByteCount = copies.reduce(0) { $0 + $1.workerByteCount }
+        self.workerByteCount = Saved.bytes(of: copies, onWorker: true)
     }
 
     /// A copy of the drafter continuation this checkpoint keeps, which a
