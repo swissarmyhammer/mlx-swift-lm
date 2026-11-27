@@ -123,8 +123,23 @@ struct ExecutorPromptCacheLRUTier<Record: ExecutorPromptCacheTierRecord> {
     mutating func removeLeastRecentlyUsed(
         whileOver budget: Int, where isEvictable: (Record) -> Bool = { _ in true }
     ) -> (key: ExecutorPromptCacheKey, record: Record)? {
-        guard byteCount > budget,
-            let oldest = usageOrder.first(where: { tier[$0].map(isEvictable) ?? false }),
+        guard byteCount > budget else { return nil }
+        return removeLeastRecentlyUsed(where: isEvictable)
+    }
+
+    /// Removes the least recently used record that `isEvictable` accepts, whatever the total.
+    /// The records it refuses keep their place in the usage order.
+    ///
+    /// A caller that applies a budget of its own measure calls this in a loop while its
+    /// measure exceeds the budget.
+    ///
+    /// - Parameter isEvictable: Tells if the caller may remove one record.
+    /// - Returns: The removed record and its session, or nil when the tier holds no record that
+    ///   `isEvictable` accepts.
+    mutating func removeLeastRecentlyUsed(
+        where isEvictable: (Record) -> Bool
+    ) -> (key: ExecutorPromptCacheKey, record: Record)? {
+        guard let oldest = usageOrder.first(where: { tier[$0].map(isEvictable) ?? false }),
             let record = remove(oldest)
         else { return nil }
         return (oldest, record)

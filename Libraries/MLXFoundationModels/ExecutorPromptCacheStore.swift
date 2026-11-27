@@ -26,11 +26,16 @@ import MLXLMCommon
 /// through ``spill(_:_:)``.
 ///
 /// The entry of a clustered model holds a ``RemoteKVCache``, whose buffers
-/// live on its worker. It counts no byte of the budget
-/// (``ExecutorPromptCacheEntry/byteCount``), and no eviction for the budget
-/// takes it: a prompt cache file cannot hold it, thus a spill would drop the
-/// only cache of a live session. It leaves the store only by a check-out, by
-/// a newer check-in of its session, or by a release that the host asks for.
+/// live on its worker. It counts no byte of the memory budget
+/// (``ExecutorPromptCacheEntry/byteCount``), and no eviction for that budget
+/// takes it: a prompt cache file cannot hold it, thus a spill would drop it.
+/// Its bytes on the workers (``ExecutorPromptCacheEntry/workerByteCount``)
+/// count against ``workerBudgetBytes`` instead. When a check-in takes their
+/// total past that budget, the least recently used remote entries are
+/// released, which frees their caches on the workers, and the next turn of
+/// each such session starts cold. Every checked-in remote entry can go: the
+/// entry of a live session, and the entry just checked in. Only an entry that
+/// a pass holds is safe, because a check-out takes it out of the store.
 ///
 /// An entry that leaves memory goes to one file in the spool folder of the
 /// store. It has three
@@ -107,12 +112,38 @@ actor ExecutorPromptCacheStore {
     private(set) lazy var diskBudgetBytes: Int = Self.defaultDiskBudgetBytes(
         availableCapacity: availableCapacity(ofVolumeOf: directory))
 
+    /// The worker budget the store takes when no host sets one: eight
+    /// gibibytes.
+    ///
+    /// This process cannot read the memory of a worker, and no cluster plan
+    /// in this package reserves bytes for the caches on one. The default thus
+    /// keeps a few long sessions warm, and leaves the rest of the worker to
+    /// its weights and to the caches of the passes that run. A host that knows
+    /// the reservation of its workers sets it with
+    /// ``configure(workerBudgetBytes:)``.
+    static let defaultWorkerBudgetBytes = 8 << 30
+
+    /// The most bytes the caches of the checked-in entries may hold on the
+    /// workers of a clustered model, measured by
+    /// ``ExecutorPromptCacheEntry/workerByteCount``.
+    ///
+    /// It is apart from ``memoryBudgetBytes``, which counts only the bytes of
+    /// this process. The host sets it with ``configure(workerBudgetBytes:)``;
+    /// when no host sets one, it is ``defaultWorkerBudgetBytes``.
+    private(set) var workerBudgetBytes = defaultWorkerBudgetBytes
+
     /// The checked-in entries, by session, least recently used first.
     private var entries = ExecutorPromptCacheLRUTier<ExecutorPromptCacheEntry>()
 
     /// The sum of ``ExecutorPromptCacheEntry/byteCount`` over the checked-in
     /// entries.
     var retainedByteCount: Int { entries.byteCount }
+
+    /// The sum of ``ExecutorPromptCacheEntry/workerByteCount`` over the
+    /// checked-in entries: the bytes their caches hold on the workers.
+    var workerByteCount: Int {
+        entries.keys.reduce(0) { $0 + (entries[$1]?.workerByteCount ?? 0) }
+    }
 
     /// How many sessions hold a cache. Read by tests.
     var retainedSessionCount: Int { entries.count }
@@ -344,6 +375,17 @@ actor ExecutorPromptCacheStore {
         evictToBudget()
     }
 
+    /// Sets the worker budget and applies it at once: the least recently used
+    /// remote entries are released until their worker bytes are at or below
+    /// `budget`. A larger budget releases nothing.
+    ///
+    /// - Parameter budget: the most bytes the caches of the entries may hold
+    ///   on the workers. Zero or less keeps no remote entry.
+    func configure(workerBudgetBytes budget: Int) {
+        workerBudgetBytes = budget
+        releaseToWorkerBudget()
+    }
+
     /// Sets the disk budget and applies it at once: the least recently used
     /// files are deleted until the known disk total is at or below `budget`.
     /// A larger budget deletes nothing.
@@ -490,7 +532,10 @@ actor ExecutorPromptCacheStore {
     /// After the insert, the least recently used entries leave until the
     /// total is at or below ``memoryBudgetBytes``. An entry larger than the
     /// whole budget is not kept in memory, and no other entry leaves for it.
-    /// An entry that holds a remote cache stays in memory whatever the budget.
+    /// An entry that holds a remote cache stays in memory whatever the memory
+    /// budget, and the least recently used remote entries are then released
+    /// until their worker bytes are at or below ``workerBudgetBytes``: the
+    /// entry just checked in, too, when it alone is over that budget.
     ///
     /// - Parameters:
     ///   - key: the session of the turn.
@@ -513,9 +558,9 @@ actor ExecutorPromptCacheStore {
     }
 
     /// Keeps `entry` under `key` as the most recently used entry, then applies the memory
-    /// budget. An entry larger than the whole budget goes to ``spill(_:_:)`` at once, and no
-    /// other entry leaves for it. An entry that holds a remote cache never goes to
-    /// ``spill(_:_:)``.
+    /// budget and the worker budget. An entry larger than the whole memory budget goes to
+    /// ``spill(_:_:)`` at once, and no other entry leaves for it. An entry that holds a remote
+    /// cache never goes to ``spill(_:_:)``: the worker budget alone can release it.
     ///
     /// - Parameters:
     ///   - entry: the entry.
@@ -527,6 +572,7 @@ actor ExecutorPromptCacheStore {
         }
         entries.insert(entry, for: key)
         evictToBudget()
+        releaseToWorkerBudget()
     }
 
     // MARK: - Copy of a session
@@ -698,6 +744,22 @@ actor ExecutorPromptCacheStore {
             whileOver: memoryBudgetBytes, where: { !$0.holdsRemoteCache })
         {
             spill(oldest.key, oldest.record)
+        }
+    }
+
+    /// Releases the least recently used remote entries until
+    /// ``workerByteCount`` is at or below ``workerBudgetBytes``, and logs each
+    /// one. A released entry never goes to ``spill(_:_:)``: a prompt cache
+    /// file cannot hold it. The store drops its last reference, thus each of
+    /// its ``RemoteKVCache`` releases its caches on the worker. A local entry
+    /// never leaves here.
+    private func releaseToWorkerBudget() {
+        while workerByteCount > workerBudgetBytes,
+            let oldest = entries.removeLeastRecentlyUsed(where: \.holdsRemoteCache)
+        {
+            ExecutorPromptCacheLog.info(
+                ExecutorPromptCacheReport.workerReleaseLine(
+                    key: oldest.key, workerByteCount: oldest.record.workerByteCount))
         }
     }
 

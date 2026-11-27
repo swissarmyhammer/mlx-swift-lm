@@ -719,6 +719,17 @@ enum ExecutorPromptCacheReport {
         "prompt cache evict \(session(key)) bytes=\(byteCount)"
     }
 
+    /// The line that names a remote entry the store released for its worker
+    /// budget, which frees its caches on the workers.
+    ///
+    /// - Parameters:
+    ///   - key: the session of the released entry.
+    ///   - workerByteCount: the bytes the entry held on the workers.
+    /// - Returns: one line with the session and the worker bytes.
+    static func workerReleaseLine(key: ExecutorPromptCacheKey, workerByteCount: Int) -> String {
+        "prompt cache release \(session(key)) workerBytes=\(workerByteCount)"
+    }
+
     /// The line that names a file the store deleted for its disk budget.
     ///
     /// - Parameters:

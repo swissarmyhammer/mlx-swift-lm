@@ -203,6 +203,14 @@ extension KVCache {
         isRemote ? 0 : residentByteCount
     }
 
+    /// The bytes the buffers of this cache hold on its worker.
+    ///
+    /// It is ``KVCache/residentByteCount`` for a ``RemoteKVCache``, and zero for a local
+    /// cache: a budget of the worker memory must count only them.
+    package var remoteResidentByteCount: Int {
+        isRemote ? residentByteCount : 0
+    }
+
     /// Whether this cache is a ``RemoteKVCache``, whose buffers live on its worker. A prompt
     /// cache file cannot hold it.
     package var isRemote: Bool {

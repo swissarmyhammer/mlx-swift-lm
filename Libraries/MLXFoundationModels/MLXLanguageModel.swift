@@ -396,6 +396,26 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await ExecutorPromptCacheStore.current.configure(memoryBudgetBytes: memoryBudgetBytes)
     }
 
+    /// Sets the worker budget of the shared prompt cache, in bytes: the most
+    /// bytes the kept caches of a clustered model may hold on its workers.
+    /// Past the budget, the least recently used of those caches are released,
+    /// which frees them on the workers, and the next turn of each such session
+    /// starts cold. A cache on a worker never goes to the disk spool.
+    ///
+    /// The budget applies at once: a smaller budget releases caches before
+    /// this call returns. A larger budget releases nothing. The memory budget
+    /// does not count these bytes, and this budget counts no local byte.
+    ///
+    /// When the host sets no budget, the cache takes eight gibibytes. A host
+    /// whose cluster plan reserves bytes for the caches on each worker sets
+    /// that reservation here.
+    ///
+    /// - Parameter workerBudgetBytes: the most bytes the kept caches may hold
+    ///   on the workers. Zero or less keeps no cache on a worker between turns.
+    public static func configurePromptCache(workerBudgetBytes: Int) async {
+        await ExecutorPromptCacheStore.current.configure(workerBudgetBytes: workerBudgetBytes)
+    }
+
     /// Sets the disk budget of the spool, in bytes.
     ///
     /// The budget applies at once: a smaller budget deletes the least recently

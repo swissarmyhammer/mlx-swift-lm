@@ -56,6 +56,14 @@ package struct PromptCacheCheckpoint {
             case .tile(let checkpoint): checkpoint.retainedBytes
             }
         }
+
+        /// The bytes this layer holds on a worker: those of a copy of a remote cache.
+        var workerByteCount: Int {
+            switch self {
+            case .trim, .tile: 0
+            case .copy(let copy): copy.remoteResidentByteCount
+            }
+        }
     }
 
     /// For each layer, what a restore needs.
@@ -72,6 +80,10 @@ package struct PromptCacheCheckpoint {
     /// The bytes the copies, `state` and the drafter continuation hold in the
     /// memory of this process.
     package let byteCount: Int
+
+    /// The bytes the copies of remote caches hold on their worker. A copy of a remote cache
+    /// is a cache of its own there, beside the live cache it was taken from.
+    package let workerByteCount: Int
 
     /// Takes a checkpoint of `caches`, which represent `tokens`.
     ///
@@ -107,6 +119,7 @@ package struct PromptCacheCheckpoint {
         self.byteCount =
             copies.reduce(0) { $0 + $1.byteCount }
             + (state?.residentByteCount ?? 0) + (storedContinuation?.byteCount ?? 0)
+        self.workerByteCount = copies.reduce(0) { $0 + $1.workerByteCount }
     }
 
     /// A copy of the drafter continuation this checkpoint keeps, which a

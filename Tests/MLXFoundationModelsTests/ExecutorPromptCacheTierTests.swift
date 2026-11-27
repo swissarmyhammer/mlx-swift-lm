@@ -131,6 +131,22 @@ struct ExecutorPromptCacheTierTests: PromptCacheKeyFixtures {
 
         #expect(tier.removeLeastRecentlyUsed(whileOver: 0, where: { _ in false }) == nil)
     }
+
+    @Test("an LRU tier gives up the oldest record a filter accepts, whatever its total")
+    func anLRUTierGivesUpTheOldestAcceptedRecordWhateverItsTotal() {
+        var tier = lruTierOfTwo()
+
+        let removed = tier.removeLeastRecentlyUsed(where: { $0.byteCount != Self.firstByteCount })
+
+        #expect(removed?.key == key("second"))
+    }
+
+    @Test("an LRU tier whose filter refuses every record gives up nothing")
+    func anLRUTierWhoseFilterRefusesEveryRecordGivesUpNothing() {
+        var tier = lruTierOfTwo()
+
+        #expect(tier.removeLeastRecentlyUsed(where: { _ in false }) == nil)
+    }
 }
 
 #endif

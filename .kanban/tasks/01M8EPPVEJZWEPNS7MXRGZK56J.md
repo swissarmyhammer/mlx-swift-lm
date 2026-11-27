@@ -1,6 +1,6 @@
 ---
 position_column: todo
-position_ordinal: 8f80
+position_ordinal: '9180'
 title: 'Clustered models: support speculative decoding with the MTP drafter (Qwen MTP, Inkling DSpark)'
 ---
 ## What

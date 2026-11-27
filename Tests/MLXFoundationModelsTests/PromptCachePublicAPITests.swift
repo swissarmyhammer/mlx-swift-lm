@@ -209,6 +209,19 @@ struct PromptCachePublicAPITests: PromptCacheSpoolFixtures, PromptCacheKeyFixtur
         #expect(try Self.fileNames(in: directory).isEmpty)
     }
 
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("the host sets the worker budget of the remote entries")
+    func theHostSetsTheWorkerBudget() async {
+        let store = await Self.store(in: Self.temporaryDirectory())
+        let budget = Self.sessionCount * Self.entry().byteCount
+
+        await ExecutorPromptCacheStore.$current.withValue(store) {
+            await MLXLanguageModel.configurePromptCache(workerBudgetBytes: budget)
+        }
+
+        #expect(await store.workerBudgetBytes == budget)
+    }
+
     // MARK: - Usage
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
