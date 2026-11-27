@@ -1,6 +1,31 @@
 ---
-position_column: todo
-position_ordinal: '8f80'
+comments:
+- actor: claude-code
+  id: 01m8fc7wj2myd2fgx8q7sw6zdt
+  text: 'Research: ExecutorPromptCacheEntry.byteCount sums residentByteCount over caches plus checkpoint.byteCount; for a RemoteKVCache both are worker bytes (RemoteCacheStatus.residentByteCount, and a checkpoint of a remote cache is a remote copy). keepInMemory sends an over-budget entry to spill(); spill() calls ExecutorPromptCacheFile.prepare, which throws for RemoteKVCache (no serializedClassName), so the entry is dropped. evictToBudget (ExecutorPromptCacheLRUTier.removeLeastRecentlyUsed) also picks the LRU entry whatever it holds. Plan: (1) package `KVCache.localResidentByteCount` in MLXLMCommon (0 for RemoteKVCache) used by the entry and by PromptCacheCheckpoint; (2) entry.holdsRemoteCache; (3) the budget eviction never picks an entry that holds a remote cache (LRU tier gets an `isEvictable` predicate; disk tier keeps its default), and keepInMemory keeps a remote entry whatever the budget; spill() thus never sees one and never prepares it. A remote entry leaves only by check-out, a newer check-in, or a release the host asks for (evict/remove), which drops the RemoteKVCache and its deinit frees the worker caches. Tests build a real RemoteKVCache over a stub RemoteModelTransport via @testable import MLXLMCommon (RemoteModelSession init is internal).'
+  timestamp: 2026-11-27T20:48:07.746131+00:00
+- actor: claude-code
+  id: 01m8fde7cpqrkkk9zydqjy82p5
+  text: |-
+    Implementation landed (TDD). RED: 5 new store tests in ExecutorPromptCacheRemoteEntryTests failed for the expected reasons (entry.byteCount = 1 GiB worker bytes; checkpoint.byteCount = worker bytes; remote entry gone after check-in / zero budget / LRU eviction). One guard test (local entry behind a remote entry still spills) passed before and after by design, to pin the local budget behavior. GREEN after the fix.
+
+    Interpretation recorded: "never drops the only entry of a live session" + "spilling a remote cache means dropping it, only when no session holds it" are implemented as: the budget eviction never takes an entry that holds a RemoteKVCache (keepInMemory keeps it whatever the budget; evictToBudget passes over it via a new `where:` predicate on ExecutorPromptCacheLRUTier.removeLeastRecentlyUsed). So spill() never receives a remote entry and ExecutorPromptCacheFile.prepare is never called for one. A remote entry leaves only by check-out, a newer check-in, or a host release (evict/remove), whose drop runs RemoteKVCache.deinit and frees the worker caches. Local entries keep the old budget/spill behavior unchanged; the disk tier uses the default predicate.
+
+    Discovery: a checkpoint of a remote cache (canLoseRewind) is a remote copy, and PromptCacheCheckpoint.byteCount counted its worker bytes too; fixed via a package `KVCache.localResidentByteCount` (0 for RemoteKVCache) in MLXLMCommon. Note: worker-side cache memory is now bounded only by the cluster plan / host releases, not by the store (as the card states).
+
+    ### implement — changed
+    - evidence: swift build --build-tests clean (0 warnings); xctest all five bundles: MLXLMTests 2788 Swift Testing + 1261 XCTest pass (3 pre-existing known issues), MLXFoundationModelsTests 629 pass, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11 pass. Files: Libraries/MLXLMCommon/Remote/RemoteKVCache.swift, Libraries/MLXLMCommon/PromptCacheCheckpoint.swift, Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift, Libraries/MLXFoundationModels/ExecutorPromptCacheStore.swift, Libraries/MLXFoundationModels/ExecutorPromptCacheTier.swift, Tests/MLXFoundationModelsTests/ExecutorPromptCacheRemoteEntryTests.swift (new, 6 tests), Tests/MLXFoundationModelsTests/ExecutorPromptCacheTierTests.swift (+2 tests). swift-format run.
+    - next: /review
+  timestamp: 2026-11-27T21:09:04.022043+00:00
+- actor: claude-code
+  id: 01m8fdxvw8s8627cz4ssfben4r
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (only the SwiftPM "missing creator for mutated node" build-system notice, no compiler warnings); xcrun xctest per bundle, all exit 0. MLXLMTests: Swift Testing 2788 tests / 279 suites passed, XCTest 1261 executed 0 failures. MLXFoundationModelsTests: 629 tests / 87 suites passed (the 6 new ExecutorPromptCacheRemoteEntryTests ran and passed). MLXGuidedGenerationTests: 96 tests / 23 suites passed. CXGrammarTests: 7 tests / 5 suites passed. MLXHuggingFaceMacrosTests: 11 XCTest executed 0 failures. swift-format lint on all 7 changed files exit 0. No skipped tests. Three pre-existing withKnownIssue records in MLXLMTests (ToolTests MiniCPM5 CDATA, AttentionKernelToleranceTests near tie) are in files this change does not touch.
+    - next: review/commit
+  timestamp: 2026-11-27T21:17:36.520641+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Clustered models: the prompt cache store drops a RemoteKVCache at every check-in, so each turn re-prefills'
 ---
 ## What

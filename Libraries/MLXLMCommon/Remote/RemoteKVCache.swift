@@ -192,6 +192,24 @@ public final class RemoteKVCache: KVCache {
     public func innerState() -> [MLXArray] { [] }
 }
 
+extension KVCache {
+
+    /// The bytes the buffers of this cache hold in the memory of this process.
+    ///
+    /// It is ``KVCache/residentByteCount`` for a local cache, and zero for a
+    /// ``RemoteKVCache``, whose buffers live on its worker: a budget of this process must not
+    /// count them.
+    package var localResidentByteCount: Int {
+        isRemote ? 0 : residentByteCount
+    }
+
+    /// Whether this cache is a ``RemoteKVCache``, whose buffers live on its worker. A prompt
+    /// cache file cannot hold it.
+    package var isRemote: Bool {
+        self is RemoteKVCache
+    }
+}
+
 extension RemoteModelReply {
 
     /// The status of a ``RemoteModelReply/cache(_:)`` reply.

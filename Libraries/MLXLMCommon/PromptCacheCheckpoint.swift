@@ -47,11 +47,12 @@ package struct PromptCacheCheckpoint {
         /// The raw tail of a variance-normalized cache.
         case tile(VarianceNormalizedKVCache.Checkpoint)
 
-        /// The bytes this layer holds in memory.
+        /// The bytes this layer holds in the memory of this process. A copy of a remote
+        /// cache lives on its worker, thus it counts none.
         var byteCount: Int {
             switch self {
             case .trim: 0
-            case .copy(let copy): copy.residentByteCount
+            case .copy(let copy): copy.localResidentByteCount
             case .tile(let checkpoint): checkpoint.retainedBytes
             }
         }
@@ -68,8 +69,8 @@ package struct PromptCacheCheckpoint {
     /// none or gave one that does not end at the checkpoint.
     package let drafterContinuation: MTPDrafterContinuation?
 
-    /// The bytes the copies, `state` and the drafter continuation hold in
-    /// memory.
+    /// The bytes the copies, `state` and the drafter continuation hold in the
+    /// memory of this process.
     package let byteCount: Int
 
     /// Takes a checkpoint of `caches`, which represent `tokens`.

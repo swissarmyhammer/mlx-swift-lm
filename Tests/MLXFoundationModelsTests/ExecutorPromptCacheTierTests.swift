@@ -114,6 +114,23 @@ struct ExecutorPromptCacheTierTests: PromptCacheKeyFixtures {
 
         #expect(evicted?.key == key("second"))
     }
+
+    @Test("an LRU tier over its budget passes over a record the eviction refuses")
+    func anLRUTierPassesOverARefusedRecord() {
+        var tier = lruTierOfTwo()
+
+        let evicted = tier.removeLeastRecentlyUsed(
+            whileOver: Self.budget, where: { $0.byteCount != Self.firstByteCount })
+
+        #expect(evicted?.key == key("second"))
+    }
+
+    @Test("an LRU tier whose eviction refuses every record gives up nothing")
+    func anLRUTierWhoseEvictionRefusesEveryRecordGivesUpNothing() {
+        var tier = lruTierOfTwo()
+
+        #expect(tier.removeLeastRecentlyUsed(whileOver: 0, where: { _ in false }) == nil)
+    }
 }
 
 #endif

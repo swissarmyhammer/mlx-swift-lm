@@ -80,9 +80,13 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// reads it.
     let drafterState: MTPDrafterContinuation?
 
-    /// The bytes this entry holds in memory: the resident bytes of every
-    /// cache, plus the arrays of `state`, plus the bytes of `checkpoint`,
-    /// plus the bytes of `drafterState`.
+    /// The bytes this entry holds in the memory of this process: the resident
+    /// bytes of every local cache, plus the arrays of `state`, plus the bytes
+    /// of `checkpoint`, plus the bytes of `drafterState`.
+    ///
+    /// A ``RemoteKVCache`` counts no byte here: its buffers live on its worker,
+    /// and the cluster plan reserves them there. The memory budget of the store
+    /// thus does not apply to them.
     ///
     /// The count reads only shapes and element types, thus it evaluates
     /// nothing. It is computed one time, when the entry is made, because the
@@ -90,6 +94,13 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// the drafter state are in the count, thus the memory budget of the
     /// store controls them too.
     let byteCount: Int
+
+    /// Whether a cache of this entry is a ``RemoteKVCache``.
+    ///
+    /// A prompt cache file cannot hold such a cache, thus a spill of the entry
+    /// would drop it, and the next turn of its session would start cold. The
+    /// store never spills such an entry for its budget.
+    let holdsRemoteCache: Bool
 
     /// Creates an entry for caches that hold `tokens`.
     ///
@@ -121,9 +132,10 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         self.state = state
         self.checkpoint = checkpoint
         self.drafterState = drafterState
+        self.holdsRemoteCache = caches.contains(where: \.isRemote)
         self.byteCount = max(
             minimumByteCount,
-            caches.reduce(0) { $0 + $1.residentByteCount } + (state?.residentByteCount ?? 0)
+            caches.reduce(0) { $0 + $1.localResidentByteCount } + (state?.residentByteCount ?? 0)
                 + (checkpoint?.byteCount ?? 0) + (drafterState?.byteCount ?? 0))
     }
 

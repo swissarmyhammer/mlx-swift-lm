@@ -25,6 +25,13 @@ import MLXLMCommon
 /// total past the budget, the least recently used entries leave first, each
 /// through ``spill(_:_:)``.
 ///
+/// The entry of a clustered model holds a ``RemoteKVCache``, whose buffers
+/// live on its worker. It counts no byte of the budget
+/// (``ExecutorPromptCacheEntry/byteCount``), and no eviction for the budget
+/// takes it: a prompt cache file cannot hold it, thus a spill would drop the
+/// only cache of a live session. It leaves the store only by a check-out, by
+/// a newer check-in of its session, or by a release that the host asks for.
+///
 /// An entry that leaves memory goes to one file in the spool folder of the
 /// store. It has three
 /// states: in memory, spilling (its write has not ended) and on disk. Each
@@ -331,7 +338,7 @@ actor ExecutorPromptCacheStore {
     /// removes nothing.
     ///
     /// - Parameter budget: the most bytes the entries may hold. Zero or less
-    ///   keeps no entry in memory.
+    ///   keeps no entry in memory but the entries that hold a remote cache.
     func configure(memoryBudgetBytes budget: Int) {
         memoryBudgetBytes = budget
         evictToBudget()
@@ -483,6 +490,7 @@ actor ExecutorPromptCacheStore {
     /// After the insert, the least recently used entries leave until the
     /// total is at or below ``memoryBudgetBytes``. An entry larger than the
     /// whole budget is not kept in memory, and no other entry leaves for it.
+    /// An entry that holds a remote cache stays in memory whatever the budget.
     ///
     /// - Parameters:
     ///   - key: the session of the turn.
@@ -506,13 +514,14 @@ actor ExecutorPromptCacheStore {
 
     /// Keeps `entry` under `key` as the most recently used entry, then applies the memory
     /// budget. An entry larger than the whole budget goes to ``spill(_:_:)`` at once, and no
-    /// other entry leaves for it.
+    /// other entry leaves for it. An entry that holds a remote cache never goes to
+    /// ``spill(_:_:)``.
     ///
     /// - Parameters:
     ///   - entry: the entry.
     ///   - key: the session of the entry. The store holds nothing for it on any tier.
     private func keepInMemory(_ entry: ExecutorPromptCacheEntry, for key: ExecutorPromptCacheKey) {
-        guard entry.byteCount <= memoryBudgetBytes else {
+        guard entry.holdsRemoteCache || entry.byteCount <= memoryBudgetBytes else {
             spill(key, entry)
             return
         }
@@ -681,9 +690,13 @@ actor ExecutorPromptCacheStore {
     }
 
     /// Removes the least recently used entries until the total is at or below
-    /// ``memoryBudgetBytes``, and gives each one to ``spill(_:_:)``.
+    /// ``memoryBudgetBytes``, and gives each one to ``spill(_:_:)``. An entry
+    /// that holds a remote cache never leaves: a spill would drop it, and it
+    /// frees no byte of this process.
     private func evictToBudget() {
-        while let oldest = entries.removeLeastRecentlyUsed(whileOver: memoryBudgetBytes) {
+        while let oldest = entries.removeLeastRecentlyUsed(
+            whileOver: memoryBudgetBytes, where: { !$0.holdsRemoteCache })
+        {
             spill(oldest.key, oldest.record)
         }
     }
@@ -757,7 +770,9 @@ actor ExecutorPromptCacheStore {
     ///
     /// - Parameters:
     ///   - key: the session of the entry.
-    ///   - entry: the entry that leaves memory.
+    ///   - entry: the entry that leaves memory. It holds no remote cache: a
+    ///     prompt cache file cannot hold one, thus ``keepInMemory(_:for:)``
+    ///     and ``evictToBudget()`` never give one here.
     private func spill(_ key: ExecutorPromptCacheKey, _ entry: ExecutorPromptCacheEntry) {
         ExecutorPromptCacheLog.info(
             ExecutorPromptCacheReport.evictionLine(key: key, byteCount: entry.byteCount))
