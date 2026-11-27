@@ -53,8 +53,24 @@ comments:
     - evidence: swift build --build-tests exit 0, zero warnings (only the known "missing creator" line). xcrun xctest on all five bundles, all exit 0: MLXLMTests XCTest 1261 tests 0 failures + Swift Testing 2788 tests/279 suites passed (3 known issues, expected withKnownIssue); MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 618 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests XCTest 11 tests 0 failures. No skips, no code changes.
     - next: review/commit
   timestamp: 2026-11-27T05:28:03.600135+00:00
-position_column: doing
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m8dqnk1ntjhjcskbqwkfsafk
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (4fc41044): 0 findings (attempted 7, failed 0); not reviewed (no validator matched): .kanban/tasks/01M8D4QX30QH3NBNTACVWWF7JM.jsonl, .kanban/tasks/01M8D4QX30QH3NBNTACVWWF7JM.md, Libraries/MLXLMCommon/Documentation.docc/distributed-inference.md
+    - next: none; task moved to done
+  timestamp: 2026-11-27T05:29:22.229480+00:00
+- actor: claude-code
+  id: 01m8dqnyp05gv93vbyyfqnb1rw
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 4 files. The design was reworked to `lostMember: String?` at the Cluster session's request.
+    - test: green — all 5 bundles: MLXLMTests 1261 XCTest + 2788 Swift Testing, Guided 96, FM 618, CXGrammar 7, Macros 11
+    - commit: 4fc41044
+    - review: clean — 0 findings
+  timestamp: 2026-11-27T05:29:34.144425+00:00
+position_column: done
+position_ordinal: ffffff8580
 title: A lost cluster member surfaces as a typed ClusterModelError, not transportFailed(String)
 ---
 ## What
