@@ -191,6 +191,70 @@ struct ClusterExecutorTests {
                 == String(describing: ClusterModelError.unsupported(.speculativeDecoding)))
     }
 
+    /// The forwards a worker runs before it loses a member: the prompt and a few decode steps,
+    /// thus the loss strikes in the middle of the answer.
+    private static let forwardsBeforeLoss = 8
+
+    /// The member the worker loses.
+    private static let lostMember = "m5u2.local"
+
+    /// A session of a clustered model whose worker loses ``lostMember`` after
+    /// ``forwardsBeforeLoss`` forwards, and the text of ``prompt``.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func makeSessionThatLosesAMember(weights: URL) throws -> (
+        session: LanguageModelSession, prompt: String
+    ) {
+        let fixture = try Qwen35MTPFixture()
+        let (model, worker) = try fixture.makeClusteredLanguageModel(weights: weights)
+        worker.failForwards(
+            after: forwardsBeforeLoss, with: InProcessMemberLoss(lostMember: lostMember))
+        let session = LanguageModelSession(model: model, instructions: instructions)
+        return (session, fixture.text(for: prompt))
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aResponseWhoseForwardLosesAMemberThrowsTheLoss() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let (session, prompt) = try Self.makeSessionThatLosesAMember(weights: weights)
+
+        await #expect(throws: ClusterModelError.memberLost(Self.lostMember)) {
+            _ = try await session.respond(to: prompt, options: Self.greedy)
+        }
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aStreamWhoseForwardLosesAMemberThrowsTheLossAfterItsSnapshots() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let (session, prompt) = try Self.makeSessionThatLosesAMember(weights: weights)
+        var snapshotCount = 0
+
+        await #expect(throws: ClusterModelError.memberLost(Self.lostMember)) {
+            for try await _ in session.streamResponse(to: prompt, options: Self.greedy) {
+                snapshotCount += 1
+            }
+        }
+        #expect(snapshotCount > 0)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aGenerationCancelledByALostMemberThrowsTheLoss() async throws {
+        let worker = try Qwen35MTPFixture().makeWorker()
+        let model = try ClusterLanguageModel.connect(over: worker)
+        worker.failOps(after: 0, with: InProcessMemberLoss(lostMember: Self.lostMember))
+        _ = try? model.newCache(parameters: nil)
+
+        await #expect(throws: ClusterModelError.memberLost(Self.lostMember)) {
+            try await MLXLanguageModel.Executor.reportingClusterFailure(of: model) {
+                throw CancellationError()
+            }
+        }
+    }
+
     /// What one guided pass streamed, and the tokens its decoder sampled.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private struct GuidedTurn {

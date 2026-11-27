@@ -246,6 +246,14 @@ final class RemoteModelSession: @unchecked Sendable {
         lock.withLock { failure != nil }
     }
 
+    /// Throws the failure of the session, if any: the first failed op, or
+    /// ``ClusterModelError/closed`` after ``close()``.
+    ///
+    /// - Throws: The failure, which every later op throws too.
+    func checkFailure() throws {
+        if let failure = lock.withLock({ failure }) { throw failure }
+    }
+
     /// Sends `op` and expects ``RemoteModelReply/done``. The caller holds ``lock``.
     private func expectDone(_ op: RemoteModelOp) throws {
         let reply = try send(op)

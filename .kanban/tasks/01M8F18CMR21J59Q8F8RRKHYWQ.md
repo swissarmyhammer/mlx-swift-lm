@@ -1,6 +1,32 @@
 ---
-position_column: todo
-position_ordinal: '9080'
+comments:
+- actor: claude-code
+  id: 01m8fb20x4f4k4rrx3zm7pmtq5
+  text: |-
+    Research + implementation notes:
+    - Chokepoint: every generation path (text, reasoning, allowed/required tool, schema) runs inside `container.perform` in `MLXLanguageModel.Executor.runRespond` via `dispatchGeneration`. The fix wraps that call in a new `Executor.reportingClusterFailure(of:_:)`, which calls the new public `ClusterLanguageModel.checkFailure()` (backed by `RemoteModelSession.checkFailure()`) after the generation ends, and also in place of an error the generation threw (a guided pass the failed forward cancelled throws `CancellationError`). The outer catch of runRespond passes a non-GrammarError through unchanged, and LanguageModelSession.respond/streamResponse surface it unwrapped: the session-level tests assert `ClusterModelError.memberLost(...)` by value and type (coordinator requirement).
+    - Test support: `InProcessRemoteModelWorker.failForwards(after:with:)` fails only forward ops after N forwards (the existing `failOps(after:)` counts every op).
+    - Discovery, filed as a new task: a guided (schema / required-tool) pass whose cluster forward fails hangs 60 s (`GenerationDrainCoordinator.quiescenceTimeout`): the forward cancels the respond task itself, whose cancel handler waits on the section that same thread holds. Measured: schema turn failed after 60.103 s. Because of that, the catch branch of the helper is unit-tested directly (`aGenerationCancelledByALostMemberThrowsTheLoss`) rather than through a 60 s guided turn.
+    - Not done here (needs the 2-Mac setup): FoundationModelsRouter IntegrationTests `lostMemberFallsBackToThisMac` on m5u1+m5u2.
+  timestamp: 2026-11-27T20:27:27.012062+00:00
+- actor: claude-code
+  id: 01m8fbbbp25x8mpqvqksm7cscg
+  text: |-
+    ### implement — changed
+    - evidence: 5 files — Libraries/MLXLMCommon/Remote/ClusterLanguageModel.swift (public `checkFailure()`), Libraries/MLXLMCommon/Remote/RemoteModelTransport.swift (`RemoteModelSession.checkFailure()`), Libraries/MLXFoundationModels/MLXLanguageModel.swift (`Executor.reportingClusterFailure(of:_:)` around `dispatchGeneration`), Tests/MLXLMTestSupport/InProcessRemoteModelWorker.swift (`failForwards(after:with:)`), Tests/MLXFoundationModelsTests/ClusterExecutorTests.swift (3 tests: aResponseWhoseForwardLosesAMemberThrowsTheLoss, aStreamWhoseForwardLosesAMemberThrowsTheLossAfterItsSnapshots, aGenerationCancelledByALostMemberThrowsTheLoss; each watched RED first). Full bundles: MLXLMTests 2788 Swift Testing + 1261 XCTest passed (3 pre-existing known issues, unrelated); MLXFoundationModelsTests 621 passed. swift-format run on the changed files.
+    - open: FoundationModelsRouter `lostMemberFallsBackToThisMac` on the 2-Mac setup is still to run (needs m5u1+m5u2). Guided-path 60 s hang filed as ^axrb0cw.
+    - next: /review
+  timestamp: 2026-11-27T20:32:32.962973+00:00
+- actor: claude-code
+  id: 01m8fbx2vkvf4r7mcqbkr4cgn4
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (no warnings from project sources); swift-format lint on the 5 changed files clean; xcrun xctest, all exit 0: MLXLMTests 2788 Swift Testing tests / 279 suites + 1261 XCTest, 0 failures; MLXGuidedGenerationTests 96 tests; MLXFoundationModelsTests 621 tests; CXGrammarTests 7 tests; MLXHuggingFaceMacrosTests 7+3+11 XCTest suites, 0 failures. No skips.
+    - note: MLXLMTests reports 3 known issues, all deliberate withKnownIssue pins in untouched files (ToolTests.swift MiniCPM5 CDATA, 2 issues; AttentionKernelToleranceTests.swift near-tie, 1 issue), last changed in merge 99f1f242, not by this task.
+    - next: review
+  timestamp: 2026-11-27T20:42:13.747729+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Clustered models: a generation whose forward fails returns its partial text instead of throwing the failure'
 ---
 ## What

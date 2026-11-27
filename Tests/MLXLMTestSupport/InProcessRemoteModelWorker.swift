@@ -62,7 +62,11 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// The requests the worker still runs before each op fails, or nil for no limit.
     private var remainingSuccesses: Int?
 
-    /// The error each op throws after ``remainingSuccesses`` runs out.
+    /// The forwards the worker still runs before each forward fails, or nil for no limit.
+    private var remainingForwards: Int?
+
+    /// The error each op throws after ``remainingSuccesses`` runs out, and each forward after
+    /// ``remainingForwards`` runs out.
     private var fault: any Error = InProcessWorkerFault()
 
     /// The number of times the transport was closed.
@@ -117,22 +121,46 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         }
     }
 
+    /// Makes every forward after the next `count` forwards throw `fault`, as a member lost in
+    /// the middle of a generation fails it. The other ops still succeed.
+    ///
+    /// - Parameters:
+    ///   - count: The forwards that still succeed.
+    ///   - fault: The error each later forward throws.
+    public func failForwards(after count: Int, with fault: any Error = InProcessWorkerFault()) {
+        lock.withLock {
+            remainingForwards = count
+            self.fault = fault
+        }
+    }
+
     /// Runs `request` on the executor.
     ///
     /// - Parameter request: The request.
     /// - Returns: The reply.
-    /// - Throws: The fault of ``failOps(after:with:)`` after its ops, or the error of the
-    ///   announce words.
+    /// - Throws: The fault of ``failOps(after:with:)`` after its ops, the fault of
+    ///   ``failForwards(after:with:)`` after its forwards, or the error of the announce words.
     public func send(_ request: RemoteModelRequest) throws -> RemoteModelReply {
         try lock.withLock {
             let announced = try RemoteOpAnnouncement.decode(RemoteOpAnnouncement.encode(request))
             received.append(announced)
-            if let remaining = remainingSuccesses {
-                guard remaining > 0 else { throw fault }
-                remainingSuccesses = remaining - 1
+            try spend(&remainingSuccesses)
+            if case .forward = announced.op {
+                try spend(&remainingForwards)
             }
             return reported(try executor.handle(announced))
         }
+    }
+
+    /// Counts one request against `budget`, and throws ``fault`` once `budget` is spent. A nil
+    /// budget has no limit. The caller holds ``lock``.
+    ///
+    /// - Parameter budget: The requests that still succeed, or nil for no limit.
+    /// - Throws: ``fault`` when `budget` is zero.
+    private func spend(_ budget: inout Int?) throws {
+        guard let remaining = budget else { return }
+        guard remaining > 0 else { throw fault }
+        budget = remaining - 1
     }
 
     /// `reply` with ``protocolVersion`` in place of the version of a describe reply.

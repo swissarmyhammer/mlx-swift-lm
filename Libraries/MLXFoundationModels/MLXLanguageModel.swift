@@ -1534,15 +1534,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     }
                     let schemaMessages = promptMessages.withSchema
 
-                    try await dispatchGeneration(
-                        turn, messages: messages, input: input,
-                        schemaInput: {
-                            try await Self.schemaInput(
-                                messages: schemaMessages, input: input, resolved: resolved,
-                                context: context)
-                        },
-                        reasoningPlan: reasoningPlan, resolved: resolved, speculation: speculation,
-                        context: context)
+                    try await Self.reportingClusterFailure(of: context.model) {
+                        try await dispatchGeneration(
+                            turn, messages: messages, input: input,
+                            schemaInput: {
+                                try await Self.schemaInput(
+                                    messages: schemaMessages, input: input, resolved: resolved,
+                                    context: context)
+                            },
+                            reasoningPlan: reasoningPlan, resolved: resolved,
+                            speculation: speculation, context: context)
+                    }
 
                     Stream.gpu.synchronize()
                 }
@@ -1699,6 +1701,34 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                     channel: turn.channel
                 )
             }
+        }
+
+        /// Runs `generation`, and then throws the failure that the ``ClusterLanguageModel`` of
+        /// `model` keeps, in place of the outcome of the generation.
+        ///
+        /// A cluster forward that fails cannot throw. It ends its generation, which then looks
+        /// finished and returns its partial text, or it cancels a guided pass, which then throws
+        /// `CancellationError`. Either way the caller gets the kept ``ClusterModelError``
+        /// itself, for example ``ClusterModelError/memberLost(_:)``, thus a host can tell that
+        /// the answer failed and move the session to another model. A stream throws it after
+        /// the snapshots it already gave. A local model keeps no failure, and the outcome of the
+        /// generation stands.
+        ///
+        /// - Parameters:
+        ///   - model: The model of the loaded context.
+        ///   - generation: The generation path of the call.
+        /// - Throws: The kept failure of a cluster model, else the error of `generation`.
+        static func reportingClusterFailure(
+            of model: any MLXLMCommon.LanguageModel, _ generation: () async throws -> Void
+        ) async throws {
+            let cluster = model as? ClusterLanguageModel
+            do {
+                try await generation()
+            } catch {
+                try cluster?.checkFailure()
+                throw error
+            }
+            try cluster?.checkFailure()
         }
 
         /// Resolves the per-instance configuration for one generation.

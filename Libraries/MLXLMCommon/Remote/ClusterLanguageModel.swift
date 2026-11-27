@@ -25,6 +25,7 @@ private let clusterLogger = MLXLogger(label: "cluster-language-model")
 /// A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cache:state:)``
 /// does not throw. The model then cancels the task that runs it, which ends the generation, and
 /// keeps the failure: every later op fails, and the next throwing op reports it.
+/// ``checkFailure()`` reports it when the generation ends.
 public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokensProviding {
 
     /// The stream of requests to the worker.
@@ -73,6 +74,18 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     /// container, which waits for the generation that holds the container.
     public func close() {
         session.close()
+    }
+
+    /// Throws the failure the model keeps, if any.
+    ///
+    /// A forward that fails cannot throw: it ends the generation, which then looks finished, and
+    /// keeps the failure. A caller calls this method when a generation ends, thus the failure
+    /// reaches the caller of the generation and its partial text does not pass for an answer.
+    ///
+    /// - Throws: The kept failure, for example ``ClusterModelError/memberLost(_:)`` for a lost
+    ///   member, or ``ClusterModelError/closed`` after ``close()``.
+    public func checkFailure() throws {
+        try session.checkFailure()
     }
 
     /// The forward pass runs in a worker: ``LMModelCapabilities/remoteForward``.
