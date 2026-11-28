@@ -25,8 +25,24 @@ comments:
     - note: the tester first wrote this record on ^md0yqyr by mistake; the orchestrator moved it here.
     - next: commit, review
   timestamp: 2026-11-28T09:55:18.792411+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8gsfc7q5n8t3gjtyfrg71t8
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (451c9044) — 0 findings (14 attempted, 0 confirmed, 0 refuted, 0 failed); 5 files not matched by any validator (.kanban task files, Libraries/MLXFoundationModels/README.md)
+    - next: none; task moved to done
+  timestamp: 2026-11-28T09:58:39.095384+00:00
+- actor: claude-code
+  id: 01m8gsfps24h1p5mkq2nqybwdz
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 6 files; the grammar phase is built from the represented tokens + reasoning after a splice
+    - test: green — all 5 bundles (MLXLMTests 2849+1261, MLXFoundationModelsTests 762, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 451c9044
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T09:58:49.890147+00:00
+position_column: done
+position_ordinal: ffffff9580
 title: 'Prompt cache: the grammar phase continues a reasoning phase whose plan spliced'
 ---
 ## What
