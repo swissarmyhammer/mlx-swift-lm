@@ -89,8 +89,24 @@ comments:
     - pre-existing: the 3 known issues are in ToolTests.swift "Test MiniCPM5 Format via ToolCallProcessor keeps a function close tag inside CDATA" (withKnownIssue, committed in 021b9341; ToolTests.swift is not modified by this task).
     - next: review
   timestamp: 2026-11-28T07:23:11.805502+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8ggnf71qdva98eg47pacvbq
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (03258f9a) — 0 findings (7 files reviewed, 0 confirmed, 1 refuted, 0 failed); all 4 prior findings checked
+    - next: none — task moved to done
+  timestamp: 2026-11-28T07:24:41.569817+00:00
+- actor: claude-code
+  id: 01m8ggnsd7272d410pt4krw790
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 7 files, all 4 findings checked
+    - test: green — all 5 bundles (MLXLMTests 2849+1261, MLXFoundationModelsTests 734, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 03258f9a
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T07:24:52.007863+00:00
+position_column: done
+position_ordinal: ffffff9280
 title: 'Prompt cache: a session seeded by copying a remote template gets no partial hit when its prompt diverges after the shared prefix'
 ---
 ## What
