@@ -39,6 +39,46 @@ comments:
     - note: 3 known issues in MLXLMTests (AttentionKernelToleranceTests near-tie, MiniCPM5 CDATA x2 in ToolTests.swift) are deliberate withKnownIssue markers in files this change does not touch.
     - next: review/commit
   timestamp: 2026-11-28T08:11:07.428670+00:00
+- actor: claude-code
+  id: 01m8gknqsz8ava8cgtb6cjjcq3
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (61e8fd4e) — 5 findings (5 confirmed, 2 refuted): Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift:224, Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift:347, Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift:350, Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:2100, Tests/MLXFoundationModelsTests/Qwen35MTPFixture+LanguageModel.swift:95
+    - next: implement the unchecked items in the 2026-11-28 02:11 Review Findings section; task stays in review
+  timestamp: 2026-11-28T08:17:16.095242+00:00
+- actor: claude-code
+  id: 01m8gkp7sqvh42v3pcdwar65xc
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 13 files, ThinkThenCallPromptCacheTests (5 tests × 4 cases) + 5 unit tests; follow-up ^kncsy3m
+    - test: green — all 5 bundles (MLXLMTests 2849+1261, MLXFoundationModelsTests 744, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 61e8fd4e
+    - review: findings — ExecutorPromptCacheEntry.swift:224, :347, :350; MLXLanguageModelGeneration.swift:2100; Qwen35MTPFixture+LanguageModel.swift:95
+  timestamp: 2026-11-28T08:17:32.471254+00:00
+- actor: claude-code
+  id: 01m8gmbnv4c70fjc5r6vc9q7mc
+  text: |-
+    Review findings fixed (behaviour-preserving refactor, no new tests: existing suites cover each path):
+    1. ExecutorPromptCacheEntry: one `private static func checkpoint(_:serving:)` holds the serves() filter; instructionsCheckpoint(serving:) and checkpoint(serving:) call it.
+    2+3. ExecutorPromptCacheEntry: one `private func rewoundPrefixEntry(caches:tokenCount:)` owns the rewindPromptCache guard and the prefixEntry(state: nil, drafterState: nil, minimumByteCount: byteCount) build; trimmedCopy calls it with checked copies, rewound(keepingTokens:) calls it with its own caches (ExecutorPromptCacheSlot.rewindLedger still calls rewound).
+    4. MLXLanguageModelGeneration: new `runProtocolPass(input:parameters:decoder:checkpointBoundaries:promptCache:speculation:context:consume:)` owns planPromptCache + withCommittedGeneration + generateProtocolTokensTask and returns the plan (@discardableResult). All three protocol passes route through it: runAllowedToolGeneration and runReasoning (decoder: protocolDecoder) and runToolCallReasoningPhase (decoder: nil; uses the returned plan for fedTokenCount). The only order change: the plan now runs after the decoder/router/collector construction in those functions, which are pure value constructions, so no behaviour change. makeParameters stays at each caller because the maxTokens source differs (requestedMaxTokens ?? default vs the phase budget). runUnconstrained was NOT routed: it generates through generateTaskRecordingTokens (a text/.chunk stream), not generateProtocolTokensTask, so sharing would change its stream type. No separate task needed: the counterpart edits are done here.
+    5. Qwen35MTPFixture+LanguageModel: the existing makeLanguageModel gains `target: (any MLXLMCommon.LanguageModel)? = nil` (assigns context.model when set); the parallel overload is deleted. Callers (ThinkThenCallPromptCacheTests, PromptCacheDivergentCopyTests) compile unchanged.
+  timestamp: 2026-11-28T08:29:14.980769+00:00
+- actor: claude-code
+  id: 01m8gmbs8ze49bsq41jsqyd81q
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift, Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift, Tests/MLXFoundationModelsTests/Qwen35MTPFixture+LanguageModel.swift; 5/5 findings checked. swift-format format + lint clean; swift build --build-tests clean (only the swiftbuild graph note "missing creator for mutated node ... mlx-swift_Cmlx.bundle", no compiler warnings). xcrun xctest, each bundle one process, exit 0: MLXFoundationModelsTests 744 tests/98 suites; MLXGuidedGenerationTests 96/23; MLXLMTests 2849 Swift Testing (3 pre-existing known issues) + 1261 XCTest, 0 failures.
+    - next: /review
+  timestamp: 2026-11-28T08:29:18.495327+00:00
+- actor: claude-code
+  id: 01m8gmsmjkw8yp2gwx059z2fvz
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (only the pre-existing build-system note "missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS"); swift-format lint on the 3 changed files clean. xcrun xctest: MLXLMTests 1261 XCTest + 2849 Swift Testing, 0 failures, 0 skipped (3 pre-existing withKnownIssue: AttentionKernelToleranceTests, MiniCPM5ToolCallParserTests x2); MLXGuidedGenerationTests 96 tests; MLXFoundationModelsTests 744 tests; CXGrammarTests 7 tests; MLXHuggingFaceMacrosTests 11 XCTest + Swift Testing pass.
+    - note: the first MLXLMTests run ended silently (exit 0) mid ChatSessionToolCallTests with no summary; the suite alone passed 13/13, and one full rerun with unchanged code completed with the totals above.
+    - next: review/commit
+  timestamp: 2026-11-28T08:36:52.435982+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Prompt cache: the think-then-call phase of a required tool turn takes the carried cache'
@@ -54,3 +94,20 @@ In a required-tool turn with think-then-call (`runToolCallReasoningPhase` in Lib
 ## Tests
 - A required-tool turn with think-then-call after a plain turn reports cached tokens > 0 for its prompt, local and clustered, and the same tool call as a cold turn.
 #cluster
+
+## Review Findings (2026-11-28 02:11)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 12 file(s) reviewed, 5 not reviewed.
+
+> 5 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M8GAYFFGGC2GKW5HH8MVKB7T.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8GAYFFGGC2GKW5HH8MVKB7T.md` — no validator matches this file
+> - `.kanban/tasks/01M8GJ55H1TRBRP8DWHKNCSY3M.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8GJ55H1TRBRP8DWHKNCSY3M.md` — no validator matches this file
+> - `Libraries/MLXFoundationModels/README.md` — no validator matches this file
+
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift:224` `duplication/duplication` — The new `checkpoint(serving:)` accessor repeats the body of `instructionsCheckpoint(serving:)`. Both are the same `field.flatMap { $0.serves(promptTokens) ? $0 : nil }` over a different stored `PromptCacheCheckpoint?`. The two copies differ only by the field name, so the filter rule could drift between them. Extract a private helper such as `func servingCheckpoint(_ candidate: PromptCacheCheckpoint?, promptTokens: [Int]) -> PromptCacheCheckpoint?` containing the single `flatMap` filter. Have `checkpoint(serving:)` and `instructionsCheckpoint(serving:)` each call it with their own stored property.
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift:347` `reuse/reuse` — `rewound(keepingTokens:)` reimplements the body of `trimmedCopy(keepingTokens:)` without the per-cache copy. Both guard on a rewind, call `rewindPromptCache`, and return `prefixEntry(caches:tokens:state:drafterState:minimumByteCount:)` with the same `Array(tokens.prefix(tokenCount))`, `state: nil`, `drafterState: nil`, and `minimumByteCount: byteCount` arguments. Two copies of the same rewind-and-prefix logic will drift apart the next time either one is fixed. Extract the shared tail into one private helper that takes the caches to rewind, for example `rewoundEntry(caches:tokenCount:)`. Have `trimmedCopy` call it with `try caches.map { try $0.checkedCopy() }` and `rewound` call it with `caches`. Alternatively, give `trimmedCopy` a `copying: Bool` parameter and delete `rewound`.
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift:350` `duplication/duplication` — `rewound(keepingTokens:)` repeats the rewind-guard and the `prefixEntry(...)` construction from `trimmedCopy(keepingTokens:)`. Both end by rewinding `caches` to `tokenCount` and building a prefix entry with `state: nil`, `drafterState: nil`, and `minimumByteCount: byteCount`. The two copies must agree on what a rewound entry carries, so a change to one can drift from the other. Extract a private helper such as `rewoundPrefixEntry(caches:tokenCount:)` that performs the `rewindPromptCache` guard and the `prefixEntry` call. Have `trimmedCopy` call it after copying the caches, and have `rewound` call it on `caches` directly.
+- [x] `Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift:2100` `duplication/duplication` — The new reasoning-phase body repeats the plan, commit, and generate preamble that already exists in the plain protocol pass and the protocol pass near line 1699. The copied logic (makeParameters, planPromptCache with the same arguments, withCommittedGeneration, and generateProtocolTokensTask with plan?.input ?? input, plan?.caches, plan?.state, plan?.drafterState, and preparedState/handOff) can drift out of sync across the three sites. Only the decoder argument differs, and here it is nil. Extract a shared helper, for example `runProtocolPass(input:parameters:decoder:promptCache:checkpointBoundaries:speculation:context:consume:)`, that owns the plan, commit, and generate sequence and takes the decoder as a parameter. Call it from the new reasoning phase with `decoder: nil`. Then replace the copies in the existing passes. Those counterpart edits are outside this change, so report them as a separate task.
+- [x] `Tests/MLXFoundationModelsTests/Qwen35MTPFixture+LanguageModel.swift:95` `reuse/reuse` — The new `makeLanguageModel(weights:target:capabilities:resolver:tokenizer:)` is a near-match of the existing `makeLanguageModel(weights:capabilities:resolver:eosTokenIds:tokenizer:toolCallFormat:speculativeDecoding:kvCache:)` at line 38. Both build a context with `makeLanguageContext`, both call `Self.makeLanguageModel(serving:...)`, and they differ only in the model the context serves. The existing function could take an optional `target` override instead of the new function being a parallel copy. Two functions with the same name and overlapping parameters now have to be kept in step. Add a `target: (any MLXLMCommon.LanguageModel)? = nil` parameter to the existing `makeLanguageModel` at line 38. When it is set, assign `context.model = target` after `makeLanguageContext`. Then delete the new overload at lines 95-107, or keep it as a thin forwarding call to the extended function. Callers such as `Setup.init` in ThinkThenCallPromptCacheTests.swift can keep their current arguments.

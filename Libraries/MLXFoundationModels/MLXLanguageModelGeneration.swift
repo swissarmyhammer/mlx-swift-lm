@@ -935,6 +935,63 @@ extension MLXLanguageModel.Executor {
             decodeTokens: context.tokenizer.decode(tokenIds:))
     }
 
+    /// Plans the prompt cache of the session for one raw-token pass, runs the
+    /// generation of the pass from that plan, reads its stream, and keeps its
+    /// cache for the next turn
+    /// (``withCommittedGeneration(plan:promptCache:generate:consume:)``).
+    ///
+    /// The pass feeds only the prompt past the prefix the cache serves, takes
+    /// the checkpoints of `checkpointBoundaries`, and resumes the MTP drafter
+    /// state the cache keeps for `speculation`.
+    ///
+    /// - Parameters:
+    ///   - input: the prepared input of the pass.
+    ///   - parameters: the generation parameters of the pass.
+    ///   - decoder: the protocol decoder whose stop tokens the generation
+    ///     honors, or nil for the raw token stream of a plain generation.
+    ///   - checkpointBoundaries: the indexes of the prompt where the pass
+    ///     takes its checkpoints.
+    ///   - promptCache: the slot of the session.
+    ///   - speculation: the MTP drafter of the pass, or nil.
+    ///   - context: the loaded model context.
+    ///   - consume: reads the token stream of the generation. It takes the
+    ///     task as well, to stop the generation when the pass needs no more
+    ///     tokens.
+    /// - Returns: the plan the pass ran, or nil when the pass carried no cache.
+    /// - Throws: the error of the plan, of the generation, or of `consume`.
+    @discardableResult
+    func runProtocolPass(
+        input: LMInput, parameters: GenerateParameters, decoder: (any TokenStreamDecoder)?,
+        checkpointBoundaries: ExecutorCheckpointBoundaries,
+        promptCache: ExecutorPromptCacheSlot, speculation: MTPSpeculation?,
+        context: ModelContext,
+        consume: (
+            _ stream: AsyncStream<TokenGeneration>, _ task: Task<[Int], Never>
+        ) async throws -> Void
+    ) async throws -> ExecutorPromptCachePlan? {
+        let plan = try Self.planPromptCache(
+            promptCache, input: input, parameters: parameters,
+            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
+            context: context)
+        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
+            preparedState, handOff in
+            try generateProtocolTokensTask(
+                input: plan?.input ?? input,
+                cache: plan?.caches,
+                state: plan?.state,
+                parameters: parameters,
+                context: context,
+                decoder: decoder,
+                speculation: speculation,
+                mtpContinuation: plan?.drafterState,
+                preparedState: preparedState,
+                handOff: handOff)
+        } consume: { stream, task in
+            try await consume(stream, task)
+        }
+        return plan
+    }
+
     func runAllowedToolGeneration(
         input: LMInput,
         checkpointBoundaries: ExecutorCheckpointBoundaries,
@@ -953,10 +1010,6 @@ extension MLXLanguageModel.Executor {
             maxTokens: requestedMaxTokens ?? Self.defaultMaxTokens,
             requestedTemperature: requestedTemperature,
             samplingConfiguration: samplingConfiguration)
-        let plan = try Self.planPromptCache(
-            promptCache, input: input, parameters: parameters,
-            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
-            context: context)
         let format = context.configuration.toolCallFormat ?? .json
         var router = AllowedToolOutputRouter(
             format: format,
@@ -968,20 +1021,11 @@ extension MLXLanguageModel.Executor {
             stopStrings: context.configuration.effectiveStopStrings)
         var detokenizer = context.tokenizer.makeStreamingDetokenizer()
         var result = AllowedToolGenerationResult()
-        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
-            preparedState, handOff in
-            try generateProtocolTokensTask(
-                input: plan?.input ?? input,
-                cache: plan?.caches,
-                state: plan?.state,
-                parameters: parameters,
-                context: context,
-                decoder: protocolDecoder,
-                speculation: speculation,
-                mtpContinuation: plan?.drafterState,
-                preparedState: preparedState,
-                handOff: handOff)
-        } consume: { stream, task in
+        try await runProtocolPass(
+            input: input, parameters: parameters, decoder: protocolDecoder,
+            checkpointBoundaries: checkpointBoundaries, promptCache: promptCache,
+            speculation: speculation, context: context
+        ) { stream, task in
             var passStop = ProtocolPassStop()
             for await generation in stream {
                 try Task.checkCancellation()
@@ -1696,10 +1740,6 @@ extension MLXLanguageModel.Executor {
             requestedTemperature: requestedTemperature,
             samplingConfiguration: samplingConfiguration
         )
-        let plan = try Self.planPromptCache(
-            promptCache, input: input, parameters: parameters,
-            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
-            context: context)
 
         // The collector matches the delimiters by token id when the tokenizer
         // has them as single tokens, and scans the decoded text otherwise.
@@ -1717,20 +1757,11 @@ extension MLXLanguageModel.Executor {
         // paths: this path passes no tools, so a tool-call-shaped output is
         // never executable.
         var decodedEvents = ReasoningDecodedEvents()
-        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
-            preparedState, handOff in
-            try generateProtocolTokensTask(
-                input: plan?.input ?? input,
-                cache: plan?.caches,
-                state: plan?.state,
-                parameters: parameters,
-                context: context,
-                decoder: protocolDecoder,
-                speculation: speculation,
-                mtpContinuation: plan?.drafterState,
-                preparedState: preparedState,
-                handOff: handOff)
-        } consume: { stream, task in
+        try await runProtocolPass(
+            input: input, parameters: parameters, decoder: protocolDecoder,
+            checkpointBoundaries: checkpointBoundaries, promptCache: promptCache,
+            speculation: speculation, context: context
+        ) { stream, task in
             var passStop = ProtocolPassStop()
             for await generation in stream {
                 try Task.checkCancellation()
@@ -2097,10 +2128,6 @@ extension MLXLanguageModel.Executor {
             requestedTemperature: requestedTemperature,
             samplingConfiguration: samplingConfiguration
         )
-        let plan = try Self.planPromptCache(
-            promptCache, input: input, parameters: parameters,
-            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
-            context: context)
         var collector = ReasoningTokenCollector(
             config: config, primedInside: primedInside, tokenizer: context.tokenizer
         )
@@ -2108,20 +2135,11 @@ extension MLXLanguageModel.Executor {
         var completionInfo: GenerateCompletionInfo?
         // The raw token stream with no protocol decoder is the stream of a plain
         // generation: no stop token beyond the model's own, and none received.
-        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
-            preparedState, handOff in
-            try generateProtocolTokensTask(
-                input: plan?.input ?? input,
-                cache: plan?.caches,
-                state: plan?.state,
-                parameters: parameters,
-                context: context,
-                decoder: nil,
-                speculation: speculation,
-                mtpContinuation: plan?.drafterState,
-                preparedState: preparedState,
-                handOff: handOff)
-        } consume: { stream, task in
+        let plan = try await runProtocolPass(
+            input: input, parameters: parameters, decoder: nil,
+            checkpointBoundaries: checkpointBoundaries, promptCache: promptCache,
+            speculation: speculation, context: context
+        ) { stream, task in
             for await generation in stream {
                 try Task.checkCancellation()
                 switch generation {

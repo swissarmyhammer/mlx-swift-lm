@@ -25,6 +25,10 @@ extension Qwen35MTPFixture {
     /// - Parameters:
     ///   - weights: The directory that makes the model available, from
     ///     `makeScriptedWeightsDirectory()`.
+    ///   - target: The model that each generation runs in the place of the target of the
+    ///     fixture, with the tokenizer and the input processor of the fixture, thus any model
+    ///     of the vocabulary of the fixture, local or clustered, runs behind the executor; or
+    ///     `nil` for the target of the fixture.
     ///   - capabilities: The capabilities the model declares.
     ///   - resolver: The resolver that patches the configuration of each call.
     ///   - eosTokenIds: The tokens that end a generation.
@@ -36,22 +40,26 @@ extension Qwen35MTPFixture {
     ///   - kvCache: The KV-cache configuration of every generation, or `nil` for full precision.
     /// - Returns: The model.
     func makeLanguageModel(
-        weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
+        weights: URL, target: (any MLXLMCommon.LanguageModel)? = nil,
+        capabilities: [LanguageModelCapabilities.Capability] = [],
         resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
         eosTokenIds: Set<Int> = [], tokenizer: (any Tokenizer)? = nil,
         toolCallFormat: ToolCallFormat? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil,
         kvCache: KVCacheConfiguration? = nil
     ) -> MLXLanguageModel {
-        Self.makeLanguageModel(
-            serving: makeLanguageContext(
-                eosTokenIds: eosTokenIds, tokenizer: tokenizer, toolCallFormat: toolCallFormat),
-            weights: weights, capabilities: capabilities, resolver: resolver,
+        var context = makeLanguageContext(
+            eosTokenIds: eosTokenIds, tokenizer: tokenizer, toolCallFormat: toolCallFormat)
+        if let target {
+            context.model = target
+        }
+        return Self.makeLanguageModel(
+            serving: context, weights: weights, capabilities: capabilities, resolver: resolver,
             speculativeDecoding: speculativeDecoding, kvCache: kvCache)
     }
 
     /// A FoundationModels language model whose target runs in an in-process worker, behind a
     /// `ClusterLanguageModel`, with the tokenizer and the configuration of
-    /// ``makeLanguageModel(weights:capabilities:resolver:eosTokenIds:tokenizer:toolCallFormat:speculativeDecoding:)``.
+    /// ``makeLanguageModel(weights:target:capabilities:resolver:eosTokenIds:tokenizer:toolCallFormat:speculativeDecoding:kvCache:)``.
     ///
     /// - Parameters:
     ///   - weights: The directory that makes the model available.
@@ -78,32 +86,6 @@ extension Qwen35MTPFixture {
             resolver: DefaultConfigurationResolver(), speculativeDecoding: speculativeDecoding,
             kvCache: kvCache)
         return (model, worker)
-    }
-
-    /// A FoundationModels language model over `target` in the place of the target of the
-    /// fixture, with the tokenizer and the input processor of the fixture, thus any model of
-    /// the vocabulary of the fixture, local or clustered, runs behind the executor.
-    ///
-    /// - Parameters:
-    ///   - weights: The directory that makes the model available.
-    ///   - target: The model that each generation runs.
-    ///   - capabilities: The capabilities the model declares.
-    ///   - resolver: The resolver that patches the configuration of each call.
-    ///   - tokenizer: The tokenizer that renders the prompts and decodes the replies, or `nil`
-    ///     for the fixture's own.
-    /// - Returns: The model.
-    func makeLanguageModel(
-        weights: URL, target: any MLXLMCommon.LanguageModel,
-        capabilities: [LanguageModelCapabilities.Capability] = [],
-        resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
-        tokenizer: (any Tokenizer)? = nil
-    ) -> MLXLanguageModel {
-        var context = makeLanguageContext(
-            eosTokenIds: [], tokenizer: tokenizer, toolCallFormat: nil)
-        context.model = target
-        return Self.makeLanguageModel(
-            serving: context, weights: weights, capabilities: capabilities,
-            resolver: resolver, speculativeDecoding: nil)
     }
 
     /// The model context of the fixture with `tokenizer` and `toolCallFormat`.

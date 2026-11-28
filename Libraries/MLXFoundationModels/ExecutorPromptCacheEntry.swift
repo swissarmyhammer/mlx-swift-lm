@@ -209,7 +209,7 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// - Returns: `instructionsCheckpoint`, or nil when the entry carries none
     ///   or the prompt does not keep its instructions.
     func instructionsCheckpoint(serving promptTokens: [Int]) -> PromptCacheCheckpoint? {
-        instructionsCheckpoint.flatMap { $0.serves(promptTokens) ? $0 : nil }
+        Self.checkpoint(instructionsCheckpoint, serving: promptTokens)
     }
 
     /// The checkpoint at the end of the last message, when `promptTokens`
@@ -221,7 +221,21 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// - Returns: `checkpoint`, or nil when the entry carries none or the
     ///   prompt does not keep that message.
     func checkpoint(serving promptTokens: [Int]) -> PromptCacheCheckpoint? {
-        checkpoint.flatMap { $0.serves(promptTokens) ? $0 : nil }
+        Self.checkpoint(checkpoint, serving: promptTokens)
+    }
+
+    /// `candidate`, when `promptTokens` starts with its tokens and has more
+    /// to feed, thus when a pass of `promptTokens` keeps it for the next turn.
+    ///
+    /// - Parameters:
+    ///   - candidate: a checkpoint of the entry, or nil.
+    ///   - promptTokens: the whole rendered prompt of the pass.
+    /// - Returns: `candidate`, or nil when it is nil or the prompt does not
+    ///   keep its tokens.
+    private static func checkpoint(
+        _ candidate: PromptCacheCheckpoint?, serving promptTokens: [Int]
+    ) -> PromptCacheCheckpoint? {
+        candidate.flatMap { $0.serves(promptTokens) ? $0 : nil }
     }
 
     /// The drafter state a pass that extends `tokens` with the drafter
@@ -314,13 +328,8 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         guard canRewind(keepingTokens: tokenCount) else {
             return nil
         }
-        let trimmed = try caches.map { try $0.checkedCopy() }
-        guard rewindPromptCache(trimmed, to: tokenCount) else { return nil }
-        // The trimmed arrays keep the whole buffers of this entry alive until
-        // a write, as a whole copy does.
-        return prefixEntry(
-            caches: trimmed, tokens: Array(tokens.prefix(tokenCount)), state: nil,
-            drafterState: nil, minimumByteCount: byteCount)
+        return rewoundPrefixEntry(
+            caches: try caches.map { try $0.checkedCopy() }, tokenCount: tokenCount)
     }
 
     /// Whether the caches can go back to the first `tokenCount` tokens of the
@@ -345,8 +354,25 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// - Returns: the new entry, or nil when a cache did not land on
     ///   `tokenCount`, which leaves the caches where no ledger names them.
     func rewound(keepingTokens tokenCount: Int) -> ExecutorPromptCacheEntry? {
+        rewoundPrefixEntry(caches: caches, tokenCount: tokenCount)
+    }
+
+    /// An entry of `caches`, which hold the ledger of this entry, rewound in
+    /// place to its first `tokenCount` tokens, with no model state and no
+    /// drafter state, because each stands past the kept prefix.
+    ///
+    /// The rewound arrays keep the whole buffers of this entry alive until a
+    /// write, thus the new entry counts at least ``byteCount``.
+    ///
+    /// - Parameters:
+    ///   - caches: the caches to rewind: those of this entry, or copies.
+    ///   - tokenCount: the tokens to keep, fewer than `tokens`.
+    /// - Returns: the new entry, or nil when a cache did not land on
+    ///   `tokenCount`.
+    private func rewoundPrefixEntry(caches: [KVCache], tokenCount: Int)
+        -> ExecutorPromptCacheEntry?
+    {
         guard rewindPromptCache(caches, to: tokenCount) else { return nil }
-        // The rewound arrays keep the buffers of the whole ledger until a write.
         return prefixEntry(
             caches: caches, tokens: Array(tokens.prefix(tokenCount)), state: nil,
             drafterState: nil, minimumByteCount: byteCount)
