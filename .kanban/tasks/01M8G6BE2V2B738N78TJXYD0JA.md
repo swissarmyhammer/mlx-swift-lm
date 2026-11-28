@@ -29,8 +29,24 @@ comments:
     - evidence: swift build --build-tests clean (0 compiler warnings); xcrun xctest per bundle: MLXLMTests 2845 Swift Testing (3 pre-existing known issues in AttentionKernelToleranceTests and ToolTests MiniCPM5, untouched files) + 1261 XCTest, 0 failures; MLXGuidedGenerationTests 96; MLXFoundationModelsTests 687; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11 XCTest. swift-format lint clean on all 8 changed files. 0 skipped.
     - next: review/commit
   timestamp: 2026-11-28T04:50:47.770282+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8g838s3semh8bxvym6dvy87
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (09d801c7) — 0 findings (0 confirmed, 1 refuted, 7 validator runs attempted, 0 failed); 8 files reviewed, 2 .kanban files had no matching validator
+    - next: none — task moved to done
+  timestamp: 2026-11-28T04:54:56.547553+00:00
+- actor: claude-code
+  id: 01m8g83gj3ybwkzs0tqe7xkyq8
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 8 files, 15 tests added
+    - test: green — all 5 bundles (MLXLMTests 2845+1261, MLXFoundationModelsTests 687, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 09d801c7
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T04:55:04.515577+00:00
+position_column: done
+position_ordinal: ffffff9080
 title: 'Prompt cache: copying a session that holds a RemoteKVCache is untested, and a failed worker copy reports .copied instead of copyFailed'
 ---
 ## What
