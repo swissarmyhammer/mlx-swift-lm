@@ -441,9 +441,16 @@ extension MLXLanguageModel.Executor {
     /// The grammar phase takes the prompt cache of the session for the
     /// prefix its prompt shares with the ledger of that cache, and checks
     /// its own ledger in (see ``runGuidedLoop(input:checkpointBoundaries:grammar:maxTokens:promptCache:speculation:context:onText:)``).
-    /// The think-then-call phase before it generates from a cache of its
-    /// own and leaves the cache of the session as it is, thus the grammar
-    /// phase still finds it.
+    /// The think-then-call phase before it plans from the cache of the
+    /// session and checks its own ledger in, as a plain pass does (see
+    /// ``runToolCallReasoningPhase(input:checkpointBoundaries:config:primedInside:maxTokens:requestedTemperature:samplingConfiguration:reasoningEntryID:responseEntryID:promptCache:speculation:context:channel:)``).
+    /// The prompt of the grammar phase is the prompt of the reasoning phase
+    /// and its reasoning, which that ledger holds whole: the slot takes caches
+    /// that rewind back to the last reasoning token
+    /// (``ExecutorPromptCacheSlot/rewindLedger(toFeedLastTokenOf:)``), and
+    /// the plan of a model whose caches cannot rewind goes back to the
+    /// checkpoint the reasoning phase took. The usage of the turn is the usage
+    /// of the reasoning phase, whose prompt is the prompt of the turn.
     ///
     /// - Parameters:
     ///   - request: The generation request for this turn
@@ -524,6 +531,7 @@ extension MLXLanguageModel.Executor {
         // that frame; phase 2 continues from the opener and the reasoning.
         var reasoningTokenIDs: [Int] = []
         var openerTokenIDs: [Int] = []
+        var reasoningPromptUsage: LanguageModelExecutorGenerationChannel.Usage.Input?
         if let thinkThenCallConfig {
             openerTokenIDs = frame.reasoningOpenerMarkers.flatMap {
                 context.tokenizer.encode(text: $0, addSpecialTokens: false)
@@ -536,13 +544,15 @@ extension MLXLanguageModel.Executor {
                 input: phase1Input, config: thinkThenCallConfig,
                 tokenizer: context.tokenizer)
             let phase1 = try await runToolCallReasoningPhase(
-                input: phase1Input, config: thinkThenCallConfig,
+                input: phase1Input, checkpointBoundaries: checkpointBoundaries,
+                config: thinkThenCallConfig,
                 primedInside: primedInside, maxTokens: maxTokens,
                 requestedTemperature: request.generationOptions
                     .temperature,
                 samplingConfiguration: samplingConfiguration,
                 reasoningEntryID: reasoningEntryID,
                 responseEntryID: entryID,
+                promptCache: promptCache,
                 speculation: speculation,
                 context: context, channel: channel)
             reasoningTokenIDs = phase1.tokenIDs
@@ -554,6 +564,11 @@ extension MLXLanguageModel.Executor {
                 await Self.emitIncompleteOutput(entryID: entryID, into: channel)
                 return
             }
+            // The slot still names the plan of this phase. Its prompt is the
+            // prompt of the turn and the opener, which is no prompt token.
+            reasoningPromptUsage = Self.usageInput(
+                fedTokenCount: phase1.fedTokenCount, appendedTokenCount: openerTokenIDs.count,
+                promptCache: promptCache)
         }
 
         // Phase 2 continues from the model's completed reasoning;
@@ -564,6 +579,9 @@ extension MLXLanguageModel.Executor {
             ? toolAwareInput
             : Self.continuationInput(
                 from: toolAwareInput, appending: openerTokenIDs + reasoningTokenIDs)
+        if !reasoningTokenIDs.isEmpty {
+            promptCache.rewindLedger(toFeedLastTokenOf: phase2Input.text.tokens.asArray(Int.self))
+        }
         // Shared budget (match the unconstrained path): the
         // envelope continues under the remaining budget, floored
         // at the completion reserve so it always has room to close
@@ -598,13 +616,12 @@ extension MLXLanguageModel.Executor {
             // clamped ≤ total.
             let reasoningCount = reasoningTokenIDs.count
             let totalOutput = generatedTokenCount + reasoningCount
-            // The grammar phase fed the opener and the reasoning after the
-            // prompt. They are no prompt tokens: the reasoning counts as
-            // output, and the opener as neither.
+            // After a reasoning phase, the grammar phase continues it: the
+            // opener and the reasoning it reads are no prompt tokens, thus the
+            // prompt is the one the reasoning phase read.
             await Self.emitUsage(
-                input: Self.usageInput(
-                    fedTokenCount: pass.fedTokenCount - openerTokenIDs.count - reasoningCount,
-                    promptCache: promptCache),
+                input: reasoningPromptUsage
+                    ?? Self.usageInput(fedTokenCount: pass.fedTokenCount, promptCache: promptCache),
                 output: .init(
                     totalTokenCount: totalOutput,
                     reasoningTokenCount: Swift.min(reasoningCount, totalOutput)),
@@ -1291,9 +1308,12 @@ extension MLXLanguageModel.Executor {
         if !Task.isCancelled {
             handOff.commit(plan)
         }
+        let fedTokenCount = (plan?.input ?? input).text.tokens.size
+        GuidedGenerationDiagnosticSink.current?.recordFedPromptTokens(
+            fedTokenCount + promptCache.prefilledTokenCount)
         return GuidedPassOutcome(
             generatedTokenCount: generatedTokenCount, incomplete: generatedTokenCount == nil,
-            fedTokenCount: (plan?.input ?? input).text.tokens.size)
+            fedTokenCount: fedTokenCount)
     }
 
     /// Runs the guided loop of one pass over `input`, from the cache `carried` when the pass
@@ -1999,21 +2019,67 @@ extension MLXLanguageModel.Executor {
             tokenizer: tokenizer)
     }
 
+    /// What the think-then-call phase of a required tool turn gave.
+    struct ToolCallReasoningPhaseOutcome {
+        /// The tokens the phase generated, up to the token that closed the reasoning.
+        let tokenIDs: [Int]
+
+        /// Whether the reasoning closed. A phase that ran out of budget inside its reasoning
+        /// did not close it.
+        let closed: Bool
+
+        /// The prompt tokens the generation of the phase fed: the prompt after the prefix the
+        /// prompt cache served, and after the tokens the phase fed before its generation to take
+        /// a checkpoint (``ExecutorPromptCacheSlot/prefilledTokenCount``).
+        let fedTokenCount: Int
+    }
+
     /// Think-then-call Phase 1: generate reasoning unconstrained until
     /// the model closes its thinking block, routing reasoning text to
     /// `.reasoning` events and retaining the raw token IDs to prefill into the
     /// constrained Phase 2.
     ///
-    /// Uses the `Task`-returning `generateTokensTask` so the GPU loop is
-    /// cancelled and drained at the phase boundary — without that, Phase 2's
-    /// prefill could overlap Phase 1's in-flight forward pass on the shared
-    /// `Stream` and trip a Metal command-buffer assertion.
+    /// The phase plans the prompt cache of the session and commits its own
+    /// cache as a plain pass does
+    /// (``withCommittedGeneration(plan:promptCache:generate:consume:)``): it
+    /// feeds only the prompt past the prefix the cache serves, takes the
+    /// checkpoints of `checkpointBoundaries`, resumes the MTP drafter state
+    /// the cache keeps, and checks its ledger in -- the prompt, the reasoning,
+    /// and the tokens the generation fed after the reasoning closed before
+    /// the stop reached it. Phase 2 plans from that ledger.
     ///
-    /// Returns the accumulated token IDs and whether `</think>` actually
-    /// closed. If it did not (budget exhausted mid-thought), the caller must
-    /// skip Phase 2 rather than prefill a truncated thought into the grammar.
+    /// The generation task is drained before the phase returns, and the GPU
+    /// stream is synchronized, thus Phase 2's prefill never overlaps Phase 1's
+    /// in-flight forward pass on the shared `Stream`, which would trip a Metal
+    /// command-buffer assertion. An error exit drains the task but does NOT
+    /// synchronize: respond's outer `catch` is the single GPU-sync point for
+    /// that path, and cascading syncs across nested catches can race the
+    /// Metal command-buffer state during teardown.
+    ///
+    /// If the reasoning did not close (budget exhausted mid-thought), the
+    /// caller must skip Phase 2 rather than prefill a truncated thought into
+    /// the grammar.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt of the phase: the tool-aware prompt and the opener of the frame
+    ///   - checkpointBoundaries: The indexes of the prompt where the phase takes its checkpoints
+    ///   - config: The reasoning protocol whose close ends the phase
+    ///   - primedInside: Whether the prompt ends inside the reasoning
+    ///   - maxTokens: The token budget of the phase
+    ///   - requestedTemperature: The caller's temperature, when set
+    ///   - samplingConfiguration: The translated sampling mode
+    ///   - reasoningEntryID: The transcript entry id for reasoning events
+    ///   - responseEntryID: The transcript entry id for response events
+    ///   - promptCache: The session's prompt-cache slot
+    ///   - speculation: The MTP drafter the phase speculates with, or nil
+    ///   - context: The loaded model context
+    ///   - channel: The channel to send reasoning events into
+    /// - Returns: The reasoning tokens, whether the reasoning closed, and the prompt tokens the
+    ///   generation fed.
+    /// - Throws: The errors of the plan and of the generation, and `CancellationError`.
     func runToolCallReasoningPhase(
         input: LMInput,
+        checkpointBoundaries: ExecutorCheckpointBoundaries,
         config: ReasoningConfig,
         primedInside: Bool,
         maxTokens: Int,
@@ -2021,61 +2087,63 @@ extension MLXLanguageModel.Executor {
         samplingConfiguration: MLXSamplingConfiguration?,
         reasoningEntryID: ReasoningEntryID,
         responseEntryID: ResponseEntryID,
+        promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
         channel: LanguageModelExecutorGenerationChannel
-    ) async throws -> (tokenIDs: [Int], closed: Bool) {
+    ) async throws -> ToolCallReasoningPhaseOutcome {
         let parameters = Self.makeParameters(
             maxTokens: maxTokens,
             requestedTemperature: requestedTemperature,
             samplingConfiguration: samplingConfiguration
         )
+        let plan = try Self.planPromptCache(
+            promptCache, input: input, parameters: parameters,
+            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
+            context: context)
         var collector = ReasoningTokenCollector(
             config: config, primedInside: primedInside, tokenizer: context.tokenizer
         )
-
-        // Phase 1 speculates from a cache of its own, and leaves the prompt
-        // cache of the session as it is. Its drafter state ends with its task:
-        // phase 2 plans from the cache of the session and feeds the reasoning
-        // tokens after the prefix that cache serves, thus it resumes the
-        // drafter state that cache keeps, or starts its drafter cold, and needs
-        // none of the state this phase leaves.
-        let (stream, task) = try Self.startTrackedGeneration {
-            try generateTokensTask(
-                input: input, parameters: parameters, context: context,
-                speculation: speculation)
-        }
         var passStop = ProtocolPassStop()
-        do {
+        var completionInfo: GenerateCompletionInfo?
+        // The raw token stream with no protocol decoder is the stream of a plain
+        // generation: no stop token beyond the model's own, and none received.
+        try await withCommittedGeneration(plan: plan, promptCache: promptCache) {
+            preparedState, handOff in
+            try generateProtocolTokensTask(
+                input: plan?.input ?? input,
+                cache: plan?.caches,
+                state: plan?.state,
+                parameters: parameters,
+                context: context,
+                decoder: nil,
+                speculation: speculation,
+                mtpContinuation: plan?.drafterState,
+                preparedState: preparedState,
+                handOff: handOff)
+        } consume: { stream, task in
             for await generation in stream {
                 try Task.checkCancellation()
-                if case .info(let info) = generation {
-                    Self.observeCompletion(info)
-                }
-                guard !passStop.hasStopped, case .token(let token) = generation else {
+                switch generation {
+                case .token where passStop.hasStopped:
                     continue
-                }
-                for segment in collector.ingest(token) {
-                    await Self.send(
-                        segment, responseEntryID: responseEntryID,
-                        reasoningEntryID: reasoningEntryID, channel: channel)
-                }
-                if collector.shouldStopAfterReasoning {
-                    GuidedGenerationDiagnosticSink.current?.recordToolReasoningClose()
-                    passStop.end(task)
+                case .token(let token):
+                    for segment in collector.ingest(token) {
+                        await Self.send(
+                            segment, responseEntryID: responseEntryID,
+                            reasoningEntryID: reasoningEntryID, channel: channel)
+                    }
+                    if collector.shouldStopAfterReasoning {
+                        GuidedGenerationDiagnosticSink.current?.recordToolReasoningClose()
+                        passStop.end(task)
+                    }
+                case .info(let info):
+                    Self.observeCompletion(info)
+                    completionInfo = info
                 }
             }
-        } catch {
-            // Drain the generation task before propagating, but do NOT sync
-            // here: respond's outer `catch` is the single GPU-sync point for
-            // this exit path. Keep one clean GPU sync per exit path —
-            // cascading syncs across nested catches can race the Metal
-            // command-buffer state during teardown.
-            await cancelAndDrain(task)
-            throw error
         }
-        // Drain the generation task before Phase 2 reuses the Stream.
-        await cancelAndDrain(task)
+        // The commit awaited the generation task; Phase 2 reuses the Stream.
         Stream.gpu.synchronize()
 
         for segment in collector.finalize() {
@@ -2083,7 +2151,10 @@ extension MLXLanguageModel.Executor {
                 segment, responseEntryID: responseEntryID,
                 reasoningEntryID: reasoningEntryID, channel: channel)
         }
-        return (collector.reasoningTokenIDs, passStop.hasStopped)
+        return ToolCallReasoningPhaseOutcome(
+            tokenIDs: collector.reasoningTokenIDs, closed: passStop.hasStopped,
+            fedTokenCount: completionInfo?.promptTokenCount
+                ?? (plan?.input ?? input).text.tokens.size)
     }
 
     /// Parses a required-mode tool call in the frame of the turn and emits

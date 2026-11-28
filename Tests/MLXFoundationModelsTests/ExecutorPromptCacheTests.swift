@@ -454,6 +454,24 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
         #expect(ExecutorPromptCacheSlot(entry(tokens: [1, 2, 3])).reusedTokenCount == 0)
     }
 
+    @Test("the cached part of a usage that leaves appended tokens out is at most its prompt")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func theCachedPartOfAUsageThatLeavesAppendedTokensOutIsAtMostItsPrompt() throws {
+        // The pass reuses [1, 2, 3, 4] and feeds [5, 6]. It appended [4, 5, 6]
+        // to the prompt [1, 2, 3] of the turn, thus the cache served more
+        // tokens than the prompt of the turn holds.
+        let slot = ExecutorPromptCacheSlot(entry(tokens: [1, 2, 3, 4]), report: { _ in })
+        _ = try slot.plan(
+            input: LMInput(tokens: MLXArray([1, 2, 3, 4, 5, 6])),
+            model: ScriptedLanguageModel(rounds: []),
+            parameters: GenerateParameters(), decodeTokens: { _ in "" })
+
+        let usage = MLXLanguageModel.Executor.usageInput(
+            fedTokenCount: 2, appendedTokenCount: 3, promptCache: slot)
+
+        #expect(usage.cachedTokenCount == usage.totalTokenCount)
+    }
+
     @Test("a pass that commits nothing leaves the session cold")
     func aPassThatCommitsNothingLeavesTheSessionCold() {
         let slot = ExecutorPromptCacheSlot(entry(tokens: [1, 2, 3]))

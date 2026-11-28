@@ -59,6 +59,11 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     /// Number of required-tool reasoning close boundaries observed.
     public private(set) var toolReasoningCloseCount = 0
 
+    /// The prompt tokens each guided pass fed to the model, in the order of the passes: its
+    /// prompt after the prefix the prompt cache served, the tokens it fed to take a checkpoint
+    /// included.
+    public private(set) var fedPromptTokenCounts: [Int] = []
+
     /// The position of each decision, in generation order: plain decoding records one per
     /// decided token, and an MTP round one per draft the target accepted and one per token the
     /// target decided itself.
@@ -161,6 +166,14 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
         if cancelOnToolReasoningClose {
             withUnsafeCurrentTask { $0?.cancel() }
         }
+    }
+
+    /// Records the prompt tokens one guided pass fed to the model.
+    ///
+    /// - Parameter tokenCount: The prompt tokens the pass fed, the tokens it fed to take a
+    ///   checkpoint included.
+    public func recordFedPromptTokens(_ tokenCount: Int) {
+        fedPromptTokenCounts.append(tokenCount)
     }
 
     /// Records the position of one decision.

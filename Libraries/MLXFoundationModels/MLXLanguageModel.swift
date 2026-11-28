@@ -931,21 +931,31 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// turn, which no forward pass fed: it ends the previous answer and is
         /// no prompt token, thus it is taken out.
         ///
+        /// A pass whose prompt is the prompt of the turn and tokens it appends
+        /// -- the reasoning opener of a think-then-call phase -- takes those
+        /// tokens out too. The cached part is then at most the prompt of the
+        /// turn.
+        ///
         /// - Parameters:
         ///   - fedTokenCount: the prompt tokens the generation of the pass fed
         ///     to the model.
+        ///   - appendedTokenCount: the tokens the pass appended to the prompt of
+        ///     the turn, which are no prompt tokens of the turn.
         ///   - promptCache: the slot that carries the prefix the pass reused,
         ///     and the tokens the pass fed before its generation.
         /// - Returns: the whole prompt count, and the part of it the cache
         ///   served.
         static func usageInput(
             fedTokenCount: Int,
+            appendedTokenCount: Int = 0,
             promptCache: ExecutorPromptCacheSlot
         ) -> LanguageModelExecutorGenerationChannel.Usage.Input {
-            .init(
-                totalTokenCount: fedTokenCount + promptCache.prefilledTokenCount
-                    + promptCache.reusedTokenCount - promptCache.uncommittedTokenCount,
-                cachedTokenCount: promptCache.reusedTokenCount)
+            let totalTokenCount =
+                fedTokenCount - appendedTokenCount + promptCache.prefilledTokenCount
+                + promptCache.reusedTokenCount - promptCache.uncommittedTokenCount
+            return .init(
+                totalTokenCount: totalTokenCount,
+                cachedTokenCount: min(promptCache.reusedTokenCount, totalTokenCount))
         }
 
         /// Every token a pass generated, the stop token included.

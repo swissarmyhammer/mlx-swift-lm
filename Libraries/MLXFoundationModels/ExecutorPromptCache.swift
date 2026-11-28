@@ -88,8 +88,10 @@ struct ExecutorPromptCachePlan {
     /// does not count them as prompt tokens.
     var uncommittedTokens: [Int] = []
 
-    /// The checkpoint this pass took before generation, which the entry it
-    /// commits carries to the next turn, or nil.
+    /// The checkpoint at the end of the last message, which the entry this
+    /// pass commits carries to the next turn, or nil: the checkpoint this pass
+    /// took before generation, or else the checkpoint of the carried entry
+    /// that serves the prompt.
     var checkpoint: PromptCacheCheckpoint?
 
     /// The checkpoint at the end of the instructions of the prompt, which the
@@ -166,6 +168,7 @@ struct ExecutorPromptCachePlan {
                 decision: decision(of: reuse, render: promptTokens, ledger: entry.tokens))
             plan.uncommittedTokens = reuse.uncommittedTokens
             plan.instructionsCheckpoint = entry.instructionsCheckpoint(serving: promptTokens)
+            plan.checkpoint = entry.checkpoint(serving: promptTokens)
             // An extension and a splice both feed the render onto the caches
             // where the ledger ends, and the drafter state stands there too, as
             // `ChatSession` resumes it after either. A rewind moves the caches
@@ -249,7 +252,8 @@ struct ExecutorPromptCachePlan {
     /// end of the last message serves a render that keeps that message, and
     /// the instructions checkpoint serves a render that keeps the
     /// instructions alone. The plan keeps the instructions checkpoint for the
-    /// next turn when the render starts with it.
+    /// next turn when the render starts with it, and keeps the checkpoint at
+    /// the end of the last message when it goes back there.
     ///
     /// - Parameters:
     ///   - entry: the cache the session carries.
@@ -283,6 +287,11 @@ struct ExecutorPromptCachePlan {
             decision: .restore(.init(render: promptTokens, ledger: entry.tokens)))
         plan.drafterState = drafterID.flatMap { checkpoint.drafterContinuation(resumableBy: $0) }
         plan.instructionsCheckpoint = entry.instructionsCheckpoint(serving: promptTokens)
+        // The caches stand at the checkpoint, thus the pass cannot take it
+        // again; a later checkpoint of the pass takes its place.
+        if checkpoint.tokens.count != plan.instructionsCheckpoint?.tokens.count {
+            plan.checkpoint = checkpoint
+        }
         return plan
     }
 

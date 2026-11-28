@@ -130,7 +130,7 @@ struct ClusterLanguageModelTests {
 
     @Test("a reconciled prompt cache trims on the worker and decodes the local tokens")
     func aReconciledPromptCacheTrimsOnTheWorker() async throws {
-        let model = try AttentionOnlyTarget.make()
+        let model = try Qwen35AttentionOnlyTarget.make()
         let worker = InProcessRemoteModelWorker(
             model: model, vocabularySize: Qwen35MTPFixture.vocabularySize)
         let fixture = try Qwen35MTPFixture()
@@ -241,7 +241,7 @@ struct ClusterLanguageModelTests {
     func aCopyKeepsItsOwnPositionWhenTheOriginalTrims() async throws {
         let model = try ClusterLanguageModel.connect(
             over: InProcessRemoteModelWorker(
-                model: try AttentionOnlyTarget.make(),
+                model: try Qwen35AttentionOnlyTarget.make(),
                 vocabularySize: Qwen35MTPFixture.vocabularySize))
         let cache = try model.newCache(parameters: nil)
         _ = model.nextTokenLogits(
@@ -313,7 +313,7 @@ struct ClusterLanguageModelTests {
     @Test("the status of an attention cache rewinds by trim")
     func theStatusOfAnAttentionCacheRewindsByTrim() throws {
         let status = RemoteCacheStatus(
-            describing: try AttentionOnlyTarget.make().newCache(parameters: nil))
+            describing: try Qwen35AttentionOnlyTarget.make().newCache(parameters: nil))
 
         #expect(status.isTrimmable)
         #expect(!status.canLoseRewind)
@@ -376,7 +376,7 @@ struct ClusterLanguageModelTests {
 
     @Test("a draft-model generation on a cache that trims writes the local tokens")
     func aDraftModelGenerationWritesTheLocalTokens() async throws {
-        let model = try AttentionOnlyTarget.make()
+        let model = try Qwen35AttentionOnlyTarget.make()
         let fixture = try Qwen35MTPFixture()
         var localContext = fixture.makeModelContext()
         localContext.model = model
@@ -389,7 +389,7 @@ struct ClusterLanguageModelTests {
         let clustered = try await Qwen35MTPFixture.collect(
             try generateTokens(
                 input: Self.input(Self.prompt), parameters: Self.greedy,
-                context: clusteredContext, draftModel: try AttentionOnlyTarget.make()))
+                context: clusteredContext, draftModel: try Qwen35AttentionOnlyTarget.make()))
 
         #expect(clustered.tokens == local.tokens)
     }
@@ -611,33 +611,6 @@ struct ChatTurn: Equatable {
         }
         self.text = text
         self.cachedPromptTokenCount = try #require(cached)
-    }
-}
-
-/// A tiny Qwen 3.5 target whose two layers are both full attention, so every cache trims.
-private enum AttentionOnlyTarget {
-
-    /// The seed of the weights.
-    private static let seed: UInt64 = 21
-
-    /// The decoder layers, every one full attention.
-    private static let layerCount = 2
-
-    /// Makes the target.
-    static func make() throws -> Qwen35TextModel {
-        let configuration = try JSONDecoder().decode(
-            Qwen35TextConfiguration.self,
-            from: Data(
-                Qwen35FixtureJSON.text(
-                    mtpLayers: 0, hiddenLayers: layerCount, fullAttentionInterval: 1,
-                    hiddenSize: Qwen35MTPFixture.hiddenSize,
-                    vocabularySize: Qwen35MTPFixture.vocabularySize, tieWordEmbeddings: false
-                ).utf8))
-        let model = withRandomState(MLXRandom.RandomState(seed: seed)) {
-            Qwen35TextModel(configuration)
-        }
-        eval(model)
-        return model
     }
 }
 

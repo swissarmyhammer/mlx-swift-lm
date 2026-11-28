@@ -131,6 +131,49 @@ struct ExecutorPromptCacheInstructionsCheckpointTests {
         #expect(planned.instructionsCheckpoint?.tokens == Self.instructions)
     }
 
+    @Test("a restore of the transcript checkpoint keeps it for the next turn")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aRestoreOfTheTranscriptCheckpointKeepsItForTheNextTurn() throws {
+        let planned = try planRender(Self.transcript + [Self.otherToken])
+
+        #expect(planned.checkpoint?.tokens == Self.transcript)
+    }
+
+    @Test("a render that extends the ledger keeps the transcript checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aRenderThatExtendsTheLedgerKeepsTheTranscriptCheckpoint() throws {
+        let planned = try planRender(Self.ledger + [Self.otherToken])
+
+        #expect(planned.checkpoint?.tokens == Self.transcript)
+    }
+
+    @Test("a restore of the instructions checkpoint keeps no transcript checkpoint")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aRestoreOfTheInstructionsCheckpointKeepsNoTranscriptCheckpoint() throws {
+        let planned = try planRender(Self.instructions + [Self.otherToken])
+
+        #expect(planned.checkpoint == nil)
+    }
+
+    @Test("a pass that restores a checkpoint keeps the checkpoint it takes at its prompt end")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aPassThatRestoresACheckpointKeepsTheCheckpointAtItsPromptEnd() throws {
+        let render = Self.transcript + [Self.otherToken]
+        let slot = ExecutorPromptCacheSlot(try entryWithBothCheckpoints(), report: { _ in })
+        let planned = try #require(
+            try slot.plan(
+                input: LMInput(tokens: MLXArray(render)), model: hybridScriptedModel(),
+                parameters: GenerateParameters(),
+                checkpointBoundaries: ExecutorCheckpointBoundaries(transcriptEnd: render.count),
+                decodeTokens: { _ in "" }))
+        feed(planned.caches, tokenCount: render.count - Self.transcript.count)
+        slot.prefillDidEnd(state: nil)
+
+        slot.commit(planned, generatedTokens: [])
+
+        #expect(slot.entry?.checkpoint?.tokens == render)
+    }
+
     @Test("a render that parts inside the instructions drops the instructions checkpoint")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aRenderThatPartsInsideTheInstructionsDropsTheInstructionsCheckpoint() throws {

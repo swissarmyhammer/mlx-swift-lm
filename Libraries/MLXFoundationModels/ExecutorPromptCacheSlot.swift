@@ -250,6 +250,32 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         return plan
     }
 
+    /// Takes the carried cache back to the token before the last token of
+    /// `promptTokens`, when its ledger holds the whole of `promptTokens` and its
+    /// caches can rewind there, thus a pass of that prompt extends the ledger
+    /// by its last token.
+    ///
+    /// A pass that continues the generation of the pass before it -- the
+    /// grammar phase of a required tool turn after its reasoning phase --
+    /// renders a prompt that the ledger holds whole: the generation fed that
+    /// prompt, and the tokens it wrote before its stop reached it. No reuse
+    /// rule serves a prompt the ledger holds whole, as a pass feeds one token
+    /// at least. Caches that cannot rewind stay as they are, and the plan of
+    /// the pass goes back to a checkpoint of the entry. A rewind that fails
+    /// leaves the caches where no ledger names them, thus the slot then holds
+    /// no cache.
+    ///
+    /// - Parameter promptTokens: the whole prompt of the next pass.
+    func rewindLedger(toFeedLastTokenOf promptTokens: [Int]) {
+        let keptTokenCount = promptTokens.count - 1
+        guard let entry, keptTokenCount > 0, entry.tokens.starts(with: promptTokens),
+            entry.canRewind(keepingTokens: keptTokenCount)
+        else {
+            return
+        }
+        carried = entry.rewound(keepingTokens: keptTokenCount).map { .memory($0) } ?? .none
+    }
+
     /// Takes the checkpoint at the end of the prompt, when the planned pass
     /// asked for one there.
     ///
@@ -282,8 +308,9 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - plan: the plan the pass ran, or nil when the pass carried no plan.
-    ///     The entry carries the checkpoint of the plan, or else the
-    ///     checkpoint ``prefillDidEnd(state:drafterState:)`` took.
+    ///     The entry carries the checkpoint ``prefillDidEnd(state:drafterState:)``
+    ///     took at the end of the prompt, or else the checkpoint of the plan,
+    ///     which stands before it.
     ///   - generatedTokens: the tokens the pass generated, in order.
     ///   - state: the model state the prefill of the pass left, or nil.
     ///   - drafterState: the MTP drafter continuation the generation of the
@@ -293,7 +320,7 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         drafterState: MTPDrafterContinuation? = nil
     ) {
         var plan = plan
-        if plan?.checkpoint == nil {
+        if let promptEndCheckpoint {
             plan?.checkpoint = promptEndCheckpoint
         }
         promptEndCheckpointPlan = nil

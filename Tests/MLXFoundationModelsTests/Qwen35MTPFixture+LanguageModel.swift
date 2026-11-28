@@ -87,14 +87,23 @@ extension Qwen35MTPFixture {
     /// - Parameters:
     ///   - weights: The directory that makes the model available.
     ///   - target: The model that each generation runs.
+    ///   - capabilities: The capabilities the model declares.
+    ///   - resolver: The resolver that patches the configuration of each call.
+    ///   - tokenizer: The tokenizer that renders the prompts and decodes the replies, or `nil`
+    ///     for the fixture's own.
     /// - Returns: The model.
-    func makeLanguageModel(weights: URL, target: any MLXLMCommon.LanguageModel) -> MLXLanguageModel
-    {
-        var context = makeLanguageContext(eosTokenIds: [], tokenizer: nil, toolCallFormat: nil)
+    func makeLanguageModel(
+        weights: URL, target: any MLXLMCommon.LanguageModel,
+        capabilities: [LanguageModelCapabilities.Capability] = [],
+        resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
+        tokenizer: (any Tokenizer)? = nil
+    ) -> MLXLanguageModel {
+        var context = makeLanguageContext(
+            eosTokenIds: [], tokenizer: tokenizer, toolCallFormat: nil)
         context.model = target
         return Self.makeLanguageModel(
-            serving: context, weights: weights, capabilities: [],
-            resolver: DefaultConfigurationResolver(), speculativeDecoding: nil)
+            serving: context, weights: weights, capabilities: capabilities,
+            resolver: resolver, speculativeDecoding: nil)
     }
 
     /// The model context of the fixture with `tokenizer` and `toolCallFormat`.
