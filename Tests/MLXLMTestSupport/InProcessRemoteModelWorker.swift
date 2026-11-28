@@ -173,16 +173,52 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         lock.withLock { closes += 1 }
     }
 
+    /// The kind of request a worker counts before it fails each later request of that kind.
+    public enum FailureKind: Sendable {
+        /// Every op.
+        case ops
+        /// The forwards only, as a member lost in the middle of a generation fails it.
+        case forwards
+        /// The speculative rounds only, as a member lost in the middle of a speculative
+        /// generation fails it.
+        case rounds
+    }
+
+    /// Makes every request of `kind` after the next `count` requests of that kind throw
+    /// `fault`. Unless `kind` is ``FailureKind/ops``, the requests of the other kinds still
+    /// succeed.
+    ///
+    /// - Parameters:
+    ///   - kind: The requests to count and fail.
+    ///   - count: The requests of `kind` that still succeed.
+    ///   - fault: The error each later request of `kind` throws.
+    public func fail(
+        _ kind: FailureKind, after count: Int, with fault: any Error = InProcessWorkerFault()
+    ) {
+        lock.withLock {
+            self[keyPath: Self.budget(of: kind)] = count
+            self.fault = fault
+        }
+    }
+
+    /// The stored budget that counts the requests of `kind`.
+    private static func budget(
+        of kind: FailureKind
+    ) -> ReferenceWritableKeyPath<InProcessRemoteModelWorker, Int?> {
+        switch kind {
+        case .ops: \.remainingSuccesses
+        case .forwards: \.remainingForwards
+        case .rounds: \.remainingRounds
+        }
+    }
+
     /// Makes every op after the next `count` throw `fault`.
     ///
     /// - Parameters:
     ///   - count: The ops that still succeed.
     ///   - fault: The error each later op throws.
     public func failOps(after count: Int, with fault: any Error = InProcessWorkerFault()) {
-        lock.withLock {
-            remainingSuccesses = count
-            self.fault = fault
-        }
+        fail(.ops, after: count, with: fault)
     }
 
     /// Makes every forward after the next `count` forwards throw `fault`, as a member lost in
@@ -192,10 +228,7 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     ///   - count: The forwards that still succeed.
     ///   - fault: The error each later forward throws.
     public func failForwards(after count: Int, with fault: any Error = InProcessWorkerFault()) {
-        lock.withLock {
-            remainingForwards = count
-            self.fault = fault
-        }
+        fail(.forwards, after: count, with: fault)
     }
 
     /// Makes every speculative round after the next `count` rounds throw `fault`, as a member
@@ -205,10 +238,7 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     ///   - count: The rounds that still succeed.
     ///   - fault: The error each later round throws.
     public func failRounds(after count: Int, with fault: any Error = InProcessWorkerFault()) {
-        lock.withLock {
-            remainingRounds = count
-            self.fault = fault
-        }
+        fail(.rounds, after: count, with: fault)
     }
 
     /// Runs `request` on the executor.

@@ -464,26 +464,29 @@ struct ClusterExecutorTests {
     /// the required-tool pass of the fixture runs one forward, its prompt, where the loss strikes.
     private static let requiredToolForwardsBeforeLoss = 0
 
+    /// The rounds a worker runs before it loses a member in a speculative schema turn: a few,
+    /// thus the loss strikes in the middle of the answer.
+    private static let roundsBeforeLoss = 2
+
     /// Runs `request` on a clustered model of `capabilities` and the tool-call alphabet, whose
-    /// worker loses ``lostMember`` after `forwards` forwards, and times the pass.
+    /// worker loses ``lostMember`` after `count` requests of `kind`, and times the pass. With
+    /// `speculativeDecoding`, rank 0 holds the drafter of the fixture.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func respondGuidedLosingAMember(
         to request: LanguageModelExecutorGenerationRequest,
-        capabilities: [LanguageModelCapabilities.Capability], afterForwards forwards: Int,
-        weights: URL
+        capabilities: [LanguageModelCapabilities.Capability],
+        losing kind: InProcessRemoteModelWorker.FailureKind, after count: Int, weights: URL,
+        speculativeDecoding: MLXSpeculativeDecoding? = nil
     ) async throws -> GuidedLoss {
         let (model, worker) = try Qwen35MTPFixture().makeClusteredLanguageModel(
-            weights: weights, capabilities: capabilities, tokenizer: ToolCallAlphabetTokenizer())
-        worker.failForwards(after: forwards, with: InProcessMemberLoss(lostMember: lostMember))
+            weights: weights, capabilities: capabilities, tokenizer: ToolCallAlphabetTokenizer(),
+            speculativeDecoding: speculativeDecoding, drafting: speculativeDecoding != nil)
+        worker.fail(kind, after: count, with: InProcessMemberLoss(lostMember: lostMember))
         let clock = ContinuousClock()
         let start = clock.now
         let turn = try await respondGuided(to: request, model: model)
         return GuidedLoss(failure: turn.turn.failure, elapsed: clock.now - start)
     }
-
-    /// The rounds a worker runs before it loses a member in a speculative schema turn: a few,
-    /// thus the loss strikes in the middle of the answer.
-    private static let roundsBeforeLoss = 2
 
     /// Runs the schema request on a clustered model whose rank 0 holds the drafter of the
     /// fixture, whose worker loses ``lostMember`` after ``roundsBeforeLoss`` speculative rounds,
@@ -492,16 +495,10 @@ struct ClusterExecutorTests {
     private static func respondSpeculativelyLosingAMember(weights: URL) async throws
         -> GuidedLoss
     {
-        let tokenizer = ToolCallAlphabetTokenizer()
-        let (model, worker) = try Qwen35MTPFixture().makeClusteredLanguageModel(
-            weights: weights, capabilities: [.guidedGeneration], tokenizer: tokenizer,
-            speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding(), drafting: true)
-        worker.failRounds(
-            after: roundsBeforeLoss, with: InProcessMemberLoss(lostMember: lostMember))
-        let clock = ContinuousClock()
-        let start = clock.now
-        let turn = try await respondGuided(to: schemaRequest(tokenizer: tokenizer), model: model)
-        return GuidedLoss(failure: turn.turn.failure, elapsed: clock.now - start)
+        try await respondGuidedLosingAMember(
+            to: schemaRequest(tokenizer: ToolCallAlphabetTokenizer()),
+            capabilities: [.guidedGeneration], losing: .rounds, after: roundsBeforeLoss,
+            weights: weights, speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding())
     }
 
     /// The failure a pass that lost ``lostMember`` reports: the loss itself, unwrapped.
@@ -515,8 +512,8 @@ struct ClusterExecutorTests {
         let request = Self.schemaRequest(tokenizer: ToolCallAlphabetTokenizer())
 
         let loss = try await Self.respondGuidedLosingAMember(
-            to: request, capabilities: [.guidedGeneration],
-            afterForwards: Self.forwardsBeforeLoss, weights: weights)
+            to: request, capabilities: [.guidedGeneration], losing: .forwards,
+            after: Self.forwardsBeforeLoss, weights: weights)
 
         #expect(loss.failure == Self.lossFailure)
         #expect(loss.elapsed < Self.guidedLossDeadline)
@@ -553,8 +550,8 @@ struct ClusterExecutorTests {
         let request = Self.requiredToolRequest(tokenizer: ToolCallAlphabetTokenizer())
 
         let loss = try await Self.respondGuidedLosingAMember(
-            to: request, capabilities: [.toolCalling],
-            afterForwards: Self.requiredToolForwardsBeforeLoss, weights: weights)
+            to: request, capabilities: [.toolCalling], losing: .forwards,
+            after: Self.requiredToolForwardsBeforeLoss, weights: weights)
 
         #expect(loss.failure == Self.lossFailure)
         #expect(loss.elapsed < Self.guidedLossDeadline)
