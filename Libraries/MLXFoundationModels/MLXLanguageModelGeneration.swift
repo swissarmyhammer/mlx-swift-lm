@@ -151,7 +151,7 @@ extension MLXLanguageModel.Executor {
         enabledToolDefinitions: [Transcript.ToolDefinition],
         toolCallingMode: GenerationOptions.ToolCallingMode,
         schemaJSON: String?,
-        schemaInput: () async throws -> LMInput,
+        schemaInput: () async throws -> GuidedPrompt,
         resolved: ModelConfiguration,
         declaresReasoning: Bool,
         modelID: String,
@@ -351,7 +351,7 @@ extension MLXLanguageModel.Executor {
         toolAwareRender: ThinkingRender,
         routedReasoningConfig: ReasoningConfig?,
         schemaJSON: String?,
-        schemaInput: () async throws -> LMInput,
+        schemaInput: () async throws -> GuidedPrompt,
         modelID: String,
         requestedMaxTokens: Int?,
         samplingConfiguration: MLXSamplingConfiguration?,
@@ -410,7 +410,7 @@ extension MLXLanguageModel.Executor {
         } else if let schemaJSON {
             try await runSchemaGeneration(
                 schemaJSON: schemaJSON,
-                input: try await schemaInput(),
+                prompt: try await schemaInput(),
                 modelID: modelID,
                 requestedMaxTokens: requestedMaxTokens,
                 entryID: entryID,
@@ -437,9 +437,13 @@ extension MLXLanguageModel.Executor {
     ///
     /// Required mode is the only mode that reaches guided tool
     /// generation, and it uses developer definitions only.
-    /// `GuidedGenerationLoop.run` builds its own key/value cache and
-    /// accepts none from a caller, thus this pass carries nothing from
-    /// an earlier turn.
+    ///
+    /// The grammar phase takes the prompt cache of the session for the
+    /// prefix its prompt shares with the ledger of that cache, and checks
+    /// its own ledger in (see ``runGuidedLoop(input:transcriptBoundary:grammar:maxTokens:promptCache:speculation:context:onText:)``).
+    /// The think-then-call phase before it generates from a cache of its
+    /// own and leaves the cache of the session as it is, thus the grammar
+    /// phase still finds it.
     ///
     /// - Parameters:
     ///   - request: The generation request for this turn
@@ -477,12 +481,13 @@ extension MLXLanguageModel.Executor {
         context: ModelContext,
         channel: LanguageModelExecutorGenerationChannel
     ) async throws {
-        promptCache.carriesNoCache()
         let requiredToolDefinitions = enabledToolDefinitions
         let toolSpecs = try ToolCallingConversions.makeToolSpecs(
             from: requiredToolDefinitions)
         let toolAwareInput = try await toolAwareRender.prepare(
             messages: messages, tools: toolSpecs, context: context)
+        let transcriptBoundary = await toolAwareRender.transcriptBoundary(
+            of: toolAwareInput, messages: messages, tools: toolSpecs, context: context)
 
         let toolCallingGrammar = try frame.grammar(tools: requiredToolDefinitions)
         // The inner JSON envelope is still needed separately to
@@ -570,14 +575,15 @@ extension MLXLanguageModel.Executor {
                 maxTokens - reasoningTokenIDs.count, grammar.completionReserve)
 
         var outputBuffer = ""
-        let (generatedTokenCount, incomplete) = try Self.runGuidedLoop(
-            input: phase2Input, grammar: grammar, maxTokens: phase2MaxTokens,
-            speculation: speculation, context: context
+        let pass = try Self.runGuidedLoop(
+            input: phase2Input, transcriptBoundary: transcriptBoundary, grammar: grammar,
+            maxTokens: phase2MaxTokens, promptCache: promptCache, speculation: speculation,
+            context: context
         ) { outputBuffer += $0 }
         try Task.checkCancellation()
 
         GuidedGenerationDiagnosticSink.current?.recordBuffer(
-            outputBuffer, incompleteOutput: incomplete)
+            outputBuffer, incompleteOutput: pass.incomplete)
 
         let emittedToolCall = await emitRequiredToolCallEvent(
             outputBuffer: outputBuffer,
@@ -586,15 +592,18 @@ extension MLXLanguageModel.Executor {
             channel: channel
         )
 
-        if let generatedTokenCount {
+        if let generatedTokenCount = pass.generatedTokenCount {
             // Output total spans both phases (reasoning + envelope);
             // the reasoning subset is the Phase-1 token count,
             // clamped ≤ total.
             let reasoningCount = reasoningTokenIDs.count
             let totalOutput = generatedTokenCount + reasoningCount
+            // The grammar phase fed the opener and the reasoning after the
+            // prompt. They are no prompt tokens: the reasoning counts as
+            // output, and the opener as neither.
             await Self.emitUsage(
                 input: Self.usageInput(
-                    fedTokenCount: toolAwareInput.text.tokens.size,
+                    fedTokenCount: pass.fedTokenCount - openerTokenIDs.count - reasoningCount,
                     promptCache: promptCache),
                 output: .init(
                     totalTokenCount: totalOutput,
@@ -602,7 +611,7 @@ extension MLXLanguageModel.Executor {
                 entryID: entryID, into: channel)
         }
 
-        if incomplete || !emittedToolCall {
+        if pass.incomplete || !emittedToolCall {
             await Self.emitIncompleteOutput(entryID: entryID, into: channel)
         }
     }
@@ -1193,7 +1202,48 @@ extension MLXLanguageModel.Executor {
         return ClosingReserves(completion: Swift.max(completion, hard), hard: hard)
     }
 
-    /// Runs one guided pass inside the guided-generation section.
+    /// What one guided pass gave.
+    struct GuidedPassOutcome {
+        /// The tokens the pass generated, or nil when its output is incomplete.
+        let generatedTokenCount: Int?
+
+        /// Whether the pass ran out of budget before the grammar closed.
+        let incomplete: Bool
+
+        /// The prompt tokens the generation of the pass fed: the prompt after the prefix the
+        /// prompt cache served, and after the tokens the pass fed before its generation to take
+        /// a checkpoint (``ExecutorPromptCacheSlot/prefilledTokenCount``).
+        let fedTokenCount: Int
+    }
+
+    /// The parameters a guided pass plans its prompt cache with: the KV-cache configuration of
+    /// the served model (``kvCache``), under which the guided loop builds its caches, and the
+    /// prefill step of that model (``prefillStepSize``), with which it feeds a checkpoint.
+    static var guidedCacheParameters: GenerateParameters {
+        var parameters = GenerateParameters(kvCache: kvCache)
+        parameters.prefill.stepSize = prefillStepSize
+        return parameters
+    }
+
+    /// Runs one guided pass inside the guided-generation section, on the prompt cache of its
+    /// session.
+    ///
+    /// The pass plans its cache as a plain pass does
+    /// (``planPromptCache(_:input:parameters:transcriptBoundary:speculation:context:)``): it
+    /// takes the cache of the session for the prefix `input` shares with the ledger of that
+    /// cache, under the same reuse rules and checkpoints, and the guided loop feeds the rest of
+    /// the prompt only. A grammar mask changes how a token is chosen, never what the caches
+    /// hold for a token, thus the caches serve a guided pass and a plain pass alike. After the
+    /// pass, the slot checks in the ledger of the caches: the prompt and the tokens the loop fed.
+    /// A pass that ran out of budget checks its ledger in too.
+    ///
+    /// A pass that throws checks nothing in, and nor does a pass that the respond task
+    /// cancelled, as a plain pass keeps no cache on either exit. The plan gave the cache of the
+    /// session to the pass, thus the session then starts cold.
+    ///
+    /// The plan runs inside the section, because a checkpoint before the end of the prompt feeds
+    /// the model, and a forward of a `ClusterLanguageModel` that fails there must leave the
+    /// respond task uncancelled as the forwards of the loop do (see ``runGuidedPass(_:)``).
     ///
     /// The pass prefills with the step of the model the current `respond`
     /// serves (``prefillStepSize``), and builds its caches under the KV-cache
@@ -1201,48 +1251,92 @@ extension MLXLanguageModel.Executor {
     ///
     /// - Parameters:
     ///   - input: The prompt of the pass
+    ///   - transcriptBoundary: The index of the prompt where the pass takes its checkpoint, or
+    ///     nil when it takes none
     ///   - grammar: The grammar and reserves of the pass
     ///   - maxTokens: The token budget of the pass
+    ///   - promptCache: The session's prompt-cache slot
     ///   - speculation: The MTP drafter the pass speculates with, or nil
     ///   - context: The loaded model context
     ///   - onText: Receives each piece of text the pass emits
-    /// - Returns: The generated token count, nil when the output is
-    ///   incomplete, and whether it is.
-    /// - Throws: The errors of the loop other than incomplete output.
+    /// - Returns: The generated token count, nil when the output is incomplete, whether it is,
+    ///   and the prompt tokens the generation fed.
+    /// - Throws: The errors of the plan, and of the loop other than incomplete output.
     static func runGuidedLoop(
         input: LMInput,
+        transcriptBoundary: Int?,
         grammar: GuidedGrammar,
         maxTokens: Int,
+        promptCache: ExecutorPromptCacheSlot,
         speculation: MTPSpeculation?,
         context: ModelContext,
         onText: (String) -> Void
-    ) throws -> (generatedTokenCount: Int?, incomplete: Bool) {
+    ) throws -> GuidedPassOutcome {
+        let handOff = ExecutorGuidedHandOff(promptCache: promptCache)
+        var plan: ExecutorPromptCachePlan?
+        let generatedTokenCount: Int?
         do {
-            let generatedTokenCount = try withGuidedGenerationSection {
-                try GuidedGenerationLoop.run(
-                    input: input,
-                    context: context,
-                    constraint: grammar.constraint,
-                    maxTokens: maxTokens,
-                    vocabSize: Int(grammar.grammarTokenizer.vocabSize),
-                    kvCache: Self.kvCache,
-                    completionReserve: grammar.completionReserve,
-                    hardReserve: grammar.hardReserve,
-                    closingBias: grammar.bias.closing,
-                    whitespaceBias: grammar.bias.whitespace,
-                    whitespaceTokenIDs: grammar.bias.whitespaceTokenIDs,
-                    stringTokens: grammar.bias.stringTokens,
-                    prefill: .init(stepSize: Self.prefillStepSize),
-                    speculation: speculation
-                ) { text in
-                    onText(text)
-                    GuidedGenerationDiagnosticSink.current?.recordEmit()
-                    return !Task.isCancelled
-                }
+            generatedTokenCount = try withGuidedGenerationSection {
+                plan = try planPromptCache(
+                    promptCache, input: input, parameters: guidedCacheParameters,
+                    transcriptBoundary: transcriptBoundary, speculation: speculation,
+                    context: context)
+                return try runGuidedGeneration(
+                    input: plan?.input ?? input, carried: plan?.guidedCarriedCache,
+                    grammar: grammar, maxTokens: maxTokens, speculation: speculation,
+                    handOff: handOff.cacheHandOff, context: context, onText: onText)
             }
-            return (generatedTokenCount, false)
         } catch GuidedGenerationError.incompleteOutput {
-            return (nil, true)
+            generatedTokenCount = nil
+        }
+        if !Task.isCancelled {
+            handOff.commit(plan)
+        }
+        return GuidedPassOutcome(
+            generatedTokenCount: generatedTokenCount, incomplete: generatedTokenCount == nil,
+            fedTokenCount: (plan?.input ?? input).text.tokens.size)
+    }
+
+    /// Runs the guided loop of one pass over `input`, from the cache `carried` when the pass
+    /// carries one.
+    ///
+    /// - Parameters:
+    ///   - input: The prompt the loop feeds: the part of it the carried cache does not hold
+    ///   - carried: The cache the plan of the pass gave, or nil for a new cache
+    ///   - grammar: The grammar and reserves of the pass
+    ///   - maxTokens: The token budget of the pass
+    ///   - speculation: The MTP drafter the pass speculates with, or nil
+    ///   - handOff: Receives what the loop leaves for the prompt cache
+    ///   - context: The loaded model context
+    ///   - onText: Receives each piece of text the pass emits
+    /// - Returns: The generated token count.
+    /// - Throws: The errors of the loop.
+    private static func runGuidedGeneration(
+        input: LMInput, carried: GuidedCarriedCache?, grammar: GuidedGrammar, maxTokens: Int,
+        speculation: MTPSpeculation?, handOff: GuidedCacheHandOff, context: ModelContext,
+        onText: (String) -> Void
+    ) throws -> Int {
+        try GuidedGenerationLoop.run(
+            input: input,
+            context: context,
+            constraint: grammar.constraint,
+            maxTokens: maxTokens,
+            vocabSize: Int(grammar.grammarTokenizer.vocabSize),
+            kvCache: Self.kvCache,
+            completionReserve: grammar.completionReserve,
+            hardReserve: grammar.hardReserve,
+            closingBias: grammar.bias.closing,
+            whitespaceBias: grammar.bias.whitespace,
+            whitespaceTokenIDs: grammar.bias.whitespaceTokenIDs,
+            stringTokens: grammar.bias.stringTokens,
+            prefill: .init(stepSize: Self.prefillStepSize),
+            speculation: speculation,
+            carried: carried,
+            handOff: handOff
+        ) { text in
+            onText(text)
+            GuidedGenerationDiagnosticSink.current?.recordEmit()
+            return !Task.isCancelled
         }
     }
 
@@ -1299,7 +1393,18 @@ extension MLXLanguageModel.Executor {
         }
     }
 
-    /// The prompt of a schema pass.
+    /// The prompt of a guided pass, and the index of it where the pass takes its checkpoint.
+    struct GuidedPrompt {
+        /// The prompt the pass feeds.
+        let input: LMInput
+
+        /// The index of ``input`` where a next render of the same messages plus one new
+        /// message parts from it, or nil when the pass takes no checkpoint (see
+        /// ``ThinkingRender/transcriptBoundary(of:messages:tools:context:)``).
+        let transcriptBoundary: Int?
+    }
+
+    /// The prompt of a schema pass, and the index of it where the pass takes its checkpoint.
     ///
     /// A model whose reasoning protocol declares an ``ReasoningConfig/answerOpening`` (Inkling 2)
     /// renders no generation prompt: the model writes the header of its answer after the
@@ -1307,30 +1412,45 @@ extension MLXLanguageModel.Executor {
     /// that header then, and appends the header, thus the grammar starts where the answer
     /// starts. Every other model keeps `input`.
     ///
+    /// The checkpoint goes at the end of the last message of the render the pass feeds, before
+    /// the header or the generation prompt, as the checkpoint of a plain pass does.
+    ///
     /// - Parameters:
     ///   - messages: The chat messages of the schema prompt, the schema included
     ///   - input: The prompt rendered with no thinking state
     ///   - resolved: The resolver-patched configuration of the call
     ///   - context: The loaded model context
-    /// - Returns: The prompt the schema pass feeds.
+    /// - Returns: The prompt the schema pass feeds, and its checkpoint index.
     /// - Throws: `unsupportedCapability` when thinking cannot go off, or the error of the
     ///   processor.
     static func schemaInput(
         messages: [Chat.Message], input: LMInput, resolved: ModelConfiguration,
         context: ModelContext
-    ) async throws -> LMInput {
-        guard let schema = try schemaRender(resolved: resolved) else { return input }
+    ) async throws -> GuidedPrompt {
+        guard let schema = try schemaRender(resolved: resolved) else {
+            return GuidedPrompt(
+                input: input,
+                transcriptBoundary: await ThinkingRender().transcriptBoundary(
+                    of: input, messages: messages, tools: nil, context: context))
+        }
         let prompt = try await schema.render.prepare(
             messages: messages, tools: nil, context: context)
-        return ThinkingRender.openingAnswer(
-            of: prompt, config: schema.config, tokenizer: context.tokenizer)
+        return GuidedPrompt(
+            input: ThinkingRender.openingAnswer(
+                of: prompt, config: schema.config, tokenizer: context.tokenizer),
+            transcriptBoundary: await schema.render.transcriptBoundary(
+                of: prompt, messages: messages, tools: nil, context: context))
     }
 
     /// Runs schema output: guided generation constrained to the JSON schema of the request.
     ///
+    /// The pass takes the prompt cache of the session for the prefix its prompt shares with the
+    /// ledger of that cache, and checks its own ledger in (see
+    /// ``runGuidedLoop(input:transcriptBoundary:grammar:maxTokens:promptCache:speculation:context:onText:)``).
+    ///
     /// - Parameters:
     ///   - schemaJSON: The JSON schema the grammar constrains to
-    ///   - input: The rendered prompt
+    ///   - prompt: The rendered prompt, and the index of it where the pass takes its checkpoint
     ///   - modelID: The model identifier the constraint caches key on
     ///   - requestedMaxTokens: The caller's token budget, when set
     ///   - entryID: The transcript entry id for response events
@@ -1340,7 +1460,7 @@ extension MLXLanguageModel.Executor {
     ///   - channel: The channel to send response events into
     func runSchemaGeneration(
         schemaJSON: String,
-        input: LMInput,
+        prompt: GuidedPrompt,
         modelID: String,
         requestedMaxTokens: Int?,
         entryID: ResponseEntryID,
@@ -1349,10 +1469,6 @@ extension MLXLanguageModel.Executor {
         context: ModelContext,
         channel: LanguageModelExecutorGenerationChannel
     ) async throws {
-        // `GuidedGenerationLoop.run` builds its own key/value cache and
-        // accepts none from a caller, thus this pass carries nothing from an
-        // earlier turn and reports nothing.
-        promptCache.carriesNoCache()
         let maxTokens = requestedMaxTokens ?? Self.defaultMaxTokens
         let grammar = try await Self.guidedGrammar(
             kind: .json,
@@ -1370,9 +1486,10 @@ extension MLXLanguageModel.Executor {
             }
         }()
 
-        let (generatedTokenCount, incomplete) = try Self.runGuidedLoop(
-            input: input, grammar: grammar, maxTokens: maxTokens,
-            speculation: speculation, context: context
+        let pass = try Self.runGuidedLoop(
+            input: prompt.input, transcriptBoundary: prompt.transcriptBoundary, grammar: grammar,
+            maxTokens: maxTokens, promptCache: promptCache, speculation: speculation,
+            context: context
         ) { textContinuation.yield($0) }
 
         let cancellationError: Error?
@@ -1388,17 +1505,17 @@ extension MLXLanguageModel.Executor {
             throw cancellationError
         }
 
-        if let generatedTokenCount {
+        if let generatedTokenCount = pass.generatedTokenCount {
             await Self.emitUsage(
                 input: Self.usageInput(
-                    fedTokenCount: input.text.tokens.size, promptCache: promptCache),
+                    fedTokenCount: pass.fedTokenCount, promptCache: promptCache),
                 output: .init(
                     totalTokenCount: generatedTokenCount,
                     reasoningTokenCount: 0),
                 entryID: entryID,
                 into: channel)
         }
-        if incomplete {
+        if pass.incomplete {
             await Self.emitIncompleteOutput(entryID: entryID, into: channel)
         }
     }
@@ -1916,9 +2033,11 @@ extension MLXLanguageModel.Executor {
             config: config, primedInside: primedInside, tokenizer: context.tokenizer
         )
 
-        // Phase 1 speculates from a cache of its own. Its drafter state ends
-        // with its task: phase 2 feeds the prompt and the reasoning tokens to
-        // the guided loop's own new cache and runs no drafter, thus it needs
+        // Phase 1 speculates from a cache of its own, and leaves the prompt
+        // cache of the session as it is. Its drafter state ends with its task:
+        // phase 2 plans from the cache of the session and feeds the reasoning
+        // tokens after the prefix that cache serves, thus it resumes the
+        // drafter state that cache keeps, or starts its drafter cold, and needs
         // none of the state this phase leaves.
         let (stream, task) = try Self.startTrackedGeneration {
             try generateTokensTask(

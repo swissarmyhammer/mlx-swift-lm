@@ -454,15 +454,6 @@ struct ExecutorPromptCacheTests: PromptCacheKeyFixtures, PromptCachePlanFixtures
         #expect(ExecutorPromptCacheSlot(entry(tokens: [1, 2, 3])).reusedTokenCount == 0)
     }
 
-    @Test("a pass that carries no cache reports no reuse")
-    func aPassThatCarriesNoCacheReportsNoReuse() {
-        let slot = ExecutorPromptCacheSlot(entry(tokens: [1, 2, 3]))
-
-        slot.carriesNoCache()
-
-        #expect(slot.reusedTokenCount == 0)
-    }
-
     @Test("a pass that commits nothing leaves the session cold")
     func aPassThatCommitsNothingLeavesTheSessionCold() {
         let slot = ExecutorPromptCacheSlot(entry(tokens: [1, 2, 3]))

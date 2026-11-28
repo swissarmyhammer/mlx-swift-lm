@@ -88,8 +88,8 @@ struct GuidedPrefillStepSizeTests {
         let input = try await context.processor.prepare(input: UserInput(prompt: ""))
         try MLXLanguageModel.Executor.$prefillStepSize.withValue(prefillStepSize) {
             _ = try MLXLanguageModel.Executor.runGuidedLoop(
-                input: input, grammar: grammar, maxTokens: maxTokens, speculation: nil,
-                context: context
+                input: input, transcriptBoundary: nil, grammar: grammar, maxTokens: maxTokens,
+                promptCache: ExecutorPromptCacheSlot(nil), speculation: nil, context: context
             ) { _ in }
         }
         return model.resolvedStepSize

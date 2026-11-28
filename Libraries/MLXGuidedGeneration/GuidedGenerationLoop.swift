@@ -129,9 +129,14 @@ public enum GuidedGenerationLoop {
     /// when the target can verify its rounds in place, or with the drafter rank 0 of a cluster
     /// target holds.
     ///
-    /// The prefill feeds a drafter of this process the hidden rows of each prompt chunk, so a
-    /// new drafter state covers the whole prompt; this loop keeps no prompt cache. Rank 0 of a
-    /// cluster target feeds its drafter itself. The output is the output of plain guided
+    /// The generation continues the cache a caller carries, when it carries one: `input` is
+    /// then the rest of the prompt, after the tokens that cache holds. The prefill feeds a
+    /// drafter of this process the hidden rows of each prompt chunk, from the drafter
+    /// continuation of the carried cache when it stands where the cache ends, and from a cold
+    /// drafter state there otherwise. Rank 0 of a cluster target feeds its drafter itself. The
+    /// generation gives what it leaves to `handOff`: the model state of its prefill, and then
+    /// the tokens it counted with the caches of its target, which hold the prompt and every
+    /// token a forward fed. The output is the output of plain guided
     /// decoding: see ``GuidedSpeculation`` and ``GuidedClusterSpeculation``. A drafter that cannot draft for the
     /// target, or a target that cannot verify in place, leaves the generation to plain decoding,
     /// and the generation records why on its diagnostic sink, which the response metadata reads.
@@ -142,6 +147,9 @@ public enum GuidedGenerationLoop {
     /// - Parameters:
     ///   - speculation: The MTP drafter of the generation, or `nil` for plain decoding.
     ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
+    ///   - carried: The cache an earlier generation left, which this one continues, or `nil`
+    ///     for a new cache.
+    ///   - handOff: Receives what the generation leaves for the prompt cache of the caller.
     ///   - Other parameters: As ``run(input:context:constraint:maxTokens:vocabSize:kvCache:kvBits:kvGroupSize:quantizedKVStart:completionReserve:hardReserve:closingBias:whitespaceBias:whitespaceTokenIDs:stringTokens:diagnosticLog:logitProcessor:logitSampler:prefill:emit:)``
     ///     takes them.
     /// - Returns: Total number of tokens generated (including FF tokens).
@@ -169,22 +177,27 @@ public enum GuidedGenerationLoop {
         prefill: PrefillParameters = .init(),
         speculation: MTPSpeculation?,
         bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing(),
+        carried: GuidedCarriedCache? = nil,
+        handOff: GuidedCacheHandOff = GuidedCacheHandOff(),
         emit: (String) -> Bool
     ) throws -> Int {
         let parameters = GenerateParameters(
             kvCache: kvCache, kvBits: kvBits, kvGroupSize: kvGroupSize,
             quantizedKVStart: quantizedKVStart)
-        var target = try GuidedTarget(model: context.model, parameters: parameters)
+        var target = try GuidedTarget(
+            model: context.model, parameters: parameters, carried: carried)
         let speculation = logitProcessor == nil && logitSampler == nil ? speculation : nil
         let drafter = GuidedSpeculation.drafter(of: speculation, for: &target)
         var feed: MTPDrafterPrefillFeed?
         if case .local = drafter {
             feed = speculation?.prefillFeed(
-                target: context.model, parameters: parameters, cachePosition: 0,
-                continuation: nil)
+                target: context.model, parameters: parameters,
+                cachePosition: target.cacheStorage.processedTokenCount,
+                continuation: carried?.drafterContinuation)
         }
         let prefilled = try target.prefill(
             input, parameters: prefill, drafterFeed: feed)
+        handOff.prefillDidEnd(target.state)
         let logitDim = prefilled.logits.shape[prefilled.logits.ndim - 1]
         let rules = GuidedDecisionRules(
             constraint: constraint, maxTokens: maxTokens, vocabSize: vocabSize,
@@ -205,25 +218,50 @@ public enum GuidedGenerationLoop {
                 bufferPoolClearing: bufferPoolClearing, logitProcessor: logitProcessor,
                 logitSampler: logitSampler, prompt: input.text.tokens, emit: emit)
             defer { decoder.finalizeProcessor() }
-            guard decoder.hasBudget, let first = try decoder.decide(from: prefilled.logits)
-            else { return try decoder.finish() }
-            switch drafter {
-            case .cluster(var speculating):
-                try speculating.decode(from: first, decoder: &decoder, target: target)
-            case .local(let drafter):
-                if let speculation,
-                    var speculating = GuidedSpeculation(
-                        speculation: speculation, drafter: drafter, feed: feed,
-                        prefill: prefilled, firstFeed: first, target: target)
-                {
-                    try speculating.decode(from: first, decoder: &decoder, target: &target)
-                } else {
-                    try decodePlainly(from: first, decoder: &decoder, target: &target)
-                }
-            case nil:
+            if decoder.hasBudget, let first = try decoder.decide(from: prefilled.logits) {
+                try decode(
+                    from: first, drafter: drafter, speculation: speculation, feed: feed,
+                    prefilled: prefilled, decoder: &decoder, target: &target)
+            }
+            handOff.generationDidEnd(
+                GuidedGeneratedCache(countedTokens: decoder.countedTokens, cache: target.cache))
+            return try decoder.finish()
+        }
+    }
+
+    /// Decodes the rest of a generation from `first`, the tokens its first decision feeds the
+    /// target: speculating with `drafter` when it can, and plainly otherwise.
+    ///
+    /// - Parameters:
+    ///   - first: The tokens of the first decision, which no forward fed yet.
+    ///   - drafter: The drafter of the generation, or `nil` for plain decoding.
+    ///   - speculation: The speculation of the generation, or `nil`.
+    ///   - feed: The feed the prefill chunks went through, or `nil`.
+    ///   - prefilled: What the prefill gave.
+    ///   - decoder: The decisions and the output of the generation.
+    ///   - target: The target.
+    /// - Throws: `CancellationError`, the failure of a forward of a cluster target, or the error
+    ///   of the matcher.
+    private static func decode(
+        from first: [Int32], drafter: GuidedDrafter?, speculation: MTPSpeculation?,
+        feed: MTPDrafterPrefillFeed?, prefilled: GuidedPrefill, decoder: inout GuidedDecoder,
+        target: inout GuidedTarget
+    ) throws {
+        switch drafter {
+        case .cluster(var speculating):
+            try speculating.decode(from: first, decoder: &decoder, target: target)
+        case .local(let drafter):
+            if let speculation,
+                var speculating = GuidedSpeculation(
+                    speculation: speculation, drafter: drafter, feed: feed,
+                    prefill: prefilled, firstFeed: first, target: target)
+            {
+                try speculating.decode(from: first, decoder: &decoder, target: &target)
+            } else {
                 try decodePlainly(from: first, decoder: &decoder, target: &target)
             }
-            return try decoder.finish()
+        case nil:
+            try decodePlainly(from: first, decoder: &decoder, target: &target)
         }
     }
 

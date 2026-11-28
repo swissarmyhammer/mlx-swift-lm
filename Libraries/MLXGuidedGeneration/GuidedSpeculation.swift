@@ -298,8 +298,13 @@ struct GuidedSpeculation {
             draftedTokenCount: drafts.count, acceptedDraftTokenCount: accepted)
 
         var lastFeed = [bonus]
-        for draft in drafts.prefix(accepted) {
-            guard let feed = decoder.accept(draft) else { return nil }
+        for (index, draft) in drafts.prefix(accepted).enumerated() {
+            guard let feed = decoder.accept(draft) else {
+                // The generation stops at this draft. The main cache keeps the decided token and
+                // the drafts before it, which the output holds whole.
+                target.keepVerified(1 + index, of: batch.tokens.count)
+                return nil
+            }
             lastFeed = feed
         }
         let kept = batch.keptPositions(accepted: accepted, of: drafts.count)
@@ -314,8 +319,10 @@ struct GuidedSpeculation {
             try decoder.advance(reusing: chain.nextPosition)
             next = try Self.decide(at: kept - 1, of: output.logits, decoder: &decoder)
         }
-        guard let next else { return nil }
+        // The main cache keeps the verified positions the output counted even when the
+        // generation stops here: no rejected draft stays in it.
         target.keepVerified(kept, of: batch.tokens.count)
+        guard let next else { return nil }
         commitDrafter(
             fed: batch.tokens, kept: kept, hidden: output.state?[mtpLastHiddenStatesKey],
             positionDeltas: output.state?[mtpPositionDeltasKey], next: next, target: target)

@@ -73,9 +73,8 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
 
     /// The prompt tokens the last planned pass did not feed to the model.
     ///
-    /// Zero until a pass carries a cache. A pass that builds its own cache --
-    /// the guided loop does -- leaves the value at zero, which is the measured
-    /// truth for that pass.
+    /// Zero until a pass carries a cache. Every pass plans, the guided passes
+    /// as well, thus the value is the measured truth for the last pass.
     private(set) var reusedTokenCount = 0
 
     /// The prompt tokens the last planned pass fed to the model before its
@@ -269,25 +268,6 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
             $0.checkpointAtPromptEnd(state: state, drafterState: drafterState())
         }
         promptEndCheckpointPlan = nil
-    }
-
-    /// Records that the pass about to run carries no cache from an earlier turn.
-    ///
-    /// The guided loop owns its key/value cache and accepts none from a caller,
-    /// thus a guided pass reuses nothing and must report nothing, even when an
-    /// earlier pass of the same response reused a prefix.
-    ///
-    /// The slot also gives up what it carries. The ledger of that cache does
-    /// not record the guided pass, thus the response checks in nothing and the
-    /// next turn of the session starts cold.
-    func carriesNoCache() {
-        carried = .none
-        reusedTokenCount = 0
-        prefilledTokenCount = 0
-        uncommittedTokenCount = 0
-        promptEndCheckpointPlan = nil
-        promptEndCheckpoint = nil
-        report(ExecutorPromptCacheReport.guidedLine(key: key))
     }
 
     /// Records the cache a finished pass leaves for the next turn, and logs

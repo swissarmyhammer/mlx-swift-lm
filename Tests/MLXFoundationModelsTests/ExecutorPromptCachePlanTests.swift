@@ -683,23 +683,6 @@ struct ExecutorPromptCachePlanTests: PromptCacheKeyFixtures, PromptCachePlanFixt
                 "prompt cache commit model=test/prompt-cache session=session-1 ledger=4",
             ])
     }
-
-    @Test("a guided pass reports that it owns its cache")
-    func aGuidedPassReportsThatItOwnsItsCache() {
-        var lines: [String] = []
-        let slot = ExecutorPromptCacheSlot(nil, key: reportedKey) { lines.append($0) }
-
-        slot.carriesNoCache()
-        slot.commit(nil, generatedTokens: [])
-
-        #expect(
-            lines == [
-                "prompt cache plan model=test/prompt-cache session=session-1 "
-                    + "rule=guided (the guided pass owns its cache and carries none)",
-                "prompt cache commit model=test/prompt-cache session=session-1 "
-                    + "checked in nothing: the pass carried no plan",
-            ])
-    }
 }
 
 #endif  // FoundationModelsIntegration

@@ -39,6 +39,13 @@ struct GuidedDecoder {
     /// The tokens counted so far, sampled and fast-forwarded.
     private(set) var tokenCount = 0
 
+    /// Each token counted so far, in order: ``tokenCount`` of them.
+    ///
+    /// Every token a forward feeds the target is one of them, in the same order, thus a prompt
+    /// cache whose target holds the prompt and the first `n` fed tokens names them with the
+    /// prompt and the first `n` of these.
+    private(set) var countedTokens: [Int] = []
+
     /// Whether the grammar stopped the generation: it terminated, or allowed a stop token.
     private(set) var grammarStopped = false
 
@@ -296,6 +303,7 @@ struct GuidedDecoder {
             }
         }
         tokenCount += 1
+        countedTokens.append(token)
         return true
     }
 

@@ -679,15 +679,6 @@ enum ExecutorPromptCacheReport {
             + "ledger=<<<\(decodeTokens(seam.ledgerTokens))>>>"
     }
 
-    /// The line of a guided pass, which owns its cache and carries none.
-    ///
-    /// - Parameter key: the session of the pass, or nil.
-    /// - Returns: one line.
-    static func guidedLine(key: ExecutorPromptCacheKey?) -> String {
-        "prompt cache plan \(session(key)) "
-            + "rule=guided (the guided pass owns its cache and carries none)"
-    }
-
     /// The line that names what the finished pass checked in.
     ///
     /// - Parameters:

@@ -169,6 +169,10 @@ struct GuidedFixtureRun {
     /// What the generation recorded.
     let sink: GuidedGenerationDiagnosticSink
 
+    /// The tokens the generation counted and the caches of its target, as it handed them over
+    /// when its decoding ended, or `nil` when it threw before.
+    let generated: GuidedGeneratedCache?
+
     /// The grammar, the tokenizer vocabulary and the biases of one schema over a tokenizer.
     struct Grammar {
         let constraint: GrammarConstraint
@@ -237,6 +241,7 @@ struct GuidedFixtureRun {
         var text = ""
         var tokenCount: Int?
         var incomplete = false
+        var generated: GuidedGeneratedCache?
         do {
             tokenCount = try GuidedGenerationDiagnosticSink.$current.withValue(sink) {
                 try GuidedGenerationLoop.run(
@@ -250,7 +255,8 @@ struct GuidedFixtureRun {
                     whitespaceBias: grammar.whitespaceBias,
                     whitespaceTokenIDs: grammar.whitespaceTokenIDs,
                     stringTokens: grammar.stringTokens, prefill: prefill,
-                    speculation: speculation, bufferPoolClearing: bufferPoolClearing
+                    speculation: speculation, bufferPoolClearing: bufferPoolClearing,
+                    handOff: GuidedCacheHandOff(generationDidEnd: { generated = $0 })
                 ) { delta in
                     text += delta
                     return true
@@ -260,7 +266,8 @@ struct GuidedFixtureRun {
             incomplete = true
         }
         return GuidedFixtureRun(
-            text: text, tokenCount: tokenCount, incomplete: incomplete, sink: sink)
+            text: text, tokenCount: tokenCount, incomplete: incomplete, sink: sink,
+            generated: generated)
     }
 }
 

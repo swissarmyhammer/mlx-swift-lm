@@ -1694,7 +1694,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// - Throws: The error of the generation path.
         private func dispatchGeneration(
             _ turn: RespondTurn, messages: [Chat.Message], input: LMInput,
-            schemaInput: () async throws -> LMInput,
+            schemaInput: () async throws -> GuidedPrompt,
             reasoningPlan: ReasoningPlan, resolved: ModelConfiguration,
             speculation: MTPSpeculation?, context: ModelContext
         ) async throws {
@@ -1730,7 +1730,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             } else if let schemaJSON = turn.schemaJSON {
                 try await runSchemaGeneration(
                     schemaJSON: schemaJSON,
-                    input: try await schemaInput(),
+                    prompt: try await schemaInput(),
                     modelID: turn.modelID,
                     requestedMaxTokens: turn.requestedMaxTokens,
                     entryID: turn.entryID,

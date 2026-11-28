@@ -51,20 +51,29 @@ struct GuidedTarget {
     /// The cache of each layer.
     var cache: [KVCache] { cacheStorage.cache }
 
-    /// Makes a new cache for `model`.
+    /// Makes the target of `model` over the cache and the model state a caller carries, or over
+    /// a new cache.
     ///
     /// - Parameters:
     ///   - model: The target model.
     ///   - parameters: The parameters of the cache.
-    /// - Throws: The error of the cache plan.
-    init(model: any LanguageModel, parameters: GenerateParameters) throws {
+    ///   - carried: The cache and the model state an earlier generation left, which this one
+    ///     continues, or `nil` for a new cache.
+    /// - Throws: The error of the cache plan, or of a new cache.
+    init(
+        model: any LanguageModel, parameters: GenerateParameters,
+        carried: GuidedCarriedCache? = nil
+    ) throws {
         let plan = try parameters.kvCachePlan()
         self.model = model
         self.cacheStorage = try plan.validated(
-            KVCacheStorage(try model.newCache(parameters: parameters), plan: plan))
+            KVCacheStorage(try carried?.cache ?? model.newCache(parameters: parameters), plan: plan)
+        )
+        self.state = carried?.state
     }
 
-    /// Prefills the prompt.
+    /// Prefills the prompt, after the tokens a carried cache holds, from the model state that
+    /// cache carries.
     ///
     /// With a drafter feed, `prepare` hands the feed the hidden rows of each prompt chunk, and
     /// the final forward emits the hidden rows of the segment after the chunks, whether the
@@ -85,7 +94,7 @@ struct GuidedTarget {
         let segment: MLXArray?
         switch try model.prepare(
             input, cache: cache,
-            state: drafterFeed.map { emittingState(from: nil).feeding($0.chunkHandler) },
+            state: drafterFeed.map { emittingState(from: state).feeding($0.chunkHandler) } ?? state,
             prefill: parameters)
         {
         case .tokens(let tokens):
@@ -96,7 +105,7 @@ struct GuidedTarget {
             cacheStorage.commitProcessedTokens(inputLength - remainingLength)
             output = model(
                 tokens[text: .newAxis], cache: cache,
-                state: drafterFeed.map { _ in emittingState(from: nil) })
+                state: drafterFeed == nil ? state : emittingState(from: state))
             cacheStorage.commitProcessedTokens(remainingLength)
             segment = tokens.tokens
         case .logits(let result):
