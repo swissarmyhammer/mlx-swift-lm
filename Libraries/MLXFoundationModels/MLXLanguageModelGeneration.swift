@@ -229,7 +229,9 @@ extension MLXLanguageModel.Executor {
                 declaresReasoning
                 ? Self.thinkingEnabled(for: request.contextOptions.reasoningLevel)
                 : false
-            toolAwareRender = try ThinkingRender(config: config, thinkingEnabled: enabled)
+            toolAwareRender = try ThinkingRender(
+                config: config, thinkingEnabled: enabled,
+                effort: Self.reasoningEffort(for: request.contextOptions.reasoningLevel))
         } else {
             toolAwareRender = ThinkingRender()
         }
@@ -1451,14 +1453,17 @@ extension MLXLanguageModel.Executor {
     /// - Parameters:
     ///   - config: The reasoning protocol of the model
     ///   - thinkingEnabled: `true` / `false` to force thinking on / off, `nil` for the default
+    ///   - effort: The named reasoning effort level, or `nil` for the default of the template
     ///   - cannotDisableMessage: The description of the error for a model that always reasons
     /// - Returns: The render.
     /// - Throws: `unsupportedCapability(.reasoning)` when thinking cannot go off.
     static func thinkingRender(
-        config: ReasoningConfig, thinkingEnabled: Bool?, cannotDisableMessage: String
+        config: ReasoningConfig, thinkingEnabled: Bool?, effort: String? = nil,
+        cannotDisableMessage: String
     ) throws -> ThinkingRender {
         do {
-            return try ThinkingRender(config: config, thinkingEnabled: thinkingEnabled)
+            return try ThinkingRender(
+                config: config, thinkingEnabled: thinkingEnabled, effort: effort)
         } catch ReasoningError.cannotDisableReasoning {
             throw unsupportedCapability(.reasoning, cannotDisableMessage)
         }
@@ -1891,6 +1896,7 @@ extension MLXLanguageModel.Executor {
     ///   - messages: The chat messages the prompt renders from
     ///   - config: The reasoning protocol of the model
     ///   - thinkingEnabled: `true` / `false` to force thinking on / off, `nil` for the default
+    ///   - effort: The named reasoning effort level, or `nil` for the default of the template
     ///   - context: The loaded model context whose processor renders the prompt
     ///   - cannotDisableMessage: The description of the error for a model that always reasons
     /// - Returns: The render that made the prompt, and the prepared prompt
@@ -1899,11 +1905,12 @@ extension MLXLanguageModel.Executor {
         messages: [Chat.Message],
         config: ReasoningConfig,
         thinkingEnabled: Bool?,
+        effort: String? = nil,
         context: ModelContext,
         cannotDisableMessage: String
     ) async throws -> (render: ThinkingRender, input: LMInput) {
         let render = try thinkingRender(
-            config: config, thinkingEnabled: thinkingEnabled,
+            config: config, thinkingEnabled: thinkingEnabled, effort: effort,
             cannotDisableMessage: cannotDisableMessage)
         return (
             render, try await render.prepare(messages: messages, tools: nil, context: context)
@@ -2011,6 +2018,20 @@ extension MLXLanguageModel.Executor {
             logger.error("Unrecognized reasoning level \(level); thinking stays on")
             return true
         }
+    }
+
+    /// The named reasoning effort level that a requested level sends to the template, or
+    /// `nil` to keep the default level of the template.
+    ///
+    /// Only a `.custom` level has a name: `.custom("low")` gives `low`. The package convention
+    /// `.custom("no_think")` turns thinking off and names no level. An empty name, the levels
+    /// `.light`, `.moderate` and `.deep`, and no level give `nil`, thus their renders do not
+    /// change. A model whose protocol has no ``ReasoningConfig/effortKey`` ignores the name.
+    static func reasoningEffort(for level: ContextOptions.ReasoningLevel?) -> String? {
+        guard case .custom(let value) = level else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty, normalized != "no_think" else { return nil }
+        return normalized
     }
 
     /// The effective thinking state for a `.templateFlag` model: an

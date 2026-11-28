@@ -279,6 +279,16 @@ public struct ReasoningConfig: Sendable, Equatable {
     /// default `nil` leaves the prompt of every other protocol unchanged.
     public var answerOpening: String?
 
+    /// The template variable that takes a named reasoning effort level, or `nil` when the
+    /// template of the model reads no such level.
+    ///
+    /// A render with thinking on and a named level states the level under this key
+    /// (``ThinkingRender/init(config:thinkingEnabled:effort:)``). A render with no level
+    /// states nothing under it, thus the template keeps its own default level. A render with
+    /// thinking off never states a level. The key can be the key of the thinking flag: the
+    /// Inkling 2 template reads its level and its off value from `reasoning_effort`.
+    public var effortKey: String?
+
     /// Creates a reasoning protocol.
     ///
     /// - Parameters:

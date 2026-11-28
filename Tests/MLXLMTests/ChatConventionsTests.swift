@@ -171,8 +171,9 @@ struct ChatConventionsTests {
 
     /// A validated transition must be the only wire delta a family adds to the
     /// protocol it derives from, so the wire syntax cannot drift per family.
-    /// Qwen 3.5 also replays reasoning into history and renders thinking off as
-    /// a closed block, which change the history render and not the delimiters.
+    /// Qwen 3.5 also replays reasoning into history, renders thinking off as
+    /// a closed block, and sends a named effort level, which change the render
+    /// and not the delimiters.
     @Test func budgetTransitionsAreTheOnlyFamilyDelta() {
         for derived in [QwenReasoningProtocol.qwen3, QwenReasoningProtocol.qwen35] {
             var withoutTransition = derived
@@ -180,6 +181,7 @@ struct ChatConventionsTests {
             withoutTransition.replaysReasoningIntoHistory =
                 QwenReasoningProtocol.tagged.replaysReasoningIntoHistory
             withoutTransition.promptStrategy = QwenReasoningProtocol.tagged.promptStrategy
+            withoutTransition.effortKey = QwenReasoningProtocol.tagged.effortKey
             #expect(withoutTransition == QwenReasoningProtocol.tagged)
             #expect(derived.budgetTransition != nil)
         }

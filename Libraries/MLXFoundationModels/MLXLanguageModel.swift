@@ -1960,7 +1960,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 let prepared = Self.answering(
                     try await Self.preparedInput(
                         messages: messages, config: reasoningConfig,
-                        thinkingEnabled: thinkingEnabled, context: context,
+                        thinkingEnabled: thinkingEnabled,
+                        effort: Self.reasoningEffort(for: request.contextOptions.reasoningLevel),
+                        context: context,
                         cannotDisableMessage:
                             "This model always reasons; reasoning cannot be disabled via reasoningLevel."
                     ),

@@ -21,7 +21,8 @@ private struct UnexpectedPromptError: Error {}
 ///
 /// - The reasoning instructions go first in the system block when
 ///   `enable_thinking` is undefined or true, and they are absent when it is
-///   false.
+///   false. They name the level of `reasoning_effort`, `xhigh` when it is
+///   undefined.
 /// - The generation prompt is the assistant header and an open think block when
 ///   thinking is on, and the header and a closed, empty think block when
 ///   thinking is off.
@@ -33,8 +34,20 @@ struct Qwen35TemplateContractProcessor: UserInputProcessor {
     /// The chat template flag that turns thinking on and off.
     static let thinkingFlag = "enable_thinking"
 
-    /// The reasoning instructions that the template writes when thinking is on.
-    static let reasoningInstructions = "Reasoning effort is set to xhigh."
+    /// The template variable that names the reasoning effort level.
+    static let effortKey = "reasoning_effort"
+
+    /// The level that the template uses when `reasoning_effort` is undefined.
+    static let defaultEffort = "xhigh"
+
+    /// The reasoning instructions that the template writes when thinking is on at `effort`.
+    static func reasoningInstructions(effort: String) -> String {
+        "Reasoning effort is set to \(effort)."
+    }
+
+    /// The reasoning instructions that the template writes when thinking is on at the
+    /// default level.
+    static let reasoningInstructions = reasoningInstructions(effort: defaultEffort)
 
     /// The header that opens the assistant turn of the generation prompt.
     static let assistantHeader = "<|im_start|>assistant\n"
@@ -56,8 +69,10 @@ struct Qwen35TemplateContractProcessor: UserInputProcessor {
     func prepare(input: UserInput) async throws -> LMInput {
         guard case .chat(let messages) = input.prompt else { throw UnexpectedPromptError() }
         let thinking = (input.additionalContext?[Self.thinkingFlag] as? Bool) != false
+        let effort = input.additionalContext?[Self.effortKey] as? String ?? Self.defaultEffort
         let text = Self.render(
-            messages: messages, toolCount: input.tools?.count ?? 0, thinking: thinking)
+            messages: messages, toolCount: input.tools?.count ?? 0, thinking: thinking,
+            effort: effort)
         let tokens = ScriptedByteTokenizer().encode(text: text, addSpecialTokens: false)
         return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
     }
@@ -68,10 +83,13 @@ struct Qwen35TemplateContractProcessor: UserInputProcessor {
     ///   - instructions: the text of the system message, or nil when there is none.
     ///   - toolCount: the number of tools the render describes.
     ///   - thinking: whether the template flag turns thinking on.
+    ///   - effort: the reasoning effort level that the instructions name.
     /// - Returns: the system block, or an empty string when it holds nothing.
-    static func systemBlock(instructions: String?, toolCount: Int, thinking: Bool) -> String {
+    static func systemBlock(
+        instructions: String?, toolCount: Int, thinking: Bool, effort: String = defaultEffort
+    ) -> String {
         let parts = [
-            thinking ? reasoningInstructions : "",
+            thinking ? reasoningInstructions(effort: effort) : "",
             toolCount > 0 ? "# Tools: \(toolCount)" : "",
             instructions ?? "",
         ].filter { !$0.isEmpty }
@@ -80,12 +98,15 @@ struct Qwen35TemplateContractProcessor: UserInputProcessor {
     }
 
     /// Renders the system block, each turn, and the generation prompt.
-    private static func render(messages: [Chat.Message], toolCount: Int, thinking: Bool) -> String {
+    private static func render(
+        messages: [Chat.Message], toolCount: Int, thinking: Bool, effort: String
+    ) -> String {
         let instructions = messages.first { $0.role == .system }?.content
         let turns = messages.filter { $0.role != .system }.map {
             "<|im_start|>\($0.role.rawValue)\n\($0.content)<|im_end|>\n"
         }
-        return systemBlock(instructions: instructions, toolCount: toolCount, thinking: thinking)
+        return systemBlock(
+            instructions: instructions, toolCount: toolCount, thinking: thinking, effort: effort)
             + turns.joined() + assistantHeader + (thinking ? openThinkBlock : closedThinkBlock)
     }
 }

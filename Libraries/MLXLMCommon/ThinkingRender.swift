@@ -40,13 +40,24 @@ public struct ThinkingRender: Sendable {
     ///   - thinkingEnabled: `true` / `false` to force thinking on / off,
     ///     `nil` when the caller expressed no preference. With `nil`, the
     ///     render states the default of the strategy.
+    ///   - effort: the named reasoning effort level, for example `low`, or `nil` to keep
+    ///     the default level of the template. The render states it under the
+    ///     ``ReasoningConfig/effortKey`` of `config` only when thinking is on. A protocol
+    ///     with no effort key ignores it.
     /// - Throws: ``ReasoningError/cannotDisableReasoning`` when `false` is
     ///   requested on a strategy that cannot turn thinking off.
-    public init(config: ReasoningConfig, thinkingEnabled: Bool?) throws {
-        additionalContext = try config.promptStrategy.additionalContext(
-            forThinkingEnabled: thinkingEnabled)
-        closing = config.promptStrategy.closedBlock(forThinkingEnabled: thinkingEnabled)
-            .map { (config, $0) }
+    public init(config: ReasoningConfig, thinkingEnabled: Bool?, effort: String? = nil) throws {
+        let strategy = config.promptStrategy
+        var context = try strategy.additionalContext(forThinkingEnabled: thinkingEnabled)
+        let closedBlock = strategy.closedBlock(forThinkingEnabled: thinkingEnabled)
+        if let effort, let effortKey = config.effortKey, closedBlock == nil,
+            case .templateFlag(_, let defaultOn, _) = strategy,
+            thinkingEnabled ?? defaultOn
+        {
+            context = (context ?? [:]).merging([effortKey: effort]) { _, level in level }
+        }
+        additionalContext = context
+        closing = closedBlock.map { (config, $0) }
     }
 
     /// The render of a thinking switch that a caller can leave unset.

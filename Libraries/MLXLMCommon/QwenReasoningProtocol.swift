@@ -40,6 +40,9 @@ public enum QwenReasoningProtocol {
     /// writes for the flag `false` (``ThinkingOffRender/closedBlock(_:)``).
     /// Card `^v3dt28p` measured the two full prefills.
     ///
+    /// A named level goes to the template as `reasoning_effort`
+    /// (``ReasoningConfig/effortKey``).
+    ///
     /// Qwen3.5 answers from a span that was only closed, thus its hard-budget
     /// transition is ``ReasoningBudgetTransition/immediate``. Qwen publishes no
     /// `early_stopping_text` for this generation, and forcing Qwen3's changed
@@ -52,8 +55,16 @@ public enum QwenReasoningProtocol {
         config.replaysReasoningIntoHistory = true
         config.promptStrategy = .templateFlag(
             key: thinkingFlag, defaultOn: true, thinkingOff: .closedBlock(closedThinkBlock))
+        config.effortKey = effortKey
         return config
     }()
+
+    /// The template variable that takes a named reasoning effort level.
+    ///
+    /// The Qwen3.8 template reads it, for example `low`, and writes "Reasoning effort is set
+    /// to low." in its system block; with no value it writes its default `xhigh`. The Qwen
+    /// 3.5 template does not read it, thus a level changes nothing in its render.
+    private static let effortKey = "reasoning_effort"
 
     /// The chat template flag that turns Qwen thinking on and off.
     private static let thinkingFlag = "enable_thinking"

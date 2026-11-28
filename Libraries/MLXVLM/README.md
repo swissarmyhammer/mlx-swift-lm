@@ -117,6 +117,7 @@ The vision tower loads on the first image, so text-only use does not pay for it.
 The chat template sets the thinking effort, 0.9 by default. Pass another one in
 `additionalContext`, for example `["reasoning_effort": "low"]`: a name (`none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) or a number from 0 to 0.99.
+On `MLXLanguageModel`, `ContextOptions.reasoningLevel = .custom("low")` sets the same level.
 `ChatSession.thinkingEnabled = false`, and an `MLXLanguageModel` that does not declare
 `.reasoning`, set the effort `none`. At that effort Inkling 2 Mini still writes a short
 thinking frame, which streams as reasoning.

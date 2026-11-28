@@ -36,6 +36,7 @@ public enum InklingReasoningProtocol {
             isSpecialToken: true,
             replaysReasoningIntoHistory: true)
         config.answerOpening = answerOpening
+        config.effortKey = effortKey
         return config
     }()
 

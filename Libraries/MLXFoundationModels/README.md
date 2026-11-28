@@ -79,6 +79,12 @@ Declare what a model may do with the `capabilities:` list at construction. Decla
 | `.reasoning` | Run "thinking" models that emit a reasoning trace. |
 | `.vision` | Accept image inputs. |
 
+### Reasoning level
+
+`ContextOptions.reasoningLevel` turns thinking on or off. No level keeps the default of the template. `.custom("no_think")` turns thinking off. Each other level turns thinking on.
+
+A `.custom` level names an effort level, for example `.custom("low")`. When the reasoning protocol of the model has an `effortKey`, the render sends the name under that key, and the template writes that level. The plain path, the tool path and the think-then-call phase send the same name. Qwen3.8 (`QwenReasoningProtocol.qwen35`) and Inkling 2 read `reasoning_effort`. The Qwen3.8 template accepts `xhigh` (its default), `medium` and `low`, and raises an error for other names. The Qwen 3.5 template does not read the key, thus a name changes nothing for it. A model whose protocol has no effort key ignores the name. `.light`, `.moderate` and `.deep` name no level, thus the template keeps its default. A turn with thinking off sends no level.
+
 ### Required tool calls
 
 `GenerationOptions(toolCallingMode: .required)` makes the turn call one of the enabled tools: a grammar constrains the output to one tool call, after an unconstrained reasoning phase when the model reasons. The call takes the frame of the model's tool-call format. A plain text syntax writes the `<tool_call>` JSON envelope. Inkling 2 (`ToolCallFormat.inkling`) writes its own tool frame, `<|message_model|>NAME<|content_invoke_tool_json|>{"name": ..., "args": ...}<|end_message|>`, and reasons first, at every effort including `none`, inside a thinking frame that the turn opens, whose text streams as reasoning. Harmony (`gpt_oss`) and ATEM (`atem`) write tool calls only in frames that have no required-mode grammar, so a required turn of such a model throws `LanguageModelError.unsupportedCapability` for `.toolCalling` before it generates; use `.allowed` for them.
