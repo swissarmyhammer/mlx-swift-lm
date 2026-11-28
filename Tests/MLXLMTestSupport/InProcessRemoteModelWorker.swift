@@ -163,6 +163,22 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         lock.withLock { roundDrafterStarts }
     }
 
+    /// Runs `pass`, and returns what it returned with the start positions of the drafter of rank
+    /// 0 that the speculative rounds of `pass` recorded, in the order of the rounds, as
+    /// ``drafterStartPositionsOfRounds`` records them. The rounds before `pass` are left out.
+    ///
+    /// - Parameter pass: The work whose speculative rounds the starts come from.
+    /// - Returns: The result of `pass`, and the start position of the drafter of rank 0 in each
+    ///   round `pass` added.
+    /// - Throws: The error of `pass`.
+    public func drafterStarts<Result>(during pass: () async throws -> Result) async rethrows
+        -> (result: Result, starts: [Int])
+    {
+        let roundsBefore = drafterStartPositionsOfRounds.count
+        let result = try await pass()
+        return (result, Array(drafterStartPositionsOfRounds.dropFirst(roundsBefore)))
+    }
+
     /// The reasons of the failed replies of the followers, in order.
     public var followerFailures: [String] {
         lock.withLock { followerFailureReasons }

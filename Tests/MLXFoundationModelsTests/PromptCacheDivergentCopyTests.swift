@@ -56,6 +56,15 @@ struct PromptCacheDivergentCopyTests {
     /// after the instructions.
     private static let divergentPrompt = [11, 40, 8, 27, 19, 1, 38]
 
+    /// The tokens of the second prompt of the template.
+    private static let followUpPrompt = [12, 7, 30, 21]
+
+    /// The positions of the window of the sliding layers of ``TargetWindow/narrow``.
+    private static let narrowWindowSize = 8
+
+    /// The positions of the window of the sliding layers of ``TargetWindow/wide``.
+    private static let wideWindowSize = 64
+
     /// The tokens each pass generates.
     private static let generatedTokenCount = 16
 
@@ -302,8 +311,8 @@ extension PromptCacheDivergentCopyTests {
         /// The positions of the window.
         var size: Int {
             switch self {
-            case .narrow: 8
-            case .wide: 64
+            case .narrow: PromptCacheDivergentCopyTests.narrowWindowSize
+            case .wide: PromptCacheDivergentCopyTests.wideWindowSize
             }
         }
     }
@@ -346,14 +355,11 @@ extension PromptCacheDivergentCopyTests {
             _ = try await setup.respondAsTemplate()
             let copied = await setup.copyTemplate(keepingTokens: copy.keptTokenCount)
             try #require(copied.copiedTokenCount != nil, "The copy did not copy: \(copied)")
-            let templateRounds = worker.drafterStartPositionsOfRounds.count
-            turn = try await setup.respondAsSeededSession()
-            drafterStarts = Array(worker.drafterStartPositionsOfRounds.dropFirst(templateRounds))
+            (turn, drafterStarts) = try await worker.drafterStarts {
+                try await setup.respondAsSeededSession()
+            }
         }
     }
-
-    /// The tokens of the second prompt of the template.
-    private static let followUpPrompt = [12, 7, 30, 21]
 
     /// The tokens at the end of the first response that the render of the second turn of the
     /// template writes in another form, as a chat template writes the end of a message again.
@@ -376,12 +382,14 @@ extension PromptCacheDivergentCopyTests {
         init(on setup: CopySetup) async throws {
             let worker = try #require(setup.worker)
             let first = try await setup.respondAsTemplate()
-            let firstRounds = worker.drafterStartPositionsOfRounds.count
-            history = PromptCacheDivergentCopyTests.rerenderedHistory(of: first, setup: setup)
-            turn = try await setup.respond(
-                as: PromptCacheDivergentCopyTests.template,
-                prompt: PromptCacheDivergentCopyTests.followUpPrompt, after: history)
-            drafterStarts = Array(worker.drafterStartPositionsOfRounds.dropFirst(firstRounds))
+            let rerendered = PromptCacheDivergentCopyTests.rerenderedHistory(
+                of: first, setup: setup)
+            history = rerendered
+            (turn, drafterStarts) = try await worker.drafterStarts {
+                try await setup.respond(
+                    as: PromptCacheDivergentCopyTests.template,
+                    prompt: PromptCacheDivergentCopyTests.followUpPrompt, after: rerendered)
+            }
         }
     }
 
@@ -480,8 +488,12 @@ extension PromptCacheDivergentCopyTests {
         let drafted = metadata[SpeculativeDecodingOutcome.MetadataKey.draftedTokenCount] as? Int
         let accepted =
             metadata[SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount] as? Int
+        // The drafter and the target have random weights, so the target can keep none of the
+        // drafts: the accepted count is bound by zero and by the drafts the rounds proposed.
         #expect((drafted ?? 0) > 0)
         #expect(accepted != nil)
+        #expect((accepted ?? -1) >= 0)
+        #expect((accepted ?? Int.max) <= (drafted ?? 0))
     }
 }
 

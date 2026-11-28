@@ -53,6 +53,43 @@ comments:
     evidence: build-tests clean, swift-format lint clean; MLXLMTests 1261 XCTest + 2849 ST pass; MLXGuidedGenerationTests 96 pass; MLXFoundationModelsTests 770 pass; CXGrammarTests 7 pass; MLXHuggingFaceMacrosTests 11 pass; 0 failures, 0 skipped
     task: ^md0yqyr
   timestamp: 2026-11-28T10:38:39.700101+00:00
+- actor: claude-code
+  id: 01m8gvxyp0wgzqeqkh6fpqjj87
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (549de38d); 7 findings — Tests/MLXFoundationModelsTests/GuidedPromptCacheReuseTests.swift:522, Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift:305, :306, :351, :356, :384, :484
+    - next: implement the 7 unchecked items in `## Review Findings (2026-11-28 04:39)`; task stays in review
+  timestamp: 2026-11-28T10:41:33.888260+00:00
+- actor: claude-code
+  id: 01m8gvyewth49vnxjr3kexb3rd
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — every flow was already warm; read-only start-position hook + warm-start tests
+    - test: green — all 5 bundles (MLXLMTests 2849+1261, MLXFoundationModelsTests 770, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 549de38d
+    - review: findings — GuidedPromptCacheReuseTests.swift:522; PromptCacheDivergentCopyTests.swift:305, :306, :351, :356, :384, :484
+  timestamp: 2026-11-28T10:41:50.490594+00:00
+- actor: claude-code
+  id: 01m8gwnrxvp9026m9g7tcac9h8
+  text: |-
+    ### implement — changed
+    - evidence: fixed all 7 findings of `## Review Findings (2026-11-28 04:39)`, all flipped to [x].
+      - reuse: new `InProcessRemoteModelWorker.drafterStarts(during:) async rethrows -> (result:, starts:)` (generic over the pass result). It counts the recorded rounds, runs the pass, and returns the starts the pass added. `ClusteredSecondTurn`, `SeededSpeculativePass` and `RerenderedSpeculativePass` all call it, so no count-then-dropFirst code is left.
+      - magic numbers: the window sizes 8/64 are now `narrowWindowSize`/`wideWindowSize` static constants on the suite. `followUpPrompt` moved from the extension into the suite body beside the other token prompts. swiftlint `no_magic_numbers` does not count a static let array inside an extension as a named value, but it does count one in the type body. A swiftlint run with the validator's config (allowed [0,1,-1,100]) on all 3 files now reports 0.
+      - test cheating: `theSpeculativeSeededSessionReportsItsDraftCounts` now also expects `accepted >= 0` and `accepted <= drafted`. A comment says why zero is legitimate: random weights, and the earlier measurement accepted 0-1 of 36-39. The Qwen `aClusteredSecondTurnReportsTheDraftsTheTargetAccepted` had the same gap (only `accepted > 0`), so it now also expects `accepted <= drafted`. The pre-existing `aSpeculativeSecondSchemaTurnSpeculates` already checks `drafted > 0` and never reads accepted, so it does not have this weakness.
+      - all existing assertions are kept.
+    - verification: swift-format format plus lint are clean on the 3 files. `swift build --build-tests` is clean. MLXFoundationModelsTests: 770 ST tests passed. MLXLMTests in one process: 1261 XCTest tests with 0 failures, and 2849 ST tests passed (3 known issues, which existed before).
+    - files: Tests/MLXLMTestSupport/InProcessRemoteModelWorker.swift, Tests/MLXFoundationModelsTests/GuidedPromptCacheReuseTests.swift, Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift
+    - next: /review
+  timestamp: 2026-11-28T10:54:34.427763+00:00
+- actor: claude-code
+  id: 01m8gxenzb7xc9ah50z9jnajcd
+  text: |-
+    step: test
+    outcome: green
+    evidence: swift build --build-tests complete (no warnings from sources; only the SwiftPM bundle-node notice "missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS", a build-system message, not source); swift-format lint on the 3 changed files clean; xcrun xctest per bundle, each ended with its summary line, exit 0: MLXLMTests 1261 XCTest 0 failures + Swift Testing 2849 tests/282 suites passed (3 known issues, pre-existing withKnownIssue in AttentionKernelToleranceTests and MiniCPM5ToolCallParserTests, files not touched by this change); MLXGuidedGenerationTests 96 tests/23 suites passed; MLXFoundationModelsTests 770 tests/99 suites passed; CXGrammarTests 7 tests/5 suites passed; MLXHuggingFaceMacrosTests 11 XCTest 0 failures. 0 skipped (only matches are test names containing "Skipped").
+    task: ^md0yqyr
+  timestamp: 2026-11-28T11:08:10.603966+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Cluster MTP: test (and fix) that rank 0''s drafter starts warm on the turn after a guided turn, a template-seeded copy, and a checkpoint restore'
@@ -92,3 +129,19 @@ So a turn that extends the ledger after a guided cluster turn should be warm. Th
 - Output equals a cold run.
 - Acceptance counts are reported.
 #cluster
+
+## Review Findings (2026-11-28 04:39)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 6 file(s) reviewed, 2 not reviewed.
+
+> 2 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M8GQBM7P3THHNRX4NMD0YQYR.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8GQBM7P3THHNRX4NMD0YQYR.md` — no validator matches this file
+
+- [x] `Tests/MLXFoundationModelsTests/GuidedPromptCacheReuseTests.swift:522` `reuse/reuse` — `ClusteredSecondTurn` re-implements the per-pass drafter-start capture: it records `worker.drafterStartPositionsOfRounds.count` before a pass, then slices the array after it. `PromptCacheDivergentCopyTests.swift` repeats the same pattern in `SeededSpeculativePass` (lines 349 and 351) and `RerenderedSpeculativePass` (lines 379 and 384). Three copies of the same count-then-dropFirst logic will drift if the recording changes. Give `InProcessRemoteModelWorker` (Tests/MLXLMTestSupport/InProcessRemoteModelWorker.swift) one helper that runs a pass and returns the starts of the rounds it added, for example `func drafterStarts(during pass: () async throws -> MTPTurn) async rethrows -> (MTPTurn, [Int])`. Then have all three structs call it, or extend the existing `drafterStartPositionsOfRounds` with a `since:` parameter so the callers share one slicing rule.
+- [x] `Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift:305` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift:306` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift:351` `reuse/reuse` — `SeededSpeculativePass.init` repeats the count-then-slice capture of drafter starts that `ClusteredSecondTurn` already implements in `GuidedPromptCacheReuseTests.swift`. The two copies live in different files, so the shared form is not visible to either author. Use the same worker helper as the finding on `GuidedPromptCacheReuseTests.swift:522`, so this initializer reduces to one call.
+- [x] `Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift:356` `code-hygiene/magic-numbers-swift` — Magic numbers should be replaced by named constants.
+- [x] `Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift:384` `reuse/reuse` — `RerenderedSpeculativePass.init` repeats the same drafter-start capture a third time, with its own local `firstRounds` counter, instead of using a shared worker helper. Replace the counter and slice with the shared helper proposed for `GuidedPromptCacheReuseTests.swift:522`.
+- [x] `Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift:484` `test-integrity/no-test-cheating` — The test `theSpeculativeSeededSessionReportsItsDraftCounts` checks only that the accepted-draft count is non-nil. Any integer satisfies that, including 0 and a wrong count, so the assertion does not prove the target's accepted count is correct. This is a weakened assertion, and it is the only check on the accepted count in this test. Assert a bound that the protocol guarantees, such as `(accepted ?? -1) >= 0` and `(accepted ?? Int.max) <= (drafted ?? 0)`. If the drafter can legitimately accept zero drafts, say so in the test and check the accepted count against the number of drafts the speculative round reports.

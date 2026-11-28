@@ -513,13 +513,16 @@ struct GuidedPromptCacheReuseTests {
             let worker = try #require(setup.worker)
             let first = try await setup.respond(
                 to: GuidedPromptCacheReuseTests.request(pair.kinds.first, setup: setup))
-            let firstRounds = worker.drafterStartPositionsOfRounds.count
-            renderedFirstResponse = GuidedPromptCacheReuseTests.rewritingTail(
+            let rendered = GuidedPromptCacheReuseTests.rewritingTail(
                 of: first.responseText, count: rewrittenTail)
-            turn = try await setup.respond(
-                to: GuidedPromptCacheReuseTests.request(
-                    pair.kinds.second, setup: setup, firstResponse: renderedFirstResponse))
-            drafterStarts = Array(worker.drafterStartPositionsOfRounds.dropFirst(firstRounds))
+            let second = try await worker.drafterStarts {
+                try await setup.respond(
+                    to: GuidedPromptCacheReuseTests.request(
+                        pair.kinds.second, setup: setup, firstResponse: rendered))
+            }
+            renderedFirstResponse = rendered
+            turn = second.result
+            drafterStarts = second.starts
         }
     }
 
@@ -572,10 +575,12 @@ struct GuidedPromptCacheReuseTests {
 
         let second = try await ClusteredSecondTurn(of: pair, on: setup, rewritingTail: 0)
 
+        let metadata = second.turn.metadata
+        let drafted = metadata[SpeculativeDecodingOutcome.MetadataKey.draftedTokenCount] as? Int
         let accepted =
-            second.turn.metadata[SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount]
-            as? Int
+            metadata[SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount] as? Int
         #expect((accepted ?? 0) > 0)
+        #expect((accepted ?? Int.max) <= (drafted ?? 0))
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
