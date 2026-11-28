@@ -90,8 +90,24 @@ comments:
     evidence: swift build --build-tests complete (no warnings from sources; only the SwiftPM bundle-node notice "missing creator for mutated node ... mlx-swift_Cmlx.bundle/Contents/MacOS", a build-system message, not source); swift-format lint on the 3 changed files clean; xcrun xctest per bundle, each ended with its summary line, exit 0: MLXLMTests 1261 XCTest 0 failures + Swift Testing 2849 tests/282 suites passed (3 known issues, pre-existing withKnownIssue in AttentionKernelToleranceTests and MiniCPM5ToolCallParserTests, files not touched by this change); MLXGuidedGenerationTests 96 tests/23 suites passed; MLXFoundationModelsTests 770 tests/99 suites passed; CXGrammarTests 7 tests/5 suites passed; MLXHuggingFaceMacrosTests 11 XCTest 0 failures. 0 skipped (only matches are test names containing "Skipped").
     task: ^md0yqyr
   timestamp: 2026-11-28T11:08:10.603966+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8gxh4an80w1v5hjag6c2e14
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (9aa2c35d) — 0 findings (7 attempted, 2 refuted, 0 failed); 3 files reviewed, 2 .kanban files skipped (no validator); all 8 prior findings from 2026-11-28 04:39 checked
+    - next: task moved to done
+  timestamp: 2026-11-28T11:09:30.837403+00:00
+- actor: claude-code
+  id: 01m8gxhewe05gnrqcyrdzrajrb
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 test files, all 7 findings checked
+    - test: green — all 5 bundles (MLXLMTests 2849+1261, MLXFoundationModelsTests 770, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 9aa2c35d
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T11:09:41.646319+00:00
+position_column: done
+position_ordinal: ffffff9680
 title: 'Cluster MTP: test (and fix) that rank 0''s drafter starts warm on the turn after a guided turn, a template-seeded copy, and a checkpoint restore'
 ---
 ## What
