@@ -20,8 +20,24 @@ comments:
     - evidence: swift build --build-tests clean (0 warnings, 0 errors); xcrun xctest per bundle, all exit 0: MLXLMTests 2845 Swift Testing + 1261 XCTest, 0 failures; MLXGuidedGenerationTests 96 tests; MLXFoundationModelsTests 656 tests; CXGrammarTests 7 tests; MLXHuggingFaceMacrosTests 11 XCTest; 0 skipped. MLXLMTests reports 3 known issues, all intentional withKnownIssue negative checks in files this change does not touch (AttentionKernelToleranceTests, ToolTests MiniCPM5). swift-format lint on changed Swift files clean.
     - next: review
   timestamp: 2026-11-28T01:39:25.429554+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8fx1gj1qy7yhf939vw782rm
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (a33396b7): 0 findings (14 attempted, 0 failed); 8 files reviewed, 5 not matched by any validator (.kanban task files, Documentation.docc/distributed-inference.md)
+    - next: none; task moved to done
+  timestamp: 2026-11-28T01:41:44.641776+00:00
+- actor: claude-code
+  id: 01m8fx1v6yy9zrn15xm4c3b8h2
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — 9 files, 3 tests added; time-to-throw schema 60.12 s → 0.095 s, required-tool 60.01 s → 0.009 s
+    - test: green — all 5 bundles (MLXLMTests 2845+1261, MLXFoundationModelsTests 656, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: a33396b7
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T01:41:55.550197+00:00
+position_column: done
+position_ordinal: ffffff8c80
 title: 'Clustered models: a guided pass whose forward fails waits 60 s on its own drain section before it throws'
 ---
 ## What
