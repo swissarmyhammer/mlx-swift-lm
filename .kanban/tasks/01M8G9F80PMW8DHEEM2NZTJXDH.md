@@ -45,8 +45,24 @@ comments:
     - MLXLMTests reports 3 known issues, from withKnownIssue in AttentionKernelToleranceTests and ToolTests (MiniCPM5 CDATA). Tests/MLXLMTests has no working-tree changes, so these predate this task.
     - next: review
   timestamp: 2026-11-28T06:03:07.510383+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8gcdb89p66jre03pwrnh09w
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (9bba69fc): 0 findings (0 confirmed, 4 refuted, 28 attempted, 0 failed); 19 files reviewed, 9 unmatched (.kanban task files, Libraries/MLXFoundationModels/README.md)
+    - next: none — task moved to done
+  timestamp: 2026-11-28T06:10:21.065904+00:00
+- actor: claude-code
+  id: 01m8gcdp8gggfqxqch6y31kjfa
+  text: |-
+    ### finish iteration 1 — clean
+    - implement: changed — guided loop takes the carried cache and hands back tokens and caches; bypass removed; 3 new test files; follow-ups ^33h7w11 and ^8mvkb7t
+    - test: green — all 5 bundles (MLXLMTests 2845, MLXFoundationModelsTests 701, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 0 failures)
+    - commit: 9bba69fc
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T06:10:32.336453+00:00
+position_column: done
+position_ordinal: ffffff9180
 title: 'Prompt cache: guided passes take the carried cache for the common prefix and check their ledger in'
 ---
 ## What
