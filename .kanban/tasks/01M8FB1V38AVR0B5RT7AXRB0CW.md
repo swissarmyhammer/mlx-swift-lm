@@ -1,8 +1,27 @@
 ---
 assignees:
 - claude-code
-position_column: todo
-position_ordinal: '9080'
+comments:
+- actor: claude-code
+  id: 01m8fvvzhxs4xt0rcascjnr5fx
+  text: 'Research + RED: confirmed the cause on the card. New tests in ClusterExecutorTests (aSchemaTurnWhoseForwardLosesAMemberThrowsTheLossPromptly, aRequiredToolTurnWhoseForwardLosesAMemberThrowsTheLossPromptly) threw memberLost but after 60.12 s / 60.01 s (RED on the elapsed < 10 s expectation). Discovery: the required-tool pass of the fixture (ToolCallAlphabetTokenizer) runs ONE forward (the prompt) and ends incompleteOutput, so failForwards(after: 8) never strikes; the required-tool test uses after: 0. Fix approach: ClusterLanguageModel.withoutCancellingOnFailure(_:) (TaskLocal) keeps a failed forward from cancelling the current task; FM''s withGuidedGenerationSection runs the pass in it (runGuidedPass); GuidedTarget.checkFailure() throws the kept failure after each forward (prefill, feedOneAtATime, verify) and after a draft round, so the guided loop throws the unwrapped ClusterModelError at the failed forward. Not cancelling the respond task also keeps a caller (FoundationModelsRouter retry) from seeing its task cancelled. Rejected alternative: making the drain coordinator skip a section held by the cancelling thread — it would still cancel the respond task.'
+  timestamp: 2026-11-28T01:21:14.813733+00:00
+- actor: claude-code
+  id: 01m8fwbxepnyt2z37bbdq8m4g8
+  text: |-
+    ### implement — changed
+    - evidence: time to throw went from 60.12 s to 0.095 s (schema turn) and from 60.01 s to 0.009 s (required-tool turn); both throw memberLost("m5u2.local") unwrapped. Files: Libraries/MLXLMCommon/Remote/ClusterLanguageModel.swift (new withoutCancellingOnFailure(_:) with a TaskLocal; failGeneration skips the cancel inside it), Libraries/MLXGuidedGeneration/GuidedTarget.swift (checkFailure(); prefill/feedOneAtATime/verify throw the kept failure), GuidedSpeculation.swift and GuidedGenerationLoop.swift (try at the call sites, plus a check after each draft round), Libraries/MLXFoundationModels/MLXLanguageModelGeneration.swift (runGuidedPass wraps the guided section body), MLXLanguageModel.swift (doc), Documentation.docc/distributed-inference.md (doc). Tests: ClusterExecutorTests gets 2 new tests plus the extracted requiredToolRequest/schemaRequest helpers. ClusterLanguageModelTests gets aForwardThatFailsWithoutCancellingOnFailureLeavesItsTaskUncancelled, which failed when the guard was mutated to always cancel. Full runs: MLXFoundationModelsTests 656 passed, MLXGuidedGenerationTests 96 passed, MLXLMTests 2845 Swift Testing tests passed (3 known issues) and 1261 XCTest tests passed, 0 failures. swift-format applied.
+    - next: /review
+  timestamp: 2026-11-28T01:29:56.950823+00:00
+- actor: claude-code
+  id: 01m8fwx8knhvg593262kvckwww
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (0 warnings, 0 errors); xcrun xctest per bundle, all exit 0: MLXLMTests 2845 Swift Testing + 1261 XCTest, 0 failures; MLXGuidedGenerationTests 96 tests; MLXFoundationModelsTests 656 tests; CXGrammarTests 7 tests; MLXHuggingFaceMacrosTests 11 XCTest; 0 skipped. MLXLMTests reports 3 known issues, all intentional withKnownIssue negative checks in files this change does not touch (AttentionKernelToleranceTests, ToolTests MiniCPM5). swift-format lint on changed Swift files clean.
+    - next: review
+  timestamp: 2026-11-28T01:39:25.429554+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Clustered models: a guided pass whose forward fails waits 60 s on its own drain section before it throws'
 ---
 ## What

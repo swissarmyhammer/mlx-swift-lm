@@ -767,6 +767,10 @@ extension MLXLanguageModel.Executor {
     /// The MTP rounds and fallbacks of the pass go into the MTP outcome of
     /// the call, when the model speculates.
     ///
+    /// A forward of a `ClusterLanguageModel` that fails leaves the respond
+    /// task uncancelled (see ``runGuidedPass(_:)``), thus its cancellation
+    /// handler never waits on the section this same task holds.
+    ///
     /// - Parameter body: the guided-generation pass.
     /// - Returns: what `body` returned.
     /// - Throws: `CancellationError` when the respond task is already
@@ -775,14 +779,34 @@ extension MLXLanguageModel.Executor {
         _ body: () throws -> Value
     ) throws -> Value {
         guard let coordinator = drainCoordinator else {
-            return try SpeculativeDecodingOutcome.recordingGuidedPass(body)
+            return try runGuidedPass(body)
         }
         try coordinator.enterSection()
         defer {
             Stream.gpu.synchronize()
             coordinator.leaveSection()
         }
-        return try SpeculativeDecodingOutcome.recordingGuidedPass(body)
+        return try runGuidedPass(body)
+    }
+
+    /// Runs one guided pass, records its MTP outcome, and keeps a failed
+    /// cluster forward from cancelling the respond task.
+    ///
+    /// The pass runs on the respond task, whose cancellation handler waits
+    /// until the guided section of the pass ends. A failed cluster forward
+    /// that cancelled the task would run that handler on the thread of the
+    /// pass, which then waited on itself for the whole quiescence timeout.
+    /// The forward instead keeps its failure, and the guided loop throws it
+    /// at that forward (see `GuidedTarget.checkFailure()`), which ends the
+    /// pass at once with the `ClusterModelError` itself.
+    ///
+    /// - Parameter body: the guided-generation pass.
+    /// - Returns: what `body` returned.
+    /// - Throws: whatever `body` throws.
+    private static func runGuidedPass<Value>(_ body: () throws -> Value) throws -> Value {
+        try SpeculativeDecodingOutcome.recordingGuidedPass {
+            try ClusterLanguageModel.withoutCancellingOnFailure(body)
+        }
     }
 
     /// Stops the generation task and waits until it stops.

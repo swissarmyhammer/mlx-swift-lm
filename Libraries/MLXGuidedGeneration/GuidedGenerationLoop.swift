@@ -87,7 +87,9 @@ public enum GuidedGenerationLoop {
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
     ///   exhausted before the grammar reaches a stop state.
     ///   `GuidedGenerationError.prematureEOS` if the model emits EOS
-    ///   before the grammar accepts.
+    ///   before the grammar accepts. The failure a `ClusterLanguageModel`
+    ///   keeps, for example `ClusterModelError.memberLost`, at the first
+    ///   forward after it failed.
     @discardableResult
     public static func run(
         input: LMInput,
@@ -224,13 +226,14 @@ public enum GuidedGenerationLoop {
     ///   - pending: The tokens of the last decision, which no forward fed yet.
     ///   - decoder: The decisions and the output of the generation.
     ///   - target: The target.
-    /// - Throws: `CancellationError`, or the error of the matcher.
+    /// - Throws: `CancellationError`, the failure of a forward of a cluster target
+    ///   (``GuidedTarget/checkFailure()``), or the error of the matcher.
     static func decodePlainly(
         from pending: [Int32], decoder: inout GuidedDecoder, target: inout GuidedTarget
     ) throws {
         var feed = pending
         while true {
-            let logits = target.feedOneAtATime(feed)
+            let logits = try target.feedOneAtATime(feed)
             // Kick off GPU computation, and compute the next mask and its array on the CPU
             // while the GPU runs the forward pass.
             asyncEval(logits)

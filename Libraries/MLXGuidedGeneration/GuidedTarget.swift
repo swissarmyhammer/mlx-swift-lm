@@ -75,7 +75,8 @@ struct GuidedTarget {
     ///   - parameters: The prefill parameters.
     ///   - drafterFeed: The feed that takes each prefill chunk's hidden rows, or `nil`.
     /// - Returns: The logits of the prompt and the segment the final forward evaluated.
-    /// - Throws: The error of the prefill or of the cache plan.
+    /// - Throws: The error of the prefill or of the cache plan, or the failure of a forward of a
+    ///   ``ClusterLanguageModel`` (see ``checkFailure()``).
     mutating func prefill(
         _ input: LMInput, parameters: PrefillParameters, drafterFeed: MTPDrafterPrefillFeed?
     ) throws -> GuidedPrefill {
@@ -103,6 +104,7 @@ struct GuidedTarget {
             output = result
             segment = drafterFeed?.finalSegment(of: input.text.tokens)
         }
+        try checkFailure()
         try cacheStorage.plan.applyAndValidate(to: cacheStorage)
         state = drafterFeed == nil ? output.state : output.state?.withoutMTPExchange
         return GuidedPrefill(
@@ -119,12 +121,14 @@ struct GuidedTarget {
     ///
     /// - Parameter tokens: The tokens, at least one.
     /// - Returns: The logits of the last token, unevaluated.
-    mutating func feedOneAtATime(_ tokens: [Int32]) -> MLXArray {
+    /// - Throws: The failure of a forward of a ``ClusterLanguageModel`` (see ``checkFailure()``).
+    mutating func feedOneAtATime(_ tokens: [Int32]) throws -> MLXArray {
         var logits: MLXArray?
         for token in tokens {
             let input = LMInput.Text(tokens: MLXArray([token]))
             let result = model(
                 input[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+            try checkFailure()
             cacheStorage.commitProcessedTokens(input.cacheSequenceLength)
             state = result.state
             logits = result.logits
@@ -141,14 +145,29 @@ struct GuidedTarget {
     ///
     /// - Parameter tokens: The tokens of the verify.
     /// - Returns: The logits and the drafter state of each token.
-    mutating func verify(_ tokens: [Int32]) -> LMOutput {
+    /// - Throws: The failure of a forward of a ``ClusterLanguageModel`` (see ``checkFailure()``).
+    mutating func verify(_ tokens: [Int32]) throws -> LMOutput {
         var verifyState = emittingState(from: state)
         verifyState[mtpVerifyKeepsSnapshotsKey] = tokens.count > 1 ? true : nil
         let output = model(
             LMInput.Text(tokens: MLXArray(tokens))[text: .newAxis], cache: cache,
             state: verifyState)
+        try checkFailure()
         state = output.state?.withoutMTPExchange
         return output
+    }
+
+    /// Throws the failure a ``ClusterLanguageModel`` target keeps from a forward or a draft round
+    /// that failed.
+    ///
+    /// Such a forward cannot throw: it returns zero logits and keeps its failure, and inside
+    /// ``ClusterLanguageModel/withoutCancellingOnFailure(_:)`` it leaves the task uncancelled.
+    /// The generation thus checks after each forward, and ends at the forward that failed with
+    /// the failure itself. A local target keeps no failure.
+    ///
+    /// - Throws: The kept failure, for example ``ClusterModelError/memberLost(_:)``.
+    func checkFailure() throws {
+        try (model as? ClusterLanguageModel)?.checkFailure()
     }
 
     /// Keeps the first `kept` of the `verified` tokens of the last verify, and rewinds the rest

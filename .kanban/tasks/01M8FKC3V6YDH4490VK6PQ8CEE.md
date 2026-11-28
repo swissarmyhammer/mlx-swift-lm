@@ -13,6 +13,12 @@ comments:
     - ModelProtocolCheckTests may pin the version.
     After that, run the real 2-Mac parity checks: Qwen3.8-27B with kvBits 8, and MTP on Qwen and Inkling.
   timestamp: 2026-11-28T00:31:31.737131+00:00
+- actor: claude-code
+  id: 01m8fv3j63fnhtxht0np23g462
+  text: |-
+    ### Owner: the FoundationModelsCluster session (foundationmodelscluster-4e)
+    Per foundationmodelsacpagent-a1 (2026-11-27), this work is in the FoundationModelsCluster repo and that repo's session owns it. The v4 drafter half landed there as ^h3kq14q (main da4c10b), and foundationmodelsacpagent-a1 has sent it the v5 list. The mlx-swift-lm /finish run skips this card; close it here when the Cluster side lands v5.
+  timestamp: 2026-11-28T01:07:54.691845+00:00
 position_column: todo
 position_ordinal: '9180'
 title: 'FoundationModelsCluster: adopt remote protocol v4 (MTP drafter on rank 0 + draft exchange)'

@@ -217,7 +217,8 @@ struct GuidedSpeculation {
     ///   - pending: The tokens of the last decision, which no forward fed yet.
     ///   - decoder: The decisions and the output of the generation.
     ///   - target: The target.
-    /// - Throws: `CancellationError`, or the error of the matcher.
+    /// - Throws: `CancellationError`, the failure of a forward of a cluster target
+    ///   (``GuidedTarget/checkFailure()``), or the error of the matcher.
     mutating func decode(
         from pending: [Int32], decoder: inout GuidedDecoder, target: inout GuidedTarget
     ) throws {
@@ -268,7 +269,7 @@ struct GuidedSpeculation {
         let chain = try draft(after: bonus, drafts: maximum, decoder: decoder, target: target)
         let drafts = chain.drafts
         let batch = Self.verifyBatch(after: bonus, drafts: drafts, target: target)
-        let output = target.verify(batch.tokens)
+        let output = try target.verify(batch.tokens)
         let accepted = Self.acceptedDraftCount(
             drafts, verifyLogits: output.logits, rules: decoder.rules)
         diagnosticSink?.recordSpeculativeRound(
@@ -309,6 +310,7 @@ struct GuidedSpeculation {
             sharedKV: [:], positionDeltas: positionDeltas,
             queryOffset: target.cacheStorage.processedTokenCount, blockSize: maximum + 1,
             state: &drafterState, processor: chain.processor, sampler: ArgMaxSampler())
+        try target.checkFailure()
         if let failure = chain.failure {
             throw failure
         }
@@ -330,10 +332,10 @@ struct GuidedSpeculation {
         _ feed: [Int32], chunkLength: Int, decoder: inout GuidedDecoder,
         target: inout GuidedTarget
     ) throws -> [Int32]? {
-        let outputs = stride(from: 0, to: feed.count, by: chunkLength).map { start in
+        let outputs = try stride(from: 0, to: feed.count, by: chunkLength).map { start in
             discardSpeculativePromptCacheCheckpoints(target.cache)
             let chunk = Array(feed[start ..< min(start + chunkLength, feed.count)])
-            let output = target.verify(chunk)
+            let output = try target.verify(chunk)
             target.keepVerified(chunk.count, of: chunk.count)
             return output
         }

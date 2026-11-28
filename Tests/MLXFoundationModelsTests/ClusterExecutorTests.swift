@@ -171,16 +171,7 @@ struct ClusterExecutorTests {
         let tokenizer = ToolCallAlphabetTokenizer()
         let models = try Models(
             weights: weights, capabilities: [.toolCalling], tokenizer: tokenizer)
-        let request = makeExecutorRequest(
-            transcript: Self.transcript(prompt: Self.prompt, tokenizer: tokenizer),
-            enabledTools: [
-                Transcript.ToolDefinition(
-                    name: "lookup", description: "Looks up text.",
-                    parameters: String.generationSchema)
-            ],
-            generationOptions: GenerationOptions(
-                samplingMode: .greedy, maximumResponseTokens: Self.generatedTokenCount,
-                toolCallingMode: .required))
+        let request = Self.requiredToolRequest(tokenizer: tokenizer)
 
         let local = try await Self.respondGuided(to: request, model: models.local)
         let clustered = try await Self.respondGuided(to: request, model: models.clustered)
@@ -200,9 +191,7 @@ struct ClusterExecutorTests {
         let tokenizer = ToolCallAlphabetTokenizer()
         let models = try Models(
             weights: weights, capabilities: [.guidedGeneration], tokenizer: tokenizer)
-        let request = makeExecutorRequest(
-            transcript: Self.transcript(prompt: Self.prompt, tokenizer: tokenizer),
-            schema: FixtureLookupArguments.generationSchema, generationOptions: Self.greedy)
+        let request = Self.schemaRequest(tokenizer: tokenizer)
 
         let local = try await Self.respondGuided(to: request, model: models.local)
         let clustered = try await Self.respondGuided(to: request, model: models.clustered)
@@ -347,6 +336,73 @@ struct ClusterExecutorTests {
         }
     }
 
+    /// The longest a guided pass whose forward loses a member may take to throw.
+    ///
+    /// It stands far under the 60 s quiescence timeout of the drain coordinator, which a pass
+    /// that waits on its own guided section runs into, and far above the second the pass takes.
+    private static let guidedLossDeadline: Duration = .seconds(10)
+
+    /// What a guided pass whose forward loses a member threw, and how long it took.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private struct GuidedLoss {
+        let failure: String?
+        let elapsed: Duration
+    }
+
+    /// The forwards a worker runs before it loses a member in a required-tool turn: none, as
+    /// the required-tool pass of the fixture runs one forward, its prompt, where the loss strikes.
+    private static let requiredToolForwardsBeforeLoss = 0
+
+    /// Runs `request` on a clustered model of `capabilities` and the tool-call alphabet, whose
+    /// worker loses ``lostMember`` after `forwards` forwards, and times the pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func respondGuidedLosingAMember(
+        to request: LanguageModelExecutorGenerationRequest,
+        capabilities: [LanguageModelCapabilities.Capability], afterForwards forwards: Int,
+        weights: URL
+    ) async throws -> GuidedLoss {
+        let (model, worker) = try Qwen35MTPFixture().makeClusteredLanguageModel(
+            weights: weights, capabilities: capabilities, tokenizer: ToolCallAlphabetTokenizer())
+        worker.failForwards(after: forwards, with: InProcessMemberLoss(lostMember: lostMember))
+        let clock = ContinuousClock()
+        let start = clock.now
+        let turn = try await respondGuided(to: request, model: model)
+        return GuidedLoss(failure: turn.turn.failure, elapsed: clock.now - start)
+    }
+
+    /// The failure a pass that lost ``lostMember`` reports: the loss itself, unwrapped.
+    private static let lossFailure = String(describing: ClusterModelError.memberLost(lostMember))
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSchemaTurnWhoseForwardLosesAMemberThrowsTheLossPromptly() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let request = Self.schemaRequest(tokenizer: ToolCallAlphabetTokenizer())
+
+        let loss = try await Self.respondGuidedLosingAMember(
+            to: request, capabilities: [.guidedGeneration],
+            afterForwards: Self.forwardsBeforeLoss, weights: weights)
+
+        #expect(loss.failure == Self.lossFailure)
+        #expect(loss.elapsed < Self.guidedLossDeadline)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aRequiredToolTurnWhoseForwardLosesAMemberThrowsTheLossPromptly() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let request = Self.requiredToolRequest(tokenizer: ToolCallAlphabetTokenizer())
+
+        let loss = try await Self.respondGuidedLosingAMember(
+            to: request, capabilities: [.toolCalling],
+            afterForwards: Self.requiredToolForwardsBeforeLoss, weights: weights)
+
+        #expect(loss.failure == Self.lossFailure)
+        #expect(loss.elapsed < Self.guidedLossDeadline)
+    }
+
     /// What one guided pass streamed, and the tokens its decoder sampled.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private struct GuidedTurn {
@@ -364,6 +420,35 @@ struct ClusterExecutorTests {
             try await MTPExecutorTurns.respond(to: request, model: model)
         }
         return GuidedTurn(turn: turn, sampledTokens: sink.sampledTokenIDs)
+    }
+
+    /// A greedy request of ``prompt`` that requires a call of a `lookup` tool, as `tokenizer`
+    /// spells the prompt.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func requiredToolRequest(
+        tokenizer: any Tokenizer
+    ) -> LanguageModelExecutorGenerationRequest {
+        makeExecutorRequest(
+            transcript: transcript(prompt: prompt, tokenizer: tokenizer),
+            enabledTools: [
+                Transcript.ToolDefinition(
+                    name: "lookup", description: "Looks up text.",
+                    parameters: String.generationSchema)
+            ],
+            generationOptions: GenerationOptions(
+                samplingMode: .greedy, maximumResponseTokens: generatedTokenCount,
+                toolCallingMode: .required))
+    }
+
+    /// A greedy request of ``prompt`` whose response follows the schema of
+    /// `FixtureLookupArguments`, as `tokenizer` spells the prompt.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func schemaRequest(
+        tokenizer: any Tokenizer
+    ) -> LanguageModelExecutorGenerationRequest {
+        makeExecutorRequest(
+            transcript: transcript(prompt: prompt, tokenizer: tokenizer),
+            schema: FixtureLookupArguments.generationSchema, generationOptions: greedy)
     }
 
     /// A transcript of one prompt of `prompt` tokens, as `tokenizer` spells them.

@@ -1754,8 +1754,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         /// `model` keeps, in place of the outcome of the generation.
         ///
         /// A cluster forward that fails cannot throw. It ends its generation, which then looks
-        /// finished and returns its partial text, or it cancels a guided pass, which then throws
-        /// `CancellationError`. Either way the caller gets the kept ``ClusterModelError``
+        /// finished and returns its partial text, or it ends a guided pass, which throws the kept
+        /// failure at that forward. Either way the caller gets the kept ``ClusterModelError``
         /// itself, for example ``ClusterModelError/memberLost(_:)``, thus a host can tell that
         /// the answer failed and move the session to another model. A stream throws it after
         /// the snapshots it already gave. A local model keeps no failure, and the outcome of the

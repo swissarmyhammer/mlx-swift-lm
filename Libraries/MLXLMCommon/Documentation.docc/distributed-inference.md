@@ -129,7 +129,11 @@ the workers convert after the forwards a local model converts after.
 
 A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cache:state:)`` does
 not throw. The model then cancels the task that runs it, which ends the generation, and keeps
-the failure: every later op fails, and the next throwing op reports it.
+the failure: every later op fails, and the next throwing op reports it. A generation inside
+``ClusterLanguageModel/withoutCancellingOnFailure(_:)`` keeps its task uncancelled, and calls
+``ClusterLanguageModel/checkFailure()`` after each forward itself. The guided loop runs so in
+the FoundationModels adapter, whose `respond` task drains its own guided pass when it is
+cancelled, and it throws the kept failure at the forward that failed.
 
 A transport that loses members of the cluster, for example a Mac that shut down, throws an
 error that conforms to ``ClusterMemberLoss`` and whose ``ClusterMemberLoss/lostMember`` is not

@@ -31,7 +31,9 @@ private let clusterLogger = MLXLogger(label: "cluster-language-model")
 /// A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cache:state:)``
 /// does not throw. The model then cancels the task that runs it, which ends the generation, and
 /// keeps the failure: every later op fails, and the next throwing op reports it.
-/// ``checkFailure()`` reports it when the generation ends.
+/// ``checkFailure()`` reports it when the generation ends. A generation inside
+/// ``withoutCancellingOnFailure(_:)`` keeps its task uncancelled, and calls ``checkFailure()``
+/// after each forward itself.
 public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokensProviding {
 
     /// The stream of requests to the worker.
@@ -89,6 +91,27 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     /// container, which waits for the generation that holds the container.
     public func close() {
         session.close()
+    }
+
+    /// Whether a forward that fails cancels the current task: false inside
+    /// ``withoutCancellingOnFailure(_:)``.
+    @TaskLocal private static var cancelsTaskOnFailure = true
+
+    /// Runs `body`, in which a forward that fails keeps its failure and leaves the current task
+    /// uncancelled.
+    ///
+    /// A generation that runs on a task whose cancellation does more than end the generation
+    /// runs here, for example a guided pass on the task of a `respond` whose cancellation
+    /// handler waits for that same pass to end. The generation then calls ``checkFailure()``
+    /// after each forward, and throws the failure itself.
+    ///
+    /// - Parameter body: The generation.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws.
+    public static func withoutCancellingOnFailure<Value>(_ body: () throws -> Value) rethrows
+        -> Value
+    {
+        try $cancelsTaskOnFailure.withValue(false, operation: body)
     }
 
     /// Throws the failure the model keeps, if any.
@@ -230,9 +253,10 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     }
 
     /// Runs `tokens` on the worker. A failure, or a batch of several sequences
-    /// (``ClusterModelError/unsupported(_:)`` of ``ClusterModelFeature/batchedInput``), cancels
-    /// the current task, which ends its generation, keeps the failure on the model, and returns
-    /// zero logits of the asked shape.
+    /// (``ClusterModelError/unsupported(_:)`` of ``ClusterModelFeature/batchedInput``), keeps the
+    /// failure on the model, cancels the current task outside
+    /// ``withoutCancellingOnFailure(_:)``, which ends its generation, and returns zero logits of
+    /// the asked shape.
     private func forward(
         _ tokens: MLXArray, cache: [KVCache]?, logits scope: RemoteLogitsScope
     ) -> LMOutput {
@@ -250,7 +274,8 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     }
 
     /// Runs one speculative round on `cache`: see ``RemoteModelOp/speculate(_:)``. A failure
-    /// cancels the current task, which ends its generation, and keeps the failure on the model.
+    /// keeps the failure on the model, and cancels the current task outside
+    /// ``withoutCancellingOnFailure(_:)``, which ends its generation.
     ///
     /// - Parameters:
     ///   - cache: The one ``RemoteKVCache`` of ``newCache(parameters:)``.
@@ -276,9 +301,15 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
     }
 
     /// Keeps `error` as the failure of the model, and cancels the current task, which ends its
-    /// generation: an op of a forward pass cannot throw.
+    /// generation: an op of a forward pass cannot throw. Inside
+    /// ``withoutCancellingOnFailure(_:)`` the task stays uncancelled, and the generation reads
+    /// the failure through ``checkFailure()``.
     private func failGeneration(with error: any Error) {
         session.recordFailure(error)
+        guard Self.cancelsTaskOnFailure else {
+            clusterLogger.error("A cluster forward failed, ending the generation: \(error)")
+            return
+        }
         clusterLogger.error("A cluster forward failed, cancelling the generation: \(error)")
         withUnsafeCurrentTask { $0?.cancel() }
     }

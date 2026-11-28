@@ -480,6 +480,24 @@ struct ClusterLanguageModelTests {
         }
     }
 
+    @Test("a forward that fails inside withoutCancellingOnFailure leaves its task uncancelled")
+    func aForwardThatFailsWithoutCancellingOnFailureLeavesItsTaskUncancelled() async throws {
+        let fixture = try Qwen35MTPFixture()
+        let worker = fixture.makeWorker()
+        let model = try ClusterLanguageModel.connect(over: worker)
+        let cache = try model.newCache(parameters: nil)
+        worker.failForwards(after: 0, with: InProcessMemberLoss(lostMember: Self.lostMember))
+
+        let cancelled = await Task {
+            ClusterLanguageModel.withoutCancellingOnFailure {
+                _ = model(MLXArray([Int32(1)]), cache: cache)
+            }
+            return Task.isCancelled
+        }.value
+
+        #expect(!cancelled)
+    }
+
     @Test("a lost member fails the op with memberLost")
     func aLostMemberFailsTheOpWithMemberLost() throws {
         let fixture = try Qwen35MTPFixture()
