@@ -48,14 +48,17 @@ public enum RemoteOpAnnouncement {
         case begin, end, newCache, forward, trim, copy, reset, release, park, speculate, quantize
     }
 
+    /// A word of an op payload, which stands at its raw value after the header.
+    fileprivate protocol PayloadWord: RawRepresentable where RawValue == Int {}
+
     /// The payload words of a ``RemoteDraftRound``, after the header.
-    private enum RoundWord: Int {
+    private enum RoundWord: Int, PayloadWord {
         case token, rejectedCount, minimumDraftProbability
     }
 
     /// The payload words of a ``RemoteKVCacheQuantization``, after the header. Its bits stand
     /// in the count word.
-    private enum QuantizationWord: Int {
+    private enum QuantizationWord: Int, PayloadWord {
         case groupSize, compressionStart, compatibility
     }
 
@@ -152,9 +155,9 @@ public enum RemoteOpAnnouncement {
         try round.validate()
         words[Word.count.rawValue] = Int32(round.draftLimit)
         write(round.cache.rawValue, into: &words, low: .cacheLow, high: .cacheHigh)
-        words[payloadIndex(.token)] = round.token
-        words[payloadIndex(.rejectedCount)] = Int32(round.rejectedCount)
-        words[payloadIndex(.minimumDraftProbability)] = Int32(
+        words[RoundWord.token.index] = round.token
+        words[RoundWord.rejectedCount.index] = Int32(round.rejectedCount)
+        words[RoundWord.minimumDraftProbability.index] = Int32(
             bitPattern: round.minimumDraftProbability.bitPattern)
     }
 
@@ -165,18 +168,13 @@ public enum RemoteOpAnnouncement {
     private static func round(of words: [Int32]) throws -> RemoteDraftRound {
         let round = RemoteDraftRound(
             cache: RemoteCacheID(rawValue: read(words, low: .cacheLow, high: .cacheHigh)),
-            token: words[payloadIndex(.token)],
-            rejectedCount: Int(words[payloadIndex(.rejectedCount)]),
+            token: words[RoundWord.token.index],
+            rejectedCount: Int(words[RoundWord.rejectedCount.index]),
             draftLimit: Int(words[Word.count.rawValue]),
             minimumDraftProbability: Float(
-                bitPattern: UInt32(bitPattern: words[payloadIndex(.minimumDraftProbability)])))
+                bitPattern: UInt32(bitPattern: words[RoundWord.minimumDraftProbability.index])))
         try round.validate()
         return round
-    }
-
-    /// The index in the announce words of the payload word `word` of a round.
-    private static func payloadIndex(_ word: RoundWord) -> Int {
-        headerWordCount + word.rawValue
     }
 
     /// Writes the bits and the payload words of `quantization` into `words`.
@@ -196,9 +194,9 @@ public enum RemoteOpAnnouncement {
             return word
         }
         words[Word.count.rawValue] = try word(quantization.bits)
-        words[payloadIndex(.groupSize)] = try word(quantization.groupSize)
-        words[payloadIndex(.compressionStart)] = try word(quantization.compressionStart)
-        words[payloadIndex(.compatibility)] = quantization.compatibility.rawValue
+        words[QuantizationWord.groupSize.index] = try word(quantization.groupSize)
+        words[QuantizationWord.compressionStart.index] = try word(quantization.compressionStart)
+        words[QuantizationWord.compatibility.index] = quantization.compatibility.rawValue
     }
 
     /// The quantization of the count and the payload words of `words`, or nil for a count of
@@ -211,24 +209,20 @@ public enum RemoteOpAnnouncement {
         let bits = words[Word.count.rawValue]
         guard bits != 0 else { return nil }
         let values = [
-            bits, words[payloadIndex(.groupSize)], words[payloadIndex(.compressionStart)],
+            bits, words[QuantizationWord.groupSize.index],
+            words[QuantizationWord.compressionStart.index],
         ]
         if let negative = values.first(where: { $0 < 0 }) {
             throw RemoteModelProtocolError.invalidCount(negative)
         }
-        let compatibilityValue = words[payloadIndex(.compatibility)]
+        let compatibilityValue = words[QuantizationWord.compatibility.index]
         guard let compatibility = RemoteKVCacheCompatibility(rawValue: compatibilityValue) else {
             throw RemoteModelProtocolError.unknownCompatibility(compatibilityValue)
         }
         return RemoteKVCacheQuantization(
-            bits: Int(bits), groupSize: Int(words[payloadIndex(.groupSize)]),
-            compressionStart: Int(words[payloadIndex(.compressionStart)]),
+            bits: Int(bits), groupSize: Int(words[QuantizationWord.groupSize.index]),
+            compressionStart: Int(words[QuantizationWord.compressionStart.index]),
             compatibility: compatibility)
-    }
-
-    /// The index in the announce words of the payload word `word` of a quantization.
-    private static func payloadIndex(_ word: QuantizationWord) -> Int {
-        headerWordCount + word.rawValue
     }
 
     /// The request of announce `words`.
@@ -366,4 +360,10 @@ public enum RemoteOpAnnouncement {
         words.indices.contains(Word.flags.rawValue)
             && words[Word.flags.rawValue] & stopFlag != 0
     }
+}
+
+extension RemoteOpAnnouncement.PayloadWord {
+
+    /// The index of this word in the announce words.
+    fileprivate var index: Int { RemoteOpAnnouncement.headerWordCount + rawValue }
 }

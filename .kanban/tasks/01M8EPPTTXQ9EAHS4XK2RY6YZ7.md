@@ -44,6 +44,40 @@ comments:
     - evidence: swift build --build-tests clean (0 warnings, 0 errors); xcrun xctest per bundle: MLXLMTests 1261 XCTest + 2843 Swift Testing passed, 0 failures; MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 654 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed; 0 skipped; swift-format lint on all changed Swift files clean. MLXLMTests reports 3 known issues (withKnownIssue), pre-existing in files this change does not touch: AttentionKernelToleranceTests.swift:47 (aNearTieRejectsATokenOutsideTheTwoBest) and ToolTests.swift:2560-2561 (MiniCPM5 CDATA close tag).
     - next: review
   timestamp: 2026-11-28T00:39:54.837308+00:00
+- actor: claude-code
+  id: 01m8fswq97zr9afw3bazxqw39p
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (4b825b21) — 3 findings (3 confirmed, 2 refuted): Libraries/MLXLMCommon/Remote/RemoteOpAnnouncement.swift:230, Tests/MLXLMTests/ClusterQuantizedKVCacheTests.swift:311, Tests/MLXLMTests/RemoteModelProtocolTests.swift:89
+    - next: implement the 3 open items in ## Review Findings (2026-11-27 18:40), then re-review
+  timestamp: 2026-11-28T00:46:41.959060+00:00
+- actor: claude-code
+  id: 01m8fsx5dsf435txee0jyj0kj8
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — protocol v5, RemoteKVCacheQuantization.swift + ClusterQuantizedKVCacheTests.swift (15 tests)
+    - test: green — all 5 bundles (MLXLMTests 2843+1261, MLXFoundationModelsTests 654, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 4b825b21
+    - review: findings — RemoteOpAnnouncement.swift:230, ClusterQuantizedKVCacheTests.swift:311, RemoteModelProtocolTests.swift:89
+  timestamp: 2026-11-28T00:46:56.441934+00:00
+- actor: claude-code
+  id: 01m8ft5p5a3b9j4ym9x43v23bv
+  text: 'Review findings pass: (1) RemoteOpAnnouncement: one fileprivate protocol PayloadWord (RawValue == Int) that RoundWord and QuantizationWord conform to, with one `index` property in a protocol extension; both payloadIndex overloads deleted. A generic `payloadIndex(_ word: some PayloadWord)` did NOT compile: implicit member syntax (`.token`) cannot infer the concrete type through `some`, so call sites now name the enum (`RoundWord.token.index`). (2) ClusterQuantizedKVCacheTests: both ChatSession tests call `expectTheLocalTurns(local:clustered:fixture:)` (forwards sourceLocation), prompts in `chatPrompts`. (3) RemoteModelProtocolTests: round-trip test of compressionStart Int(Int32.max) next to the rejection test, both via `newCacheRequest(compressionStart:)`. The round-trip test covers existing behavior, so it passes without a production change (boundary coverage, no RED possible).'
+  timestamp: 2026-11-28T00:51:35.722741+00:00
+- actor: claude-code
+  id: 01m8ftfqn3ns5j3ege8358ftzm
+  text: |-
+    ### implement — changed
+    - evidence: 3 files — Libraries/MLXLMCommon/Remote/RemoteOpAnnouncement.swift, Tests/MLXLMTests/ClusterQuantizedKVCacheTests.swift, Tests/MLXLMTests/RemoteModelProtocolTests.swift; 3/3 findings checked. swift-format applied; swift build --build-tests clean. xcrun xctest MLXLMTests (one process): Swift Testing 2844 tests / 281 suites passed (3 pre-existing known issues), XCTest 1261 executed 0 failures. MLXFoundationModelsTests: 654 passed.
+    - next: /review
+  timestamp: 2026-11-28T00:57:04.931708+00:00
+- actor: claude-code
+  id: 01m8fv08mfd6ppp9hyh07kgnek
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (0 source warnings); swift-format lint on the 3 changed files clean; xcrun xctest per bundle: MLXLMTests 2844 tests/281 suites passed (3 known issues, pre-existing, untouched files: AttentionKernelToleranceTests.aNearTieRejectsATokenOutsideTheTwoBest = intentional negative check; ToolTests MiniCPM5 CDATA close tag = existing withKnownIssue); MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 654 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed. 0 failures, 0 skipped.
+    - next: review/commit
+  timestamp: 2026-11-28T01:06:06.607357+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Clustered models: support a quantized KV cache (kvBits 8/4) on the workers'
@@ -57,3 +91,18 @@ Tests: the 2-Mac parity suite with kvBits 8 on Qwen3.8-27B matches the local gre
 
 Goal: one SWE-bench task (django__django-13447) runs to a patch on the 2-Mac cluster with Qwen3.8 27B and with Inkling 2 Mini.
 Evidence (ACPAgent repo): bench/run.cluster1i.log, bench/preds.cluster1i.telemetry.jsonl, bench/run.cluster1q.log, bench/preds.cluster1q.transcripts/. Build bench/bin/cluster-40d7f3a: Router f3624eb9, Cluster 0b8d4848, mlx-swift-lm stable 3bd174ed, mlx-swift 2d5a12b7. #cluster
+
+## Review Findings (2026-11-27 18:40)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 18 file(s) reviewed, 5 not reviewed.
+
+> 5 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M8EPPTTXQ9EAHS4XK2RY6YZ7.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8EPPTTXQ9EAHS4XK2RY6YZ7.md` — no validator matches this file
+> - `.kanban/tasks/01M8FKC3V6YDH4490VK6PQ8CEE.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8FKC3V6YDH4490VK6PQ8CEE.md` — no validator matches this file
+> - `Libraries/MLXLMCommon/Documentation.docc/distributed-inference.md` — no validator matches this file
+
+- [x] `Libraries/MLXLMCommon/Remote/RemoteOpAnnouncement.swift:230` `reuse/reuse` — The new `payloadIndex(_ word: QuantizationWord)` overload has the same body as the existing `payloadIndex(_ word: RoundWord)` (`headerWordCount + word.rawValue`). Two copies of one index computation will diverge when the header layout changes. A shared helper, or a generic over a payload-word protocol, would keep one implementation. Give `RoundWord` and `QuantizationWord` a shared protocol (for example `PayloadWord` with `var rawValue: Int`), and write one `payloadIndex(_ word: some PayloadWord) -> Int`. Or extract a single `payloadIndex(offset: Int)` that both call.
+- [x] `Tests/MLXLMTests/ClusterQuantizedKVCacheTests.swift:311` `reuse/reuse` — The turn loop of `aChatSessionWithMTPAndKVBitsReusesItsPromptCacheAsTheLocalOneDoes` is a copy of the loop in `aChatSessionOfKVBitsReusesItsPromptCacheAsTheLocalSessionDoes`. Both build the same local and clustered `ChatTurn` arrays, then run the same two assertions. Any change to the turn protocol has to be made twice. Extract a helper, for example `private static func chatTurns(local: ChatSession, clustered: ChatSession, fixture: Qwen35MTPFixture) async throws -> (local: [ChatTurn], clustered: [ChatTurn])`, or a helper that checks both sessions and asserts. Call it from both tests.
+- [x] `Tests/MLXLMTests/RemoteModelProtocolTests.swift:89` `completeness/inverse-operation-coverage` — The new compression-start tests only prove that Int32.max + 1 is rejected. Nothing proves that the largest accepted start, Int32.max itself, survives its announce words. The encode side's accept boundary is therefore unverified, and an off-by-one in the bound would pass these tests. The round-trip test at line 142 covers the matching boundary for draftLimit, so this is a one-sided boundary test. Add a round-trip test that encodes and decodes `.newCache` with `compressionStart: Int(Int32.max)` and asserts equality with the request, paired with the existing rejection test.

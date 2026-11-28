@@ -86,19 +86,30 @@ struct RemoteModelProtocolTests {
         }
     }
 
-    @Test("a new cache whose compression start does not fit a word has no announce")
-    func aNewCacheWhoseCompressionStartDoesNotFitAWordHasNoAnnounce() {
-        let start = Int(Int32.max) + 1
-        let request = Self.request(
+    /// The request of a new cache of eight bits whose compression start is `start`.
+    private static func newCacheRequest(compressionStart start: Int) -> RemoteModelRequest {
+        request(
             .newCache(
-                Self.cache,
+                cache,
                 quantization: RemoteKVCacheQuantization(
                     bits: 8, groupSize: 64, compressionStart: start, compatibility: .allowPartial
                 )))
+    }
+
+    @Test("a new cache whose compression start does not fit a word has no announce")
+    func aNewCacheWhoseCompressionStartDoesNotFitAWordHasNoAnnounce() {
+        let request = Self.newCacheRequest(compressionStart: Int(Int32.max) + 1)
 
         #expect(throws: RemoteModelProtocolError.invalidCount(Int32.max)) {
             try RemoteOpAnnouncement.encode(request)
         }
+    }
+
+    @Test("a new cache of the largest compression start a word holds survives its announce words")
+    func aNewCacheOfTheLargestCompressionStartSurvivesItsAnnounceWords() throws {
+        let request = Self.newCacheRequest(compressionStart: Int(Int32.max))
+
+        #expect(try RemoteOpAnnouncement.decode(RemoteOpAnnouncement.encode(request)) == request)
     }
 
     /// The announce words of a new cache of ``quantization`` under `compatibility`.

@@ -20,6 +20,9 @@ struct ClusterQuantizedKVCacheTests {
     /// The tokens of the prompt of each generation.
     private static let prompt = [3, 14, 15, 9, 2, 6, 5, 35]
 
+    /// The tokens of the prompt of each turn of a chat session.
+    private static let chatPrompts = [[3, 14, 15], [9, 2, 6], [5, 35, 8]]
+
     /// The tokens each generation decodes.
     private static let maxTokens = 16
 
@@ -101,6 +104,25 @@ struct ClusterQuantizedKVCacheTests {
         let cache = try context.model.newCache(parameters: parameters)
         _ = try await decode(prompt, context: context, parameters: parameters, cache: cache)
         return (try #require(cache.first as? RemoteKVCache), worker)
+    }
+
+    /// Runs the turns of ``chatPrompts`` on `local` and on `clustered`, then expects that the
+    /// clustered session writes the local turns and reuses its prompt cache after the first turn.
+    private static func expectTheLocalTurns(
+        local: ChatSession, clustered: ChatSession, fixture: Qwen35MTPFixture,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        var localTurns: [ChatTurn] = []
+        var clusteredTurns: [ChatTurn] = []
+        for prompt in chatPrompts {
+            localTurns.append(try await ChatTurn(local, prompt: fixture.text(for: prompt)))
+            clusteredTurns.append(try await ChatTurn(clustered, prompt: fixture.text(for: prompt)))
+        }
+
+        #expect(clusteredTurns == localTurns, sourceLocation: sourceLocation)
+        #expect(
+            clusteredTurns.dropFirst().allSatisfy { $0.cachedPromptTokenCount > 0 },
+            sourceLocation: sourceLocation)
     }
 
     // MARK: - The new cache
@@ -231,15 +253,7 @@ struct ClusterQuantizedKVCacheTests {
             try fixture.makeClusteredModelContext(worker: fixture.makeWorker()),
             generateParameters: parameters)
 
-        var localTurns: [ChatTurn] = []
-        var clusteredTurns: [ChatTurn] = []
-        for prompt in [[3, 14, 15], [9, 2, 6], [5, 35, 8]] {
-            localTurns.append(try await ChatTurn(local, prompt: fixture.text(for: prompt)))
-            clusteredTurns.append(try await ChatTurn(clustered, prompt: fixture.text(for: prompt)))
-        }
-
-        #expect(clusteredTurns == localTurns)
-        #expect(clusteredTurns.dropFirst().allSatisfy { $0.cachedPromptTokenCount > 0 })
+        try await Self.expectTheLocalTurns(local: local, clustered: clustered, fixture: fixture)
     }
 
     // MARK: - MTP
@@ -306,14 +320,6 @@ struct ClusterQuantizedKVCacheTests {
             speculativeDecoding: try fixture.makeSpeculativeDecodingConfig(),
             generateParameters: parameters)
 
-        var localTurns: [ChatTurn] = []
-        var clusteredTurns: [ChatTurn] = []
-        for prompt in [[3, 14, 15], [9, 2, 6], [5, 35, 8]] {
-            localTurns.append(try await ChatTurn(local, prompt: fixture.text(for: prompt)))
-            clusteredTurns.append(try await ChatTurn(clustered, prompt: fixture.text(for: prompt)))
-        }
-
-        #expect(clusteredTurns == localTurns)
-        #expect(clusteredTurns.dropFirst().allSatisfy { $0.cachedPromptTokenCount > 0 })
+        try await Self.expectTheLocalTurns(local: local, clustered: clustered, fixture: fixture)
     }
 }
