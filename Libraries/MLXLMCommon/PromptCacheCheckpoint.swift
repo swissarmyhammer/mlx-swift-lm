@@ -270,6 +270,28 @@ package struct PromptCacheCheckpoint {
         return restored
     }
 
+    /// The caches at this checkpoint, made from copies, thus neither `caches`
+    /// nor this checkpoint changes.
+    ///
+    /// A cache that cannot rewind is a copy of its checkpoint copy, as in
+    /// ``restored(onto:)``. Any other cache is a copy of the live cache
+    /// (``KVCache/checkedCopy()``), trimmed back to the checkpoint.
+    ///
+    /// - Parameter caches: the live caches, one for each layer of the model.
+    /// - Returns: the caches at the checkpoint, or nil when a cache did not land
+    ///   on the checkpoint.
+    /// - Throws: the error of the copy of a ``RemoteKVCache`` on its worker.
+    package func restoredCopy(of caches: [KVCache]) throws -> [KVCache]? {
+        guard caches.count == copies.count else { return nil }
+        let targets = try zip(caches, copies).map { cache, saved in
+            // A copy layer restores from its checkpoint copy and never reads
+            // the live cache, thus the live cache goes in as it is.
+            if case .copy = saved { return cache }
+            return try cache.checkedCopy()
+        }
+        return restored(onto: targets)
+    }
+
     /// Feeds `tokens` into `caches` in forward passes, the way a prefill does,
     /// and gives the model state the last pass left.
     ///
@@ -393,7 +415,7 @@ package struct PromptCacheCheckpoint {
     /// function renders the full probe only when it must. When the last
     /// message is a user message, it finds the tail that the generation prompt
     /// writes from a small sample conversation (see
-    /// ``generationPromptTail(after:render:)``). When `prompt` ends with that
+    /// ``generationPromptTail(ofSample:of:render:)``). When `prompt` ends with that
     /// tail, the index is the start of the tail. Else, and when the last
     /// message is not a user message, it renders the full probe.
     ///
@@ -409,13 +431,12 @@ package struct PromptCacheCheckpoint {
         of prompt: LMInput, messages: [Chat.Message],
         render: ([Chat.Message]) async throws -> LMInput
     ) async -> Int? {
-        let promptTokens = prompt.text.tokens.asArray(Int.self)
-        if let tail = await generationPromptTail(after: messages, render: render),
-            promptTokens.suffix(tail.count).elementsEqual(tail)
-        {
-            return promptTokens.count - tail.count
-        }
-        return await probedLastMessageEnd(of: promptTokens, messages: messages, render: render)
+        let sampleTokens =
+            messages.last?.role == .user
+            ? await renderedSample(of: messages, render: render) : nil
+        return await lastMessageEnd(
+            of: prompt.text.tokens.asArray(Int.self), messages: messages,
+            sampleTokens: sampleTokens, render: render)
     }
 
     /// The index of `promptTokens` where its leading system messages end: the
@@ -435,10 +456,95 @@ package struct PromptCacheCheckpoint {
         of promptTokens: [Int], messages: [Chat.Message],
         render: ([Chat.Message]) async throws -> LMInput
     ) async -> Int? {
+        guard startsWithSystemBeforeAnotherMessage(messages) else { return nil }
+        return await renderedSample(of: messages, render: render).map {
+            commonPrefixLength(of: promptTokens, and: $0)
+        }
+    }
+
+    /// The index of `prompt` where its leading system messages end, and the
+    /// index where its last message ends: ``leadingSystemEnd(of:messages:render:)``
+    /// and ``lastMessageEnd(of:messages:render:)`` from one render of the
+    /// sample conversation that both read (see ``renderedSample(of:render:)``).
+    ///
+    /// - Parameters:
+    ///   - prompt: the prepared prompt of `messages`.
+    ///   - messages: the chat messages `prompt` renders from.
+    ///   - render: renders messages the way `prompt` was rendered, with the
+    ///     same template variables and tools.
+    /// - Returns: the two indexes. Each one is nil where the function of its
+    ///   own gives nil.
+    package static func leadingSystemAndLastMessageEnds(
+        of prompt: LMInput, messages: [Chat.Message],
+        render: ([Chat.Message]) async throws -> LMInput
+    ) async -> (leadingSystemEnd: Int?, lastMessageEnd: Int?) {
+        let promptTokens = prompt.text.tokens.asArray(Int.self)
+        let hasLeadingSystem = startsWithSystemBeforeAnotherMessage(messages)
+        let endsWithUser = messages.last?.role == .user
+        let sampleTokens =
+            hasLeadingSystem || endsWithUser
+            ? await renderedSample(of: messages, render: render) : nil
+        let leadingSystemEnd =
+            hasLeadingSystem
+            ? sampleTokens.map { commonPrefixLength(of: promptTokens, and: $0) } : nil
+        let lastMessageEnd = await lastMessageEnd(
+            of: promptTokens, messages: messages, sampleTokens: endsWithUser ? sampleTokens : nil,
+            render: render)
+        return (leadingSystemEnd, lastMessageEnd)
+    }
+
+    /// The index of `promptTokens` where its last message ends, as
+    /// ``lastMessageEnd(of:messages:render:)`` finds it.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of the prepared prompt of `messages`.
+    ///   - messages: the chat messages the prompt renders from.
+    ///   - sampleTokens: the render of the sample conversation of `messages`
+    ///     when the last message is a user message, or nil.
+    ///   - render: renders messages the way the prompt was rendered.
+    /// - Returns: the index, or nil when `render` throws.
+    private static func lastMessageEnd(
+        of promptTokens: [Int], messages: [Chat.Message], sampleTokens: [Int]?,
+        render: ([Chat.Message]) async throws -> LMInput
+    ) async -> Int? {
+        if let sampleTokens,
+            let tail = await generationPromptTail(
+                ofSample: sampleTokens, of: messages, render: render),
+            promptTokens.suffix(tail.count).elementsEqual(tail)
+        {
+            return promptTokens.count - tail.count
+        }
+        return await probedLastMessageEnd(of: promptTokens, messages: messages, render: render)
+    }
+
+    /// Whether `messages` starts with system messages that another message
+    /// follows, thus whether a prompt of them has leading instructions to end.
+    private static func startsWithSystemBeforeAnotherMessage(_ messages: [Chat.Message]) -> Bool {
         let system = messages.prefix { $0.role == .system }
-        guard !system.isEmpty, system.count < messages.count else { return nil }
-        return await probedLastMessageEnd(
-            of: promptTokens, messages: Array(system), render: render)
+        return !system.isEmpty && system.count < messages.count
+    }
+
+    /// The small sample conversation of `messages`: its leading system
+    /// messages and one user message with the text ``boundaryProbeText``.
+    private static func sampleConversation(of messages: [Chat.Message]) -> [Chat.Message] {
+        Array(messages.prefix { $0.role == .system }) + [.user(boundaryProbeText)]
+    }
+
+    /// The tokens of the render of the sample conversation of `messages`
+    /// (see ``sampleConversation(of:)``).
+    ///
+    /// A render of the leading system messages plus one user message parts
+    /// from a prompt of the same system messages where those messages end,
+    /// thus the prefix the two share is the end of the leading instructions.
+    ///
+    /// - Parameters:
+    ///   - messages: the chat messages of the prompt.
+    ///   - render: renders messages the way the prompt was rendered.
+    /// - Returns: the tokens, or nil when `render` throws.
+    private static func renderedSample(
+        of messages: [Chat.Message], render: ([Chat.Message]) async throws -> LMInput
+    ) async -> [Int]? {
+        try? await render(sampleConversation(of: messages)).text.tokens.asArray(Int.self)
     }
 
     /// The index of `promptTokens` where its last message ends, from a render
@@ -464,11 +570,10 @@ package struct PromptCacheCheckpoint {
     /// that message is a user message: the generation prompt, from the point
     /// where one more user message parts from it.
     ///
-    /// The function renders a small sample conversation: the leading system
-    /// messages of `messages` and one user message with the text
-    /// ``boundaryProbeText``. The full probe of that sample gives the end of
-    /// its last message, and the tokens after that end are the tail. The
-    /// sample is small, thus its two renders cost little.
+    /// The function reads the render of the small sample conversation of the
+    /// prompt (see ``sampleConversation(of:)``). The full probe of that sample
+    /// gives the end of its last message, and the tokens after that end are
+    /// the tail. The sample is small, thus its two renders cost little.
     ///
     /// The tail serves only a conversation whose last message is a user
     /// message. One more user message does not change how a template such as
@@ -477,18 +582,18 @@ package struct PromptCacheCheckpoint {
     /// a different way, thus the caller must render the full probe.
     ///
     /// - Parameters:
-    ///   - messages: the chat messages of the prompt.
+    ///   - sampleTokens: the render of the sample conversation of `messages`.
+    ///   - messages: the chat messages of the prompt, whose last message is a
+    ///     user message.
     ///   - render: renders messages the way the prompt was rendered.
-    /// - Returns: the tail, or nil when the last message is not a user message
-    ///   or when `render` throws.
+    /// - Returns: the tail, or nil when `render` throws.
     private static func generationPromptTail(
-        after messages: [Chat.Message], render: ([Chat.Message]) async throws -> LMInput
+        ofSample sampleTokens: [Int], of messages: [Chat.Message],
+        render: ([Chat.Message]) async throws -> LMInput
     ) async -> [Int]? {
-        guard messages.last?.role == .user else { return nil }
-        let sample = messages.prefix { $0.role == .system } + [.user(boundaryProbeText)]
-        guard let sampleTokens = try? await render(Array(sample)).text.tokens.asArray(Int.self),
+        guard
             let end = await probedLastMessageEnd(
-                of: sampleTokens, messages: Array(sample), render: render)
+                of: sampleTokens, messages: sampleConversation(of: messages), render: render)
         else {
             return nil
         }

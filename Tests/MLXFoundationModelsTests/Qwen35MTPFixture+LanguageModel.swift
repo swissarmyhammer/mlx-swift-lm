@@ -80,6 +80,23 @@ extension Qwen35MTPFixture {
         return (model, worker)
     }
 
+    /// A FoundationModels language model over `target` in the place of the target of the
+    /// fixture, with the tokenizer and the input processor of the fixture, thus any model of
+    /// the vocabulary of the fixture, local or clustered, runs behind the executor.
+    ///
+    /// - Parameters:
+    ///   - weights: The directory that makes the model available.
+    ///   - target: The model that each generation runs.
+    /// - Returns: The model.
+    func makeLanguageModel(weights: URL, target: any MLXLMCommon.LanguageModel) -> MLXLanguageModel
+    {
+        var context = makeLanguageContext(eosTokenIds: [], tokenizer: nil, toolCallFormat: nil)
+        context.model = target
+        return Self.makeLanguageModel(
+            serving: context, weights: weights, capabilities: [],
+            resolver: DefaultConfigurationResolver(), speculativeDecoding: nil)
+    }
+
     /// The model context of the fixture with `tokenizer` and `toolCallFormat`.
     private func makeLanguageContext(
         eosTokenIds: Set<Int>, tokenizer: (any Tokenizer)?, toolCallFormat: ToolCallFormat?

@@ -205,11 +205,12 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///   - parameters: the generation parameters the new caches must match.
     ///   - protocolRules: the cache-reuse rules of the model's response
     ///     protocol, consulted before the standard prefix rules.
-    ///   - transcriptBoundary: the index of the prompt where a next render
-    ///     of the same messages plus one new message parts from it, or nil
-    ///     when the pass takes no checkpoint. The pass takes a checkpoint of
-    ///     a hybrid model there: before its generation when the boundary is
-    ///     before the end of the prompt, and when
+    ///   - checkpointBoundaries: the indexes of the prompt where the pass of
+    ///     a hybrid model takes its checkpoints. The pass takes the
+    ///     instructions checkpoint before its generation, unless the plan
+    ///     keeps the one the entry carried. It takes the checkpoint at the
+    ///     end of the last message before its generation when that boundary
+    ///     is before the end of the prompt, and when
     ///     ``prefillDidEnd(state:drafterState:)`` reports the end of the prefill when the
     ///     boundary is the end of the prompt.
     ///   - speculation: the MTP drafter of the pass, or nil. The plan resumes
@@ -224,7 +225,8 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
     ///   checkpoint.
     func plan(
         input: LMInput, model: any LanguageModel, parameters: GenerateParameters,
-        protocolRules: [any PromptCacheReuseRule] = [], transcriptBoundary: Int? = nil,
+        protocolRules: [any PromptCacheReuseRule] = [],
+        checkpointBoundaries: ExecutorCheckpointBoundaries = ExecutorCheckpointBoundaries(),
         speculation: MTPSpeculation? = nil, decodeTokens: ([Int]) -> String
     ) throws -> ExecutorPromptCachePlan? {
         let carriedSource = source
@@ -236,12 +238,12 @@ final class ExecutorPromptCacheSlot: @unchecked Sendable {
         report(
             ExecutorPromptCacheReport.planLine(
                 key: key, source: carriedSource, plan: plan, decodeTokens: decodeTokens))
-        if let planned = plan, let transcriptBoundary {
-            plan = try planned.prefillingToCheckpoint(
-                at: transcriptBoundary, model: model, parameters: parameters,
+        if let planned = plan {
+            plan = try planned.prefillingToCheckpoints(
+                at: checkpointBoundaries, model: model, parameters: parameters,
                 speculation: speculation)
             promptEndCheckpointPlan =
-                transcriptBoundary == planned.promptTokens.count ? planned : nil
+                checkpointBoundaries.transcriptEnd == planned.promptTokens.count ? planned : nil
         }
         prefilledTokenCount = plan?.prefilledTokenCount ?? 0
         uncommittedTokenCount = plan?.uncommittedTokens.count ?? 0

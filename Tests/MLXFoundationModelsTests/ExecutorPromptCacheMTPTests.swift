@@ -506,6 +506,7 @@ struct ExecutorPromptCacheMTPTests {
                 ExecutorPromptCacheEntry(
                     caches: entry.caches, tokens: entry.tokens, renderTokens: entry.renderTokens,
                     state: entry.state, checkpoint: entry.checkpoint,
+                    instructionsCheckpoint: entry.instructionsCheckpoint,
                     drafterState: MTPDrafterContinuation(
                         state: drafterState.state,
                         targetBoundaryHidden: drafterState.targetBoundaryHidden,
@@ -560,7 +561,8 @@ struct ExecutorPromptCacheMTPTests {
     private static func mainCaches(of entry: ExecutorPromptCacheEntry) -> ExecutorPromptCacheEntry {
         ExecutorPromptCacheEntry(
             caches: entry.caches, tokens: entry.tokens, renderTokens: entry.renderTokens,
-            state: entry.state, checkpoint: entry.checkpoint)
+            state: entry.state, checkpoint: entry.checkpoint,
+            instructionsCheckpoint: entry.instructionsCheckpoint)
     }
 }
 

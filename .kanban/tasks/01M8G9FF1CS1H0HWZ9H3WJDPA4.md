@@ -8,8 +8,52 @@ comments:
     ### Preference (foundationmodelsacpagent-a1, 2026-11-27)
     If a remote trim to the divergence point isn't cheap, implement `copyPromptCache(fromSession:toSession:keepingTokens: n)` so the Router can make an instructions-only template.
   timestamp: 2026-11-28T05:19:08.502370+00:00
-position_column: todo
-position_ordinal: '8180'
+- actor: claude-code
+  id: 01m8gcr4kh97w543t7rqfhtz3w
+  text: |-
+    ### Root cause (reproduced before any code change)
+    Repro: Tests/MLXFoundationModelsTests/PromptCacheDivergentCopyTests.swift — tiny Inkling 2 target (Inkling2TinyModels.draftJSON, vocab 64, scalar tokenizer of Qwen35MTPFixture), local AND behind ClusterLanguageModel over InProcessRemoteModelWorker. Template pass instructions(12)+prompt(8) → 16 generated; copyPromptCache → .copied; seeded pass instructions(12)+different prompt(7). Both placements: cachedPromptTokenCount 0. Executor log (log stream, subsystem com.apple.FoundationModels-MLX):
+    ```
+    plan  session=divergent-copy-template source=none rendered=20 reused=0 fed=20 rule=cold
+    commit session=divergent-copy-template ledger=36 checkpoint=20
+    plan  session=divergent-copy-seeded source=memory rendered=19 reused=0 fed=19 rule=rebuild divergence=12
+    ```
+    What this rules in/out:
+    - **Different key: NO.** The seeded check-out is `source=memory` (the copy, same model id, same kvCache config).
+    - **Checkpoint dropped by the copy: NO.** ExecutorPromptCacheEntry.copy() carries the checkpoint (commit shows checkpoint=20 and the restore path sees it). Remote checkpoints restore fine (they are worker copies; existing cluster checkpoint tests cover that).
+    - **Can't trim: YES**, and it is not remote-specific — the local run is identical. Inkling's layers are CacheList(rotating window / attention, SpeculativeConvolutionCache): the convolution state rolls back only a few verify positions and the window wraps, so neither a local nor a RemoteKVCache (status.rewindLimit/maxTrimCount = min over the worker layers) can rewind 24 tokens from 36 to 12. Same for any hybrid (the Qwen 3.5 fixture's linear layer too).
+    - **No checkpoint at the instructions boundary: YES — the real cause.** The FM executor takes exactly ONE checkpoint per pass, at the end of the last message (ThinkingRender.transcriptBoundary → PromptCacheCheckpoint.lastMessageEnd), i.e. after instructions+prompt (20). It never takes the leading-instructions checkpoint that ChatSession takes (PromptCacheCheckpoints.leading via PromptCacheCheckpoint.leadingSystemEnd). A prompt that diverges right after the instructions is served by neither the rewind rule nor the only checkpoint → rule=rebuild → cold.
+    - **^nztjxdh:** does not explain it. The copy returned .copied, so the template had an entry; and even after ^nztjxdh a guided pass's checkpoint is at the end of the transcript (instructions+prompt), which does not serve a prompt diverging after the instructions. The repro uses plain passes on current HEAD and still goes cold.
+
+    ### Approach
+    1. Executor takes a second checkpoint at the end of the leading instructions (PromptCacheCheckpoint.leadingSystemEnd, as ChatSession does), the entry carries it beside the transcript checkpoint (copy() shares it), a later pass that keeps the instructions carries it forward, and the plan restores the longest checkpoint that serves the render.
+    2. Trimming is impossible for this cache, so also add `copyPromptCache(fromSession:toSession:keepingTokens:)`: the copy holds the first n tokens (trimmed when the caches can rewind there) or the nearest checkpoint ≤ n, and refuses n > ledger.
+  timestamp: 2026-11-28T06:16:14.705491+00:00
+- actor: claude-code
+  id: 01m8ge8eacreqkzqzzqsw7cvrj
+  text: |-
+    ### implement — changed
+    - Approach taken (and why): trimming the remote (or local) Inkling cache back to where the prompt diverges is impossible: the convolution state and the sliding window cannot rewind 24 tokens. So I used BOTH fixes the card allows.
+      (1) The executor now takes a second checkpoint per hybrid pass, at the end of the instructions. `ThinkingRender.checkpointBoundaries` uses `PromptCacheCheckpoint.leadingSystemAndLastMessageEnds`, which reuses one sample render, so it adds no render beyond what lastMessageEnd already did. The new `ExecutorCheckpointBoundaries` replaces the `transcriptBoundary: Int?` that every pass threaded through. `ExecutorPromptCacheEntry.instructionsCheckpoint` is carried through extend, splice, rewind and restore whenever the render keeps the instructions. `copy()` shares it, and the byte and worker-byte counts include it. A restore picks the longest checkpoint that serves the render. The commit log line appends ` instructions=N`.
+      (2) Added `copyPromptCache(fromSession:toSession:keepingTokens:)`. It keeps exactly n tokens when the caches can rewind and there is no model state. Otherwise it keeps the longest checkpoint ≤ n, restored from copies (`PromptCacheCheckpoint.restoredCopy(of:)`). A ledger of n tokens or fewer is copied whole, and a disk file is cloned only whole. New refusals: `.tokenCountBeyondLedger` and `.noPrefixToKeep`.
+    - No remote protocol change.
+    - Files: Libraries/MLXFoundationModels/{ExecutorPromptCache,ExecutorPromptCacheEntry,ExecutorPromptCacheSlot,ExecutorPromptCacheStore,MLXLanguageModel+PromptCacheCopy,MLXLanguageModel,MLXLanguageModelGeneration,ThinkingRender}.swift, README.md; Libraries/MLXLMCommon/PromptCacheCheckpoint.swift.
+    - Tests added: PromptCacheDivergentCopyTests (12: Inkling, local and cluster; whole copy and keepingTokens; cached == 12 and output equals the cold run). ExecutorPromptCacheInstructionsCheckpointTests (15). PromptCacheCopyKeepingTokensTests (13). MLXLMTests/PromptCacheCheckpointEndsTests (4).
+    - Existing tests updated for the API change: ExecutorCommittedGeneration, ExecutorPromptCacheCheckpoint, KVCacheConfigurationOption, PrefillStepSize, ExecutorPromptCacheMTP (its helpers now carry instructionsCheckpoint).
+    - Full runs, one xctest process per bundle, all exit 0, 0 warnings: MLXFoundationModelsTests 734 passed; MLXLMTests 2849 Swift Testing + 1261 XCTest passed (3 known issues from existing withKnownIssue tests); MLXGuidedGenerationTests 96; CXGrammarTests 7; MLXHuggingFaceMacrosTests 11. swift-format applied.
+    - Public API added: `MLXLanguageModel.copyPromptCache(fromSession:toSession:keepingTokens:)`, `PromptCacheCopyResult.Refusal.tokenCountBeyondLedger`, `.noPrefixToKeep`. The new enum cases break exhaustive switches in clients such as the Router.
+    - next: /review
+  timestamp: 2026-11-28T06:42:37.516054+00:00
+- actor: claude-code
+  id: 01m8get0qq82ndsnrfnmxg2fmq
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests (exit 0, binaries newer than every changed source, new tests present); xcrun xctest per bundle, all exit 0: MLXLMTests 2849 Swift Testing + 1261 XCTest, 0 failures; MLXGuidedGenerationTests 96, 0 failures; MLXFoundationModelsTests 734, 0 failures; CXGrammarTests 7, 0 failures; MLXHuggingFaceMacrosTests 11 XCTest, 0 failures. 0 skipped. swift-format lint on changed files clean. The only build message is a SwiftPM "missing creator for mutated node" notice, not a source warning.
+    - note: MLXLMTests reports 3 known issues, all intentional withKnownIssue markers in unmodified files (AttentionKernelToleranceTests, ToolTests MiniCPM5 CDATA); not caused by these changes.
+    - next: review/commit
+  timestamp: 2026-11-28T06:52:13.431711+00:00
+position_column: doing
+position_ordinal: '80'
 title: 'Prompt cache: a session seeded by copying a remote template gets no partial hit when its prompt diverges after the shared prefix'
 ---
 ## What

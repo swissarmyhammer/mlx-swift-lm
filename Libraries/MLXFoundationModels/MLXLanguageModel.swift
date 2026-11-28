@@ -1742,7 +1742,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 try await runTextGeneration(
                     reasoningSetup: reasoningPlan.reasoningSetup,
                     fallbackInput: effectiveInput,
-                    transcriptBoundary: reasoningPlan.transcriptBoundary,
+                    checkpointBoundaries: reasoningPlan.checkpointBoundaries,
                     requestedMaxTokens: turn.requestedMaxTokens,
                     requestedTemperature: turn.request.generationOptions.temperature,
                     samplingConfiguration: turn.samplingConfiguration,
@@ -1849,10 +1849,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             /// primed generation inside the think block; nil when this turn
             /// does not run the reasoning path.
             let reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?
-            /// The index of the prompt the unconstrained path feeds where a
-            /// hybrid model takes its checkpoint, or nil when the pass takes
-            /// none.
-            let transcriptBoundary: Int?
+            /// The indexes of the prompt the unconstrained path feeds where a
+            /// hybrid model takes its checkpoints, each nil when the pass
+            /// takes none there.
+            let checkpointBoundaries: ExecutorCheckpointBoundaries
         }
 
         /// The error message of a request on a model that always reasons when the caller did not
@@ -1969,19 +1969,19 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
             }
 
             // The text path feeds the reasoning input, else the suppressed
-            // input, else the baseline input. Its checkpoint goes where a
-            // next render of the same messages plus a new message parts from
-            // the input it feeds.
+            // input, else the baseline input. Its checkpoints go at the end of
+            // the instructions and where a next render of the same messages
+            // plus a new message parts from the input it feeds.
             let fed = reasoning ?? suppressed ?? (ThinkingRender(), baselineInput)
-            let transcriptBoundary =
+            let checkpointBoundaries =
                 mayRunReasoningPath
-                ? await fed.render.transcriptBoundary(
+                ? await fed.render.checkpointBoundaries(
                     of: fed.input, messages: messages, tools: nil, context: context)
-                : nil
+                : ExecutorCheckpointBoundaries()
 
             return ReasoningPlan(
                 suppressedInput: suppressed?.input, reasoningSetup: reasoningSetup,
-                transcriptBoundary: transcriptBoundary)
+                checkpointBoundaries: checkpointBoundaries)
         }
     }
 }

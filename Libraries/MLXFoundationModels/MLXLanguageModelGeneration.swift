@@ -367,7 +367,7 @@ extension MLXLanguageModel.Executor {
             from: enabledToolDefinitions)
         let toolAwareInput = try await toolAwareRender.prepare(
             messages: messages, tools: toolSpecs, context: context)
-        let transcriptBoundary = await toolAwareRender.transcriptBoundary(
+        let checkpointBoundaries = await toolAwareRender.checkpointBoundaries(
             of: toolAwareInput, messages: messages, tools: toolSpecs, context: context)
         let reasoning = routedReasoningConfig.map {
             (
@@ -380,7 +380,7 @@ extension MLXLanguageModel.Executor {
         }
         let result = try await runAllowedToolGeneration(
             input: toolAwareInput,
-            transcriptBoundary: transcriptBoundary,
+            checkpointBoundaries: checkpointBoundaries,
             toolSpecs: toolSpecs,
             reasoning: reasoning,
             requestedMaxTokens: requestedMaxTokens,
@@ -440,7 +440,7 @@ extension MLXLanguageModel.Executor {
     ///
     /// The grammar phase takes the prompt cache of the session for the
     /// prefix its prompt shares with the ledger of that cache, and checks
-    /// its own ledger in (see ``runGuidedLoop(input:transcriptBoundary:grammar:maxTokens:promptCache:speculation:context:onText:)``).
+    /// its own ledger in (see ``runGuidedLoop(input:checkpointBoundaries:grammar:maxTokens:promptCache:speculation:context:onText:)``).
     /// The think-then-call phase before it generates from a cache of its
     /// own and leaves the cache of the session as it is, thus the grammar
     /// phase still finds it.
@@ -486,7 +486,7 @@ extension MLXLanguageModel.Executor {
             from: requiredToolDefinitions)
         let toolAwareInput = try await toolAwareRender.prepare(
             messages: messages, tools: toolSpecs, context: context)
-        let transcriptBoundary = await toolAwareRender.transcriptBoundary(
+        let checkpointBoundaries = await toolAwareRender.checkpointBoundaries(
             of: toolAwareInput, messages: messages, tools: toolSpecs, context: context)
 
         let toolCallingGrammar = try frame.grammar(tools: requiredToolDefinitions)
@@ -576,7 +576,7 @@ extension MLXLanguageModel.Executor {
 
         var outputBuffer = ""
         let pass = try Self.runGuidedLoop(
-            input: phase2Input, transcriptBoundary: transcriptBoundary, grammar: grammar,
+            input: phase2Input, checkpointBoundaries: checkpointBoundaries, grammar: grammar,
             maxTokens: phase2MaxTokens, promptCache: promptCache, speculation: speculation,
             context: context
         ) { outputBuffer += $0 }
@@ -897,8 +897,8 @@ extension MLXLanguageModel.Executor {
     ///   - promptCache: the slot of the session.
     ///   - input: the prepared input of the pass.
     ///   - parameters: the generation parameters of the pass.
-    ///   - transcriptBoundary: the index of the prompt where the pass
-    ///     takes its checkpoint, or nil.
+    ///   - checkpointBoundaries: the indexes of the prompt where the pass
+    ///     takes its checkpoints.
     ///   - speculation: the MTP drafter of the pass, or nil. The plan
     ///     resumes the drafter state the cache keeps for that drafter.
     ///   - context: the loaded model context.
@@ -906,7 +906,7 @@ extension MLXLanguageModel.Executor {
     /// - Throws: the error of the plan.
     static func planPromptCache(
         _ promptCache: ExecutorPromptCacheSlot, input: LMInput,
-        parameters: GenerateParameters, transcriptBoundary: Int?,
+        parameters: GenerateParameters, checkpointBoundaries: ExecutorCheckpointBoundaries,
         speculation: MTPSpeculation?, context: ModelContext
     ) throws -> ExecutorPromptCachePlan? {
         promptCache.restoreIfPending(
@@ -914,13 +914,13 @@ extension MLXLanguageModel.Executor {
         return try promptCache.plan(
             input: input, model: context.model, parameters: parameters,
             protocolRules: promptCacheReuseRules(of: context),
-            transcriptBoundary: transcriptBoundary, speculation: speculation,
+            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
             decodeTokens: context.tokenizer.decode(tokenIds:))
     }
 
     func runAllowedToolGeneration(
         input: LMInput,
-        transcriptBoundary: Int?,
+        checkpointBoundaries: ExecutorCheckpointBoundaries,
         toolSpecs: [[String: any Sendable]],
         reasoning: (config: ReasoningConfig, primedInside: Bool)?,
         requestedMaxTokens: Int?,
@@ -938,7 +938,7 @@ extension MLXLanguageModel.Executor {
             samplingConfiguration: samplingConfiguration)
         let plan = try Self.planPromptCache(
             promptCache, input: input, parameters: parameters,
-            transcriptBoundary: transcriptBoundary, speculation: speculation,
+            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
             context: context)
         let format = context.configuration.toolCallFormat ?? .json
         var router = AllowedToolOutputRouter(
@@ -1229,7 +1229,7 @@ extension MLXLanguageModel.Executor {
     /// session.
     ///
     /// The pass plans its cache as a plain pass does
-    /// (``planPromptCache(_:input:parameters:transcriptBoundary:speculation:context:)``): it
+    /// (``planPromptCache(_:input:parameters:checkpointBoundaries:speculation:context:)``): it
     /// takes the cache of the session for the prefix `input` shares with the ledger of that
     /// cache, under the same reuse rules and checkpoints, and the guided loop feeds the rest of
     /// the prompt only. A grammar mask changes how a token is chosen, never what the caches
@@ -1251,8 +1251,7 @@ extension MLXLanguageModel.Executor {
     ///
     /// - Parameters:
     ///   - input: The prompt of the pass
-    ///   - transcriptBoundary: The index of the prompt where the pass takes its checkpoint, or
-    ///     nil when it takes none
+    ///   - checkpointBoundaries: The indexes of the prompt where the pass takes its checkpoints
     ///   - grammar: The grammar and reserves of the pass
     ///   - maxTokens: The token budget of the pass
     ///   - promptCache: The session's prompt-cache slot
@@ -1264,7 +1263,7 @@ extension MLXLanguageModel.Executor {
     /// - Throws: The errors of the plan, and of the loop other than incomplete output.
     static func runGuidedLoop(
         input: LMInput,
-        transcriptBoundary: Int?,
+        checkpointBoundaries: ExecutorCheckpointBoundaries,
         grammar: GuidedGrammar,
         maxTokens: Int,
         promptCache: ExecutorPromptCacheSlot,
@@ -1279,7 +1278,7 @@ extension MLXLanguageModel.Executor {
             generatedTokenCount = try withGuidedGenerationSection {
                 plan = try planPromptCache(
                     promptCache, input: input, parameters: guidedCacheParameters,
-                    transcriptBoundary: transcriptBoundary, speculation: speculation,
+                    checkpointBoundaries: checkpointBoundaries, speculation: speculation,
                     context: context)
                 return try runGuidedGeneration(
                     input: plan?.input ?? input, carried: plan?.guidedCarriedCache,
@@ -1393,18 +1392,18 @@ extension MLXLanguageModel.Executor {
         }
     }
 
-    /// The prompt of a guided pass, and the index of it where the pass takes its checkpoint.
+    /// The prompt of a guided pass, and the indexes of it where the pass takes its checkpoints.
     struct GuidedPrompt {
         /// The prompt the pass feeds.
         let input: LMInput
 
-        /// The index of ``input`` where a next render of the same messages plus one new
-        /// message parts from it, or nil when the pass takes no checkpoint (see
-        /// ``ThinkingRender/transcriptBoundary(of:messages:tools:context:)``).
-        let transcriptBoundary: Int?
+        /// The indexes of ``input`` where the pass takes its checkpoints: the end of the
+        /// instructions, and where a next render of the same messages plus one new message parts
+        /// from it (see ``ThinkingRender/checkpointBoundaries(of:messages:tools:context:)``).
+        let checkpointBoundaries: ExecutorCheckpointBoundaries
     }
 
-    /// The prompt of a schema pass, and the index of it where the pass takes its checkpoint.
+    /// The prompt of a schema pass, and the indexes of it where the pass takes its checkpoints.
     ///
     /// A model whose reasoning protocol declares an ``ReasoningConfig/answerOpening`` (Inkling 2)
     /// renders no generation prompt: the model writes the header of its answer after the
@@ -1412,15 +1411,16 @@ extension MLXLanguageModel.Executor {
     /// that header then, and appends the header, thus the grammar starts where the answer
     /// starts. Every other model keeps `input`.
     ///
-    /// The checkpoint goes at the end of the last message of the render the pass feeds, before
-    /// the header or the generation prompt, as the checkpoint of a plain pass does.
+    /// The checkpoints go at the end of the instructions and at the end of the last message of
+    /// the render the pass feeds, before the header or the generation prompt, as the checkpoints
+    /// of a plain pass do.
     ///
     /// - Parameters:
     ///   - messages: The chat messages of the schema prompt, the schema included
     ///   - input: The prompt rendered with no thinking state
     ///   - resolved: The resolver-patched configuration of the call
     ///   - context: The loaded model context
-    /// - Returns: The prompt the schema pass feeds, and its checkpoint index.
+    /// - Returns: The prompt the schema pass feeds, and its checkpoint indexes.
     /// - Throws: `unsupportedCapability` when thinking cannot go off, or the error of the
     ///   processor.
     static func schemaInput(
@@ -1430,7 +1430,7 @@ extension MLXLanguageModel.Executor {
         guard let schema = try schemaRender(resolved: resolved) else {
             return GuidedPrompt(
                 input: input,
-                transcriptBoundary: await ThinkingRender().transcriptBoundary(
+                checkpointBoundaries: await ThinkingRender().checkpointBoundaries(
                     of: input, messages: messages, tools: nil, context: context))
         }
         let prompt = try await schema.render.prepare(
@@ -1438,7 +1438,7 @@ extension MLXLanguageModel.Executor {
         return GuidedPrompt(
             input: ThinkingRender.openingAnswer(
                 of: prompt, config: schema.config, tokenizer: context.tokenizer),
-            transcriptBoundary: await schema.render.transcriptBoundary(
+            checkpointBoundaries: await schema.render.checkpointBoundaries(
                 of: prompt, messages: messages, tools: nil, context: context))
     }
 
@@ -1446,7 +1446,7 @@ extension MLXLanguageModel.Executor {
     ///
     /// The pass takes the prompt cache of the session for the prefix its prompt shares with the
     /// ledger of that cache, and checks its own ledger in (see
-    /// ``runGuidedLoop(input:transcriptBoundary:grammar:maxTokens:promptCache:speculation:context:onText:)``).
+    /// ``runGuidedLoop(input:checkpointBoundaries:grammar:maxTokens:promptCache:speculation:context:onText:)``).
     ///
     /// - Parameters:
     ///   - schemaJSON: The JSON schema the grammar constrains to
@@ -1487,7 +1487,8 @@ extension MLXLanguageModel.Executor {
         }()
 
         let pass = try Self.runGuidedLoop(
-            input: prompt.input, transcriptBoundary: prompt.transcriptBoundary, grammar: grammar,
+            input: prompt.input, checkpointBoundaries: prompt.checkpointBoundaries,
+            grammar: grammar,
             maxTokens: maxTokens, promptCache: promptCache, speculation: speculation,
             context: context
         ) { textContinuation.yield($0) }
@@ -1524,7 +1525,7 @@ extension MLXLanguageModel.Executor {
     /// path when the model has no reasoning config to route through.
     func runUnconstrained(
         input: LMInput,
-        transcriptBoundary: Int?,
+        checkpointBoundaries: ExecutorCheckpointBoundaries,
         requestedMaxTokens: Int?,
         requestedTemperature: Double?,
         samplingConfiguration: MLXSamplingConfiguration?,
@@ -1543,7 +1544,7 @@ extension MLXLanguageModel.Executor {
         )
         let plan = try Self.planPromptCache(
             promptCache, input: input, parameters: parameters,
-            transcriptBoundary: transcriptBoundary, speculation: speculation,
+            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
             context: context)
 
         // The token-recording form is what lets this pass leave a prompt
@@ -1601,13 +1602,13 @@ extension MLXLanguageModel.Executor {
     /// Dispatches the no-tools/no-schema path: reasoning routing when a
     /// config resolved, otherwise plain unconstrained text.
     ///
-    /// `transcriptBoundary` is the checkpoint position of the input this
+    /// `checkpointBoundaries` are the checkpoint positions of the input this
     /// method feeds: the reasoning input when `reasoningSetup` is set,
     /// and `fallbackInput` otherwise.
     func runTextGeneration(
         reasoningSetup: (input: LMInput, config: ReasoningConfig, primedInside: Bool)?,
         fallbackInput: LMInput,
-        transcriptBoundary: Int?,
+        checkpointBoundaries: ExecutorCheckpointBoundaries,
         requestedMaxTokens: Int?,
         requestedTemperature: Double?,
         samplingConfiguration: MLXSamplingConfiguration?,
@@ -1621,7 +1622,7 @@ extension MLXLanguageModel.Executor {
         if let reasoning = reasoningSetup {
             try await runReasoning(
                 input: reasoning.input,
-                transcriptBoundary: transcriptBoundary,
+                checkpointBoundaries: checkpointBoundaries,
                 reasoningConfig: reasoning.config,
                 primedInside: reasoning.primedInside,
                 requestedMaxTokens: requestedMaxTokens,
@@ -1636,7 +1637,7 @@ extension MLXLanguageModel.Executor {
         } else {
             try await runUnconstrained(
                 input: fallbackInput,
-                transcriptBoundary: transcriptBoundary,
+                checkpointBoundaries: checkpointBoundaries,
                 requestedMaxTokens: requestedMaxTokens,
                 requestedTemperature: requestedTemperature,
                 samplingConfiguration: samplingConfiguration,
@@ -1657,7 +1658,7 @@ extension MLXLanguageModel.Executor {
     /// sees real token IDs for an accurate reasoning token count.
     func runReasoning(
         input: LMInput,
-        transcriptBoundary: Int?,
+        checkpointBoundaries: ExecutorCheckpointBoundaries,
         reasoningConfig: ReasoningConfig,
         primedInside: Bool,
         requestedMaxTokens: Int?,
@@ -1677,7 +1678,7 @@ extension MLXLanguageModel.Executor {
         )
         let plan = try Self.planPromptCache(
             promptCache, input: input, parameters: parameters,
-            transcriptBoundary: transcriptBoundary, speculation: speculation,
+            checkpointBoundaries: checkpointBoundaries, speculation: speculation,
             context: context)
 
         // The collector matches the delimiters by token id when the tokenizer

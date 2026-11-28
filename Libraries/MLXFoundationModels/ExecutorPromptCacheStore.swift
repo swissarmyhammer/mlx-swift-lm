@@ -600,14 +600,22 @@ actor ExecutorPromptCacheStore {
     /// The store copies nothing when a pass holds a cache of `source` or of `destination`, or
     /// when it holds a cache of `destination`.
     ///
+    /// A `tokenCount` makes each copy keep a prefix of the ledger of its source entry
+    /// (``ExecutorPromptCacheEntry/copy(keepingTokens:)``): exactly `tokenCount` tokens when the
+    /// caches rewind there, else the longest checkpoint at or below them. A file on disk is
+    /// cloned only when its ledger holds `tokenCount` tokens or fewer. The store copies nothing
+    /// when `tokenCount` is beyond the longest ledger of `source`.
+    ///
     /// - Parameters:
     ///   - modelID: the model of the two sessions.
     ///   - source: the session to copy.
     ///   - destination: the new session.
+    ///   - tokenCount: the most leading tokens of each ledger a copy keeps, or nil for the
+    ///     whole ledger.
     /// - Returns: what the copy did.
     func copy(
         modelID: ExecutorPromptCacheKey.ModelID, from source: ExecutorPromptCacheKey.SessionID,
-        to destination: ExecutorPromptCacheKey.SessionID
+        to destination: ExecutorPromptCacheKey.SessionID, keepingTokens tokenCount: Int? = nil
     ) -> PromptCacheCopyResult {
         removeStaleFoldersAtFirstUse()
         guard source != destination else { return .refused(.sameSession) }
@@ -626,16 +634,50 @@ actor ExecutorPromptCacheStore {
         }
         let sourceKeys = storedKeys.filter(names(source))
         guard !sourceKeys.isEmpty else { return .sourceNotFound }
-        var tokenCounts: [Int] = []
-        for key in sourceKeys {
-            let copyKey = ExecutorPromptCacheKey(
-                modelID: modelID, sessionID: destination, kvCache: key.kvCache)
-            if let tokenCount = copyEntry(of: key, to: copyKey) {
-                tokenCounts.append(tokenCount)
+        if let tokenCount, tokenCount > sourceKeys.map(ledgerLength(of:)).max() ?? 0 {
+            return .refused(.tokenCountBeyondLedger)
+        }
+        let outcomes = sourceKeys.map { key in
+            copyEntry(
+                of: key,
+                to: ExecutorPromptCacheKey(
+                    modelID: modelID, sessionID: destination, kvCache: key.kvCache),
+                keepingTokens: tokenCount)
+        }
+        if let copiedTokenCount = outcomes.compactMap(\.copiedTokenCount).max() {
+            return .copied(tokenCount: copiedTokenCount)
+        }
+        return .refused(outcomes.contains(.failed) ? .copyFailed : .noPrefixToKeep)
+    }
+
+    /// What the copy of the entry of one key of the source did.
+    private enum EntryCopyOutcome: Equatable {
+
+        /// The store keeps a copy whose ledger holds `tokenCount` tokens.
+        case copied(tokenCount: Int)
+
+        /// The file could not be cloned, or the worker of a remote cache failed the copy.
+        case failed
+
+        /// The entry can keep no prefix at or below the token count of the copy.
+        case noPrefix
+
+        /// The length of the ledger of the copy, or nil when the store keeps no copy.
+        var copiedTokenCount: Int? {
+            switch self {
+            case .copied(let tokenCount): tokenCount
+            case .failed, .noPrefix: nil
             }
         }
-        guard let tokenCount = tokenCounts.max() else { return .refused(.copyFailed) }
-        return .copied(tokenCount: tokenCount)
+    }
+
+    /// The length of the ledger that the store holds for `key`, on any tier.
+    ///
+    /// - Parameter key: a key that the store holds on one tier.
+    /// - Returns: the tokens of the ledger, or zero when the store holds nothing for `key`.
+    private func ledgerLength(of key: ExecutorPromptCacheKey) -> Int {
+        entries[key]?.tokens.count ?? spilling[key]?.entry.tokens.count
+            ?? onDisk[key]?.tokenCount ?? 0
     }
 
     /// Copies what the store holds for `key`, on its tier, to `copyKey`.
@@ -643,19 +685,24 @@ actor ExecutorPromptCacheStore {
     /// - Parameters:
     ///   - key: a key of the source that the store holds on one tier.
     ///   - copyKey: the key of the copy. The store holds nothing for it.
-    /// - Returns: the length of the token ledger of the copy, or nil when the file could not
-    ///   be cloned or the worker of a remote cache failed the copy.
+    ///   - tokenCount: the most leading tokens of the ledger the copy keeps, or nil for the
+    ///     whole ledger.
+    /// - Returns: what the copy did.
     private func copyEntry(
-        of key: ExecutorPromptCacheKey, to copyKey: ExecutorPromptCacheKey
-    ) -> Int? {
+        of key: ExecutorPromptCacheKey, to copyKey: ExecutorPromptCacheKey,
+        keepingTokens tokenCount: Int?
+    ) -> EntryCopyOutcome {
         if let entry = entries[key] {
             entries.insert(entry, for: key)
-            return keepCopy(of: entry, of: key, under: copyKey)
+            return keepCopy(of: entry, of: key, under: copyKey, keepingTokens: tokenCount)
         }
         if let spill = spilling[key] {
-            return keepCopy(of: spill.entry, of: key, under: copyKey)
+            return keepCopy(of: spill.entry, of: key, under: copyKey, keepingTokens: tokenCount)
         }
-        guard let file = onDisk[key] else { return nil }
+        guard let file = onDisk[key] else { return .failed }
+        if let tokenCount, tokenCount < file.tokenCount {
+            return .noPrefix
+        }
         lastGeneration += 1
         let url = directory.appendingPathComponent(
             ExecutorPromptCacheFile.fileName(for: copyKey, generation: lastGeneration))
@@ -665,7 +712,7 @@ actor ExecutorPromptCacheStore {
             ExecutorPromptCacheLog.info(
                 "prompt cache cannot copy the file of \(key.sessionID.rawValue) to "
                     + "\(copyKey.sessionID.rawValue): \(error)")
-            return nil
+            return .failed
         }
         onDisk.insert(file, for: key)
         onDisk.insert(
@@ -675,7 +722,7 @@ actor ExecutorPromptCacheStore {
                 byteCount: file.byteCount, tokenCount: file.tokenCount),
             for: copyKey)
         evictDiskToBudget()
-        return file.tokenCount
+        return .copied(tokenCount: file.tokenCount)
     }
 
     /// Keeps a copy of `entry`, the entry of `key` in memory, under `copyKey`, as
@@ -685,24 +732,26 @@ actor ExecutorPromptCacheStore {
     ///   - entry: the entry to copy.
     ///   - key: the key of `entry`.
     ///   - copyKey: the key of the copy. The store holds nothing for it.
-    /// - Returns: the length of the token ledger of the copy, or nil when the worker of a
-    ///   remote cache of `entry` failed the copy. The store then keeps nothing under
-    ///   `copyKey`, and the log has the error.
+    ///   - tokenCount: the most leading tokens of the ledger the copy keeps, or nil for the
+    ///     whole ledger.
+    /// - Returns: what the copy did. When the worker of a remote cache of `entry` failed the
+    ///   copy, the store keeps nothing under `copyKey`, and the log has the error.
     private func keepCopy(
         of entry: ExecutorPromptCacheEntry, of key: ExecutorPromptCacheKey,
-        under copyKey: ExecutorPromptCacheKey
-    ) -> Int? {
-        let copy: ExecutorPromptCacheEntry
+        under copyKey: ExecutorPromptCacheKey, keepingTokens tokenCount: Int?
+    ) -> EntryCopyOutcome {
+        let copy: ExecutorPromptCacheEntry?
         do {
-            copy = try entry.copy()
+            copy = try tokenCount.map(entry.copy(keepingTokens:)) ?? entry.copy()
         } catch {
             ExecutorPromptCacheLog.info(
                 "prompt cache cannot copy the entry of \(key.sessionID.rawValue) to "
                     + "\(copyKey.sessionID.rawValue): \(error)")
-            return nil
+            return .failed
         }
+        guard let copy else { return .noPrefix }
         keepInMemory(copy, for: copyKey)
-        return entry.tokens.count
+        return .copied(tokenCount: copy.tokens.count)
     }
 
     /// Releases the cache of every session of `modelID`, or of every session

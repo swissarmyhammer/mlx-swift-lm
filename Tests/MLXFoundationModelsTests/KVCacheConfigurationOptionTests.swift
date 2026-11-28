@@ -155,7 +155,8 @@ struct KVCacheConfigurationOptionTests {
 
         try MLXLanguageModel.Executor.$kvCache.withValue(KVCacheOptionFixtures.eightBit) {
             _ = try MLXLanguageModel.Executor.runGuidedLoop(
-                input: input, transcriptBoundary: nil, grammar: grammar,
+                input: input, checkpointBoundaries: ExecutorCheckpointBoundaries(),
+                grammar: grammar,
                 maxTokens: Self.guidedMaxTokens, promptCache: ExecutorPromptCacheSlot(nil),
                 speculation: nil, context: context
             ) { _ in }

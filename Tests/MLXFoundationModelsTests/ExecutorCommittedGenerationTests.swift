@@ -55,7 +55,8 @@ struct ExecutorCommittedGenerationTests {
                 model: ScriptedLanguageModel(
                     rounds: [], cacheLayerCount: 1, recurrentLayerCount: 1),
                 parameters: GenerateParameters(),
-                transcriptBoundary: Self.promptTokens.count,
+                checkpointBoundaries: ExecutorCheckpointBoundaries(
+                    transcriptEnd: Self.promptTokens.count),
                 decodeTokens: { _ in "" }))
 
         try await executor.withCommittedGeneration(plan: planned, promptCache: slot) {

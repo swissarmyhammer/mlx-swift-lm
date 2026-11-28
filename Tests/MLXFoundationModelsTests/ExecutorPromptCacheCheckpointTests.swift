@@ -313,7 +313,8 @@ struct ExecutorPromptCacheCheckpointTests {
     ) throws -> ExecutorPromptCachePlan? {
         try slot.plan(
             input: LMInput(tokens: MLXArray(render)), model: model,
-            parameters: GenerateParameters(), transcriptBoundary: transcriptBoundary,
+            parameters: GenerateParameters(),
+            checkpointBoundaries: ExecutorCheckpointBoundaries(transcriptEnd: transcriptBoundary),
             decodeTokens: { _ in "" })
     }
 

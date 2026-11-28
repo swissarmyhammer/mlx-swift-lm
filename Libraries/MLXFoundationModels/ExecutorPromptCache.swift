@@ -10,6 +10,36 @@ import os
 
 // MARK: - Planning one generation pass
 
+/// The indexes of a prompt where a pass of a hybrid model takes its
+/// checkpoints, which ``ThinkingRender/checkpointBoundaries(of:messages:tools:context:)``
+/// finds.
+struct ExecutorCheckpointBoundaries: Equatable, Sendable {
+
+    /// The end of the leading instructions: where a render of the same
+    /// instructions and tools followed by any other message parts from the
+    /// prompt, or nil when the pass takes no checkpoint there.
+    ///
+    /// A checkpoint there serves every conversation that keeps the
+    /// instructions, such as a session seeded with a copy of a template
+    /// whose prompt was another.
+    let instructionsEnd: Int?
+
+    /// The end of the last message, before the generation prompt: where a
+    /// next render of the same messages plus one new message parts from the
+    /// prompt, or nil when the pass takes no checkpoint there.
+    let transcriptEnd: Int?
+
+    /// Creates the boundaries of one prompt.
+    ///
+    /// - Parameters:
+    ///   - instructionsEnd: the end of the leading instructions, or nil.
+    ///   - transcriptEnd: the end of the last message, or nil.
+    init(instructionsEnd: Int? = nil, transcriptEnd: Int? = nil) {
+        self.instructionsEnd = instructionsEnd
+        self.transcriptEnd = transcriptEnd
+    }
+}
+
 /// What one generation pass does with the prompt cache of its session.
 struct ExecutorPromptCachePlan {
 
@@ -61,6 +91,13 @@ struct ExecutorPromptCachePlan {
     /// The checkpoint this pass took before generation, which the entry it
     /// commits carries to the next turn, or nil.
     var checkpoint: PromptCacheCheckpoint?
+
+    /// The checkpoint at the end of the instructions of the prompt, which the
+    /// entry this pass commits carries to the next turn, or nil.
+    ///
+    /// It is the checkpoint the carried entry kept, when the prompt starts
+    /// with it, or else the checkpoint this pass took before generation.
+    var instructionsCheckpoint: PromptCacheCheckpoint?
 
     /// The MTP drafter continuation the generation of this pass resumes,
     /// aligned with what `caches` hold before `input` is fed, or nil for a
@@ -128,6 +165,7 @@ struct ExecutorPromptCachePlan {
                 state: entry.state,
                 decision: decision(of: reuse, render: promptTokens, ledger: entry.tokens))
             plan.uncommittedTokens = reuse.uncommittedTokens
+            plan.instructionsCheckpoint = entry.instructionsCheckpoint(serving: promptTokens)
             // An extension and a splice both feed the render onto the caches
             // where the ledger ends, and the drafter state stands there too, as
             // `ChatSession` resumes it after either. A rewind moves the caches
@@ -201,13 +239,17 @@ struct ExecutorPromptCachePlan {
         }
     }
 
-    /// The plan that takes the caches of `entry` back to the checkpoint the
-    /// entry carries and feeds the render past it, or nil when the
-    /// checkpoint cannot serve the render.
+    /// The plan that takes the caches of `entry` back to the longest
+    /// checkpoint the entry carries that serves the render, and feeds the
+    /// render past it, or nil when no checkpoint can serve the render.
     ///
     /// ``make(reusing:input:model:parameters:protocolRules:drafterID:)`` asks for this
     /// plan only when no rule found a reuse, thus a checkpoint never takes
-    /// the place of an extension, a splice or a rewind.
+    /// the place of an extension, a splice or a rewind. The checkpoint at the
+    /// end of the last message serves a render that keeps that message, and
+    /// the instructions checkpoint serves a render that keeps the
+    /// instructions alone. The plan keeps the instructions checkpoint for the
+    /// next turn when the render starts with it.
     ///
     /// - Parameters:
     ///   - entry: the cache the session carries.
@@ -220,8 +262,15 @@ struct ExecutorPromptCachePlan {
         _ entry: ExecutorPromptCacheEntry, input: LMInput, promptTokens: [Int],
         drafterID: MTPDrafterID?
     ) -> ExecutorPromptCachePlan? {
-        guard let checkpoint = entry.checkpoint, checkpoint.serves(promptTokens),
-            let caches = checkpoint.restored(onto: entry.caches)
+        let serving = entry.checkpoints
+            .filter { $0.serves(promptTokens) }
+            .sorted { $0.tokens.count > $1.tokens.count }
+        guard
+            let (checkpoint, caches) = serving.lazy
+                .compactMap({ checkpoint in
+                    checkpoint.restored(onto: entry.caches).map { (checkpoint, $0) }
+                })
+                .first
         else {
             return nil
         }
@@ -235,6 +284,43 @@ struct ExecutorPromptCachePlan {
             state: checkpoint.state,
             decision: .restore(.init(render: promptTokens, ledger: entry.tokens)))
         plan.drafterState = drafterID.flatMap { checkpoint.drafterContinuation(resumableBy: $0) }
+        plan.instructionsCheckpoint = entry.instructionsCheckpoint(serving: promptTokens)
+        return plan
+    }
+
+    /// This plan, with the prompt fed up to each boundary of `boundaries`
+    /// before generation, a checkpoint taken at each, and only the rest of the
+    /// prompt left in `input`.
+    ///
+    /// The pass feeds to the end of the instructions first, unless the plan
+    /// keeps an instructions checkpoint already, and then to the end of the
+    /// last message (see ``prefillingToCheckpoint(at:model:parameters:speculation:)``).
+    ///
+    /// - Parameters:
+    ///   - boundaries: the indexes of the prompt where the checkpoints go.
+    ///   - model: the model that feeds the caches.
+    ///   - parameters: the generation parameters. Their prefill parameters
+    ///     cut the fed tokens into forward passes, as a prefill does.
+    ///   - speculation: the MTP drafter of the pass, or nil.
+    /// - Returns: the plan to generate with. A boundary that is not past the
+    ///   tokens the caches hold, or not before the end of the prompt, takes
+    ///   no checkpoint here.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   forward passes.
+    func prefillingToCheckpoints(
+        at boundaries: ExecutorCheckpointBoundaries, model: any LanguageModel,
+        parameters: GenerateParameters, speculation: MTPSpeculation? = nil
+    ) throws -> ExecutorPromptCachePlan {
+        var plan = self
+        if plan.instructionsCheckpoint == nil, let instructionsEnd = boundaries.instructionsEnd {
+            plan = try plan.prefilling(
+                to: instructionsEnd, checkpointingInto: \.instructionsCheckpoint, model: model,
+                parameters: parameters, speculation: speculation)
+        }
+        if let transcriptEnd = boundaries.transcriptEnd {
+            plan = try plan.prefillingToCheckpoint(
+                at: transcriptEnd, model: model, parameters: parameters, speculation: speculation)
+        }
         return plan
     }
 
@@ -259,8 +345,8 @@ struct ExecutorPromptCachePlan {
     ///     checkpoint keeps the drafter state at `boundary` and the generation
     ///     resumes it there.
     /// - Returns: the plan to generate with. This plan as it is when
-    ///   `boundary` is not past the reused tokens or not before the end of
-    ///   the prompt: the caches hold that position already, or only the
+    ///   `boundary` is not past the tokens the caches hold or not before the
+    ///   end of the prompt: the caches hold that position already, or only the
     ///   prefill of the generation reaches it.
     /// - Throws: `CancellationError` when the task is cancelled between two
     ///   forward passes.
@@ -268,15 +354,49 @@ struct ExecutorPromptCachePlan {
         at boundary: Int, model: any LanguageModel, parameters: GenerateParameters,
         speculation: MTPSpeculation? = nil
     ) throws -> ExecutorPromptCachePlan {
+        try prefilling(
+            to: boundary, checkpointingInto: \.checkpoint, model: model, parameters: parameters,
+            speculation: speculation)
+    }
+
+    /// This plan, with the prompt fed from where the caches stand up to
+    /// `boundary` before generation, the checkpoint taken there kept at
+    /// `slot`, and only the rest of the prompt left in `input`.
+    ///
+    /// The feed starts at the reused tokens, after the uncommitted tokens of
+    /// the previous pass, or at the boundary of an earlier feed of this pass.
+    ///
+    /// - Parameters:
+    ///   - boundary: the index of the prompt where the checkpoint goes.
+    ///   - slot: the checkpoint of the plan that keeps the new checkpoint.
+    ///   - model: the model that feeds the caches.
+    ///   - parameters: the generation parameters.
+    ///   - speculation: the MTP drafter of the pass, or nil.
+    /// - Returns: the plan to generate with, or this plan as it is when
+    ///   `boundary` is not past the tokens the caches hold or not before the
+    ///   end of the prompt.
+    /// - Throws: `CancellationError` when the task is cancelled between two
+    ///   forward passes.
+    private func prefilling(
+        to boundary: Int,
+        checkpointingInto slot: WritableKeyPath<ExecutorPromptCachePlan, PromptCacheCheckpoint?>,
+        model: any LanguageModel, parameters: GenerateParameters, speculation: MTPSpeculation?
+    ) throws -> ExecutorPromptCachePlan {
         // A splice can leave the caches at a position other than the reused
         // count, thus the drafter starts where the caches stand.
         let drafterFeed = speculation?.prefillFeed(
             target: model, parameters: parameters, cachePosition: caches.first?.offset ?? 0,
             continuation: drafterState)
+        // An earlier feed of this pass fed the uncommitted tokens and the
+        // prompt up to its own boundary.
+        let hasFed = prefilledTokenCount > 0
+        let start =
+            hasFed
+            ? reusedTokenCount + prefilledTokenCount - uncommittedTokens.count : reusedTokenCount
         guard
             let feed = try PromptCacheCheckpoint.prefillToCheckpoint(
                 at: boundary, of: promptTokens, representing: representedTokens,
-                from: reusedTokenCount, after: uncommittedTokens, into: caches, state: state,
+                from: start, after: hasFed ? [] : uncommittedTokens, into: caches, state: state,
                 model: model, prefill: parameters.prefill, drafterFeed: drafterFeed)
         else {
             return self
@@ -291,7 +411,9 @@ struct ExecutorPromptCachePlan {
             decision: decision)
         plan.prefilledTokenCount = uncommittedTokens.count + boundary - reusedTokenCount
         plan.uncommittedTokens = uncommittedTokens
-        plan.checkpoint = feed.checkpoint
+        plan.checkpoint = checkpoint
+        plan.instructionsCheckpoint = instructionsCheckpoint
+        plan[keyPath: slot] = feed.checkpoint
         // The fed tokens moved the caches past the drafter state this plan
         // carried, thus only the state the feed left can be resumed.
         plan.drafterState = feed.drafterContinuation
@@ -443,6 +565,7 @@ struct ExecutorPromptCachePlan {
                 uncommittedTokens: Array(generatedTokens.dropFirst(committedGeneratedTokenCount)),
                 state: state,
                 checkpoint: checkpoint,
+                instructionsCheckpoint: instructionsCheckpoint,
                 drafterState: drafterState.flatMap {
                     $0.isAligned(withMainTokenCount: ledger.count, drafterID: $0.drafterID)
                         ? $0 : nil
@@ -694,7 +817,9 @@ enum ExecutorPromptCacheReport {
         switch outcome {
         case .checkedIn(let entry):
             let checkpoint = entry.checkpointPosition.map { " checkpoint=\($0)" } ?? ""
-            return head + "ledger=\(entry.tokens.count)" + checkpoint
+            let instructions =
+                entry.instructionsCheckpoint.map { " instructions=\($0.tokens.count)" } ?? ""
+            return head + "ledger=\(entry.tokens.count)" + checkpoint + instructions
         case .refused(let refusal):
             return head + "checked in nothing: \(refusal.reason)"
         }

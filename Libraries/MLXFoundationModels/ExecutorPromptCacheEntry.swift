@@ -71,6 +71,35 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         checkpoint?.tokens.count
     }
 
+    /// The recurrent state of a hybrid model at the end of the instructions
+    /// of `tokens`, or nil when the entry carries none.
+    ///
+    /// `checkpoint` stands at the end of the last message of the render, and
+    /// it serves only a render that keeps that whole message. This one serves
+    /// every render that starts with the same instructions, such as the first
+    /// render of a session seeded with a copy of a template whose prompt was
+    /// another. It lives in memory only, as `checkpoint` does.
+    let instructionsCheckpoint: PromptCacheCheckpoint?
+
+    /// The checkpoints the entry carries: `checkpoint`, then
+    /// `instructionsCheckpoint`.
+    var checkpoints: [PromptCacheCheckpoint] {
+        Self.checkpoints(checkpoint, instructionsCheckpoint)
+    }
+
+    /// The checkpoints of the two that are present, in order.
+    ///
+    /// - Parameters:
+    ///   - checkpoint: the checkpoint at the end of the last message, or nil.
+    ///   - instructionsCheckpoint: the checkpoint at the end of the
+    ///     instructions, or nil.
+    /// - Returns: the checkpoints that are not nil.
+    private static func checkpoints(
+        _ checkpoint: PromptCacheCheckpoint?, _ instructionsCheckpoint: PromptCacheCheckpoint?
+    ) -> [PromptCacheCheckpoint] {
+        [checkpoint, instructionsCheckpoint].compactMap { $0 }
+    }
+
     /// The MTP drafter continuation the last pass left where `caches` end,
     /// or nil when that pass did not speculate with a resumable drafter.
     ///
@@ -82,7 +111,7 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
 
     /// The bytes this entry holds in the memory of this process: the resident
     /// bytes of every local cache, plus the arrays of `state`, plus the bytes
-    /// of `checkpoint`, plus the bytes of `drafterState`.
+    /// of each of ``checkpoints``, plus the bytes of `drafterState`.
     ///
     /// A ``RemoteKVCache`` counts no byte here: its buffers live on its worker,
     /// and ``workerByteCount`` counts them. The memory budget of the store thus
@@ -104,7 +133,7 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
 
     /// The bytes this entry holds on the workers of a clustered model: the
     /// resident bytes of every ``RemoteKVCache``, plus the bytes of the remote
-    /// copies of `checkpoint`. Zero for an entry of a local model.
+    /// copies of each of ``checkpoints``. Zero for an entry of a local model.
     ///
     /// The store limits the sum over its entries to
     /// ``ExecutorPromptCacheStore/workerBudgetBytes``. It is computed one time,
@@ -123,6 +152,8 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     ///   - state: the model state the last pass left, or nil.
     ///   - checkpoint: the recurrent state at an earlier position of
     ///     `tokens`, or nil.
+    ///   - instructionsCheckpoint: the recurrent state at the end of the
+    ///     instructions of `tokens`, or nil.
     ///   - drafterState: the MTP drafter continuation at the end of
     ///     `tokens`, or nil.
     ///   - minimumByteCount: the fewest bytes ``byteCount`` counts. A copy
@@ -131,8 +162,9 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     init(
         caches: [KVCache], tokens: [Int], renderTokens: [Int] = [],
         uncommittedTokens: [Int] = [], state: LMOutput.State? = nil,
-        checkpoint: PromptCacheCheckpoint? = nil, drafterState: MTPDrafterContinuation? = nil,
-        minimumByteCount: Int = 0
+        checkpoint: PromptCacheCheckpoint? = nil,
+        instructionsCheckpoint: PromptCacheCheckpoint? = nil,
+        drafterState: MTPDrafterContinuation? = nil, minimumByteCount: Int = 0
     ) {
         self.caches = caches
         self.tokens = tokens
@@ -140,16 +172,29 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         self.uncommittedTokens = uncommittedTokens
         self.state = state
         self.checkpoint = checkpoint
+        self.instructionsCheckpoint = instructionsCheckpoint
         self.drafterState = drafterState
         self.holdsRemoteCache = caches.contains(where: \.isRemote)
+        let checkpoints = Self.checkpoints(checkpoint, instructionsCheckpoint)
         self.workerByteCount =
             caches.reduce(0) { $0 + $1.residentByteCount(onWorker: true) }
-            + (checkpoint?.workerByteCount ?? 0)
+            + checkpoints.reduce(0) { $0 + $1.workerByteCount }
         self.byteCount = max(
             minimumByteCount,
             caches.reduce(0) { $0 + $1.residentByteCount(onWorker: false) }
                 + (state?.residentByteCount ?? 0)
-                + (checkpoint?.byteCount ?? 0) + (drafterState?.byteCount ?? 0))
+                + checkpoints.reduce(0) { $0 + $1.byteCount } + (drafterState?.byteCount ?? 0))
+    }
+
+    /// The instructions checkpoint, when `promptTokens` starts with its
+    /// tokens and has more to feed, thus when a pass of `promptTokens` keeps
+    /// it for the next turn.
+    ///
+    /// - Parameter promptTokens: the whole rendered prompt of the pass.
+    /// - Returns: `instructionsCheckpoint`, or nil when the entry carries none
+    ///   or the prompt does not keep its instructions.
+    func instructionsCheckpoint(serving promptTokens: [Int]) -> PromptCacheCheckpoint? {
+        instructionsCheckpoint.flatMap { $0.serves(promptTokens) ? $0 : nil }
     }
 
     /// The drafter state a pass that extends `tokens` with the drafter
@@ -179,7 +224,7 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// array. A buffer that two arrays hold is not donated to a write, thus the first write of
     /// one session copies the buffer, and the other session keeps the old buffer
     /// (copy-on-write). The drafter state is copied with ``MTPDrafterContinuation/copy()``.
-    /// The model state and the checkpoint are values that no pass writes: a checkpoint gives a
+    /// The model state and the checkpoints are values that no pass writes: a checkpoint gives a
     /// new copy of its caches at each restore. Thus the two entries share them.
     ///
     /// The copy counts at least the ``byteCount`` of this entry. A copied cache holds slices
@@ -197,7 +242,104 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
             caches: try caches.map { try $0.checkedCopy() }, tokens: tokens,
             renderTokens: renderTokens,
             uncommittedTokens: uncommittedTokens, state: state, checkpoint: checkpoint,
-            drafterState: drafterState?.copy(), minimumByteCount: byteCount)
+            instructionsCheckpoint: instructionsCheckpoint, drafterState: drafterState?.copy(),
+            minimumByteCount: byteCount)
+    }
+
+    /// An entry that holds the first `tokenCount` tokens of `tokens`, or the
+    /// longest checkpoint of this entry at or below them, and that a pass can
+    /// write without a change to this entry.
+    ///
+    /// - A ledger of `tokenCount` tokens or fewer gives ``copy()``.
+    /// - Caches that can rewind to `tokenCount` give copies of the caches
+    ///   (``KVCache/checkedCopy()``) trimmed to `tokenCount`. An entry that
+    ///   carries model state does not rewind, because the state is tied to
+    ///   the prefill that made it.
+    /// - Any other entry goes back to the longest of ``checkpoints`` at or
+    ///   below `tokenCount`, from copies (``PromptCacheCheckpoint/restoredCopy(of:)``).
+    ///
+    /// The new entry keeps no render and no uncommitted tokens: both stand
+    /// past the kept prefix. It keeps each checkpoint of this entry at or
+    /// below the kept prefix.
+    ///
+    /// - Parameter tokenCount: the most leading tokens of `tokens` to keep.
+    /// - Returns: the new entry, or nil when no prefix of at most `tokenCount`
+    ///   tokens and at least one token can be kept.
+    /// - Throws: the error of the copy of a ``RemoteKVCache`` on its worker.
+    ///   The copies made before it are dropped, thus their workers release
+    ///   them, and this entry does not change.
+    func copy(keepingTokens tokenCount: Int) throws -> ExecutorPromptCacheEntry? {
+        guard tokenCount < tokens.count else { return try copy() }
+        guard tokenCount > 0 else { return nil }
+        if let trimmed = try trimmedCopy(keepingTokens: tokenCount) {
+            return trimmed
+        }
+        return try restoredCopy(keepingTokens: tokenCount)
+    }
+
+    /// Copies of the caches trimmed to `tokenCount`, or nil when the caches
+    /// cannot rewind there.
+    ///
+    /// - Parameter tokenCount: the tokens to keep, fewer than `tokens`.
+    /// - Returns: the new entry, or nil.
+    /// - Throws: the error of the copy of a ``RemoteKVCache`` on its worker.
+    private func trimmedCopy(keepingTokens tokenCount: Int) throws -> ExecutorPromptCacheEntry? {
+        guard state == nil, canTrimPromptCache(caches, numTokens: tokens.count - tokenCount)
+        else {
+            return nil
+        }
+        let trimmed = try caches.map { try $0.checkedCopy() }
+        guard rewindPromptCache(trimmed, to: tokenCount) else { return nil }
+        // The trimmed arrays keep the whole buffers of this entry alive until
+        // a write, as a whole copy does.
+        return prefixEntry(
+            caches: trimmed, tokens: Array(tokens.prefix(tokenCount)), state: nil,
+            drafterState: nil, minimumByteCount: byteCount)
+    }
+
+    /// The caches at the longest of ``checkpoints`` at or below `tokenCount`,
+    /// or nil when no checkpoint there restores.
+    ///
+    /// - Parameter tokenCount: the most tokens to keep.
+    /// - Returns: the new entry, or nil.
+    /// - Throws: the error of the copy of a ``RemoteKVCache`` on its worker.
+    private func restoredCopy(keepingTokens tokenCount: Int) throws -> ExecutorPromptCacheEntry? {
+        let kept =
+            checkpoints
+            .filter { $0.tokens.count <= tokenCount }
+            .sorted { $0.tokens.count > $1.tokens.count }
+        for checkpoint in kept {
+            if let restored = try checkpoint.restoredCopy(of: caches) {
+                return prefixEntry(
+                    caches: restored, tokens: checkpoint.tokens, state: checkpoint.state,
+                    drafterState: checkpoint.drafterContinuation?.copy())
+            }
+        }
+        return nil
+    }
+
+    /// An entry of `caches` that hold `tokens`, a prefix of the ledger of this
+    /// entry, with each checkpoint of this entry at or below that prefix.
+    ///
+    /// - Parameters:
+    ///   - caches: the caches of the new entry.
+    ///   - tokens: the tokens `caches` represents.
+    ///   - state: the model state at the end of `tokens`, or nil.
+    ///   - drafterState: the MTP drafter continuation at the end of `tokens`,
+    ///     or nil.
+    ///   - minimumByteCount: the fewest bytes the new entry counts.
+    /// - Returns: the new entry.
+    private func prefixEntry(
+        caches: [KVCache], tokens: [Int], state: LMOutput.State?,
+        drafterState: MTPDrafterContinuation?, minimumByteCount: Int = 0
+    ) -> ExecutorPromptCacheEntry {
+        let kept = { (checkpoint: PromptCacheCheckpoint?) in
+            checkpoint.flatMap { $0.tokens.count <= tokens.count ? $0 : nil }
+        }
+        return ExecutorPromptCacheEntry(
+            caches: caches, tokens: tokens, state: state, checkpoint: kept(checkpoint),
+            instructionsCheckpoint: kept(instructionsCheckpoint), drafterState: drafterState,
+            minimumByteCount: minimumByteCount)
     }
 }
 
