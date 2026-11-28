@@ -361,16 +361,6 @@ struct ClusterLanguageModelTests {
         }
     }
 
-    @Test("a KV-cache configuration is refused")
-    func aKVCacheConfigurationIsRefused() throws {
-        let fixture = try Qwen35MTPFixture()
-        let model = try ClusterLanguageModel.connect(over: fixture.makeWorker())
-
-        #expect(throws: ClusterModelError.unsupported(.cacheConfiguration)) {
-            try model.newCache(parameters: GenerateParameters(kvBits: 8))
-        }
-    }
-
     @Test("an MTP generation with a drafter of this process throws its incompatibility")
     func anMTPGenerationWithADrafterOfThisProcessThrowsItsIncompatibility() throws {
         let fixture = try Qwen35MTPFixture()
@@ -585,7 +575,7 @@ struct ClusterLanguageModelTests {
 }
 
 /// What one chat turn wrote and how much of its prompt the cache served.
-private struct ChatTurn: Equatable {
+struct ChatTurn: Equatable {
 
     /// The text of the reply.
     let text: String

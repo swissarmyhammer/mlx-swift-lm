@@ -47,13 +47,16 @@ struct ClusterExecutorTests {
 
         init(
             weights: URL, capabilities: [LanguageModelCapabilities.Capability],
-            tokenizer: (any Tokenizer)? = nil
+            tokenizer: (any Tokenizer)? = nil, fixture: Qwen35MTPFixture? = nil,
+            kvCache: KVCacheConfiguration? = nil
         ) throws {
-            fixture = try Qwen35MTPFixture()
-            local = fixture.makeLanguageModel(
-                weights: weights, capabilities: capabilities, tokenizer: tokenizer)
-            (clustered, worker) = try fixture.makeClusteredLanguageModel(
-                weights: weights, capabilities: capabilities, tokenizer: tokenizer)
+            self.fixture = try fixture ?? Qwen35MTPFixture()
+            local = self.fixture.makeLanguageModel(
+                weights: weights, capabilities: capabilities, tokenizer: tokenizer,
+                kvCache: kvCache)
+            (clustered, worker) = try self.fixture.makeClusteredLanguageModel(
+                weights: weights, capabilities: capabilities, tokenizer: tokenizer,
+                kvCache: kvCache)
         }
     }
 
@@ -100,6 +103,46 @@ struct ClusterExecutorTests {
         let clustered = try await Self.respond(models.clustered, to: prompts)
 
         #expect(clustered.map(\.responseText) == local.map(\.responseText))
+        #expect(clustered.map(\.usage) == local.map(\.usage))
+        #expect((clustered[1].usage.first?.cachedPromptTokenCount ?? 0) > 0)
+    }
+
+    /// The models of a fixture whose attention caches quantize, under affine 8-bit KV-cache
+    /// compression.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func eightBitModels(weights: URL) throws -> Models {
+        try Models(
+            weights: weights, capabilities: [],
+            fixture: Qwen35MTPFixture(
+                headDimension: AffineKVCacheConfiguration.eightBit.groupSize),
+            kvCache: KVCacheConfiguration(strategy: .affine(.eightBit)))
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSecondTurnUnderAnEightBitKVCacheWritesTheLocalText() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let models = try Self.eightBitModels(weights: weights)
+        let prompts = [Self.prompt, Self.followUp].map(models.fixture.text(for:))
+
+        let local = try await Self.respond(models.local, to: prompts)
+        let clustered = try await Self.respond(models.clustered, to: prompts)
+
+        #expect(clustered.map(\.responseText) == local.map(\.responseText))
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSecondTurnUnderAnEightBitKVCacheReusesThePromptCacheAsTheLocalTurnDoes() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let models = try Self.eightBitModels(weights: weights)
+        let prompts = [Self.prompt, Self.followUp].map(models.fixture.text(for:))
+
+        let local = try await Self.respond(models.local, to: prompts)
+        let clustered = try await Self.respond(models.clustered, to: prompts)
+
         #expect(clustered.map(\.usage) == local.map(\.usage))
         #expect((clustered[1].usage.first?.cachedPromptTokenCount ?? 0) > 0)
     }

@@ -17,13 +17,14 @@ import Foundation
 /// | ``RemoteModelOp/describe`` | ``RemoteModelReply/capabilities(_:)`` | Names its protocol version, model families, sharding, and the `model_type` and quantization of the loaded model. |
 /// | ``RemoteModelOp/begin`` | ``RemoteModelReply/done`` | Starts the request that ``RemoteModelRequest/requestID`` names. |
 /// | ``RemoteModelOp/end`` | ``RemoteModelReply/done`` | Ends that request. Its announce raises the stop flag. |
-/// | ``RemoteModelOp/newCache(_:)`` | ``RemoteModelReply/cache(_:)`` | Makes an empty cache under the handle the app chose. |
+/// | ``RemoteModelOp/newCache(_:quantization:)`` | ``RemoteModelReply/cache(_:)`` | Makes an empty cache under the handle the app chose, quantized as the op names. |
 /// | ``RemoteModelOp/forward(tokens:cache:logits:)`` | ``RemoteModelReply/forwarded(_:logits:)`` | Runs the tokens through the model into the cache. |
 /// | ``RemoteModelOp/trim(_:count:)`` | ``RemoteModelReply/trimmed(_:status:)`` | Drops the newest positions of the cache. |
 /// | ``RemoteModelOp/copy(_:into:)`` | ``RemoteModelReply/cache(_:)`` | Copies a cache under a second handle the app chose. |
 /// | ``RemoteModelOp/reset(_:)`` | ``RemoteModelReply/cache(_:)`` | Empties a cache and keeps its handle. |
 /// | ``RemoteModelOp/release(_:)`` | ``RemoteModelReply/done`` | Frees a cache and forgets its handle. |
 /// | ``RemoteModelOp/speculate(_:)`` | ``RemoteModelReply/drafted(_:drafts:logits:)`` | Rewinds the drafts the last round rejected, drafts on rank 0, and verifies the round's token and drafts. |
+/// | ``RemoteModelOp/quantize(_:)`` | ``RemoteModelReply/cache(_:)`` | Quantizes the layers of a cache that reached the compression start of its quantization. |
 ///
 /// Any op can get ``RemoteModelReply/failed(_:)`` instead.
 ///
@@ -43,6 +44,17 @@ import Foundation
 /// Each op that changes a cache answers with a ``RemoteCacheStatus``. The app mirrors it, so a
 /// read of ``KVCache/offset`` or ``KVCache/maxTrimCount`` costs no round trip. A worker builds
 /// it with ``RemoteCacheStatus/init(describing:)``.
+///
+/// ## A quantized KV cache
+///
+/// A new cache can carry a ``RemoteKVCacheQuantization``, and every rank then makes its caches
+/// under that affine configuration, for the heads it holds. The app keeps the policy of when a
+/// cache converts: it sends ``RemoteModelOp/quantize(_:)`` where a local generation applies its
+/// ``KVCachePlan``, after the forward of the last prompt token and after each decode step or
+/// round, so each rank converts after the same forwards a local model does. The status names a
+/// cache that still waits to convert (``RemoteCacheStatus/awaitsQuantization``), and the app
+/// sends no quantize for any other, thus a cache costs one more op for each step until it
+/// converts, and none after.
 ///
 /// ## Speculative rounds
 ///
@@ -77,8 +89,10 @@ public enum RemoteModelProtocol {
     /// Version 2 adds the `model_type` and the quantization of the loaded model to
     /// ``RemoteModelCapabilities``. Version 3 adds
     /// ``RemoteModelCapabilities/preparesEveryPrompt``. Version 4 adds the drafter of rank 0
-    /// (``RemoteModelCapabilities/drafter``) and ``RemoteModelOp/speculate(_:)``.
-    public static let version: Int32 = 4
+    /// (``RemoteModelCapabilities/drafter``) and ``RemoteModelOp/speculate(_:)``. Version 5
+    /// adds the quantization of ``RemoteModelOp/newCache(_:quantization:)``,
+    /// ``RemoteModelOp/quantize(_:)`` and ``RemoteCacheStatus/awaitsQuantization``.
+    public static let version: Int32 = 5
 
     /// The most tokens one forward carries. A prefill longer than this goes in several forwards.
     public static let maximumChunkTokenCount = 1024
@@ -146,8 +160,9 @@ public enum RemoteModelOp: Codable, Sendable, Hashable {
     /// Ends the current generation request.
     case end
 
-    /// Makes an empty cache under `cache`, a handle the worker does not hold yet.
-    case newCache(RemoteCacheID)
+    /// Makes an empty cache under `cache`, a handle the worker does not hold yet, whose layers
+    /// quantize as `quantization` names, or stay in full precision when it is nil.
+    case newCache(RemoteCacheID, quantization: RemoteKVCacheQuantization? = nil)
 
     /// Runs `tokens` through the model into `cache`, and returns the logits of `logits`.
     case forward(tokens: [Int32], cache: RemoteCacheID, logits: RemoteLogitsScope)
@@ -166,6 +181,10 @@ public enum RemoteModelOp: Codable, Sendable, Hashable {
 
     /// Runs one speculative round on the cache: see ``RemoteDraftRound``.
     case speculate(RemoteDraftRound)
+
+    /// Quantizes each layer of the cache whose quantization's compression start it passed, as
+    /// a local ``KVCachePlan`` converts its caches.
+    case quantize(RemoteCacheID)
 }
 
 /// One speculative round of ``RemoteModelOp/speculate(_:)``.
@@ -436,6 +455,9 @@ public enum RemoteModelProtocolError: Error, Hashable, LocalizedError {
     /// An announce whose count does not fit its op.
     case invalidCount(Int32)
 
+    /// An announce whose compatibility field names no ``RemoteKVCacheCompatibility``.
+    case unknownCompatibility(Int32)
+
     /// Logits whose bytes do not fill their shape.
     case logitsByteCount(expected: Int, found: Int)
 
@@ -456,6 +478,8 @@ public enum RemoteModelProtocolError: Error, Hashable, LocalizedError {
             "No remote logits scope has the value \(scope)."
         case .invalidCount(let count):
             "A remote op announce cannot carry the count \(count)."
+        case .unknownCompatibility(let compatibility):
+            "No remote KV-cache compatibility has the value \(compatibility)."
         case .logitsByteCount(let expected, let found):
             "Remote logits need \(expected) bytes for their shape, but carry \(found)."
         case .parkHasNoRequest:

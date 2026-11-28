@@ -1,6 +1,18 @@
 ---
 assignees:
 - claude-code
+comments:
+- actor: claude-code
+  id: 01m8fs0ycs92018fz50jm2ghe7
+  text: |-
+    ### Scope grows: protocol v5 (from ^2ry6yz7)
+    ^2ry6yz7 raises RemoteModelProtocol.version from 4 to 5. `newCache` now carries the KV quantization (`.newCache(cache, quantization)`), and there is a new `.quantize` op. FoundationModelsCluster must adopt v5 too, because the version check is an exact match:
+    - Sources/ClusterProtocol/ForwardTokenCount.swift: add a `.quantize` case to the switch.
+    - IntegrationTests/Sources/fmcluster-parity/DecodeRun.swift: `.newCache(let cache)` becomes `.newCache(let cache, _)`.
+    - IntegrationTests/Sources/fmcluster-parity/Recording.swift: add `.speculate` and `.quantize` to the `name` switch.
+    - ModelProtocolCheckTests may pin the version.
+    After that, run the real 2-Mac parity checks: Qwen3.8-27B with kvBits 8, and MTP on Qwen and Inkling.
+  timestamp: 2026-11-28T00:31:31.737131+00:00
 position_column: todo
 position_ordinal: '9180'
 title: 'FoundationModelsCluster: adopt remote protocol v4 (MTP drafter on rank 0 + draft exchange)'

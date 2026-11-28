@@ -24,16 +24,24 @@ public final class RemoteKVCache: KVCache {
     /// The status the worker reported after the last op on the cache.
     public private(set) var status: RemoteCacheStatus
 
+    /// The quantization the worker made the caches under, or nil for full precision.
+    public let quantization: RemoteKVCacheQuantization?
+
     /// Makes the mirror of the caches of `id`.
     ///
     /// - Parameters:
     ///   - id: The handle of the caches on the worker.
     ///   - session: The stream of requests of the model.
     ///   - status: The status the worker reported for them.
-    init(id: RemoteCacheID, session: RemoteModelSession, status: RemoteCacheStatus) {
+    ///   - quantization: The quantization the worker made them under, or nil.
+    init(
+        id: RemoteCacheID, session: RemoteModelSession, status: RemoteCacheStatus,
+        quantization: RemoteKVCacheQuantization? = nil
+    ) {
         self.id = id
         self.session = session
         self.status = status
+        self.quantization = quantization
     }
 
     /// Frees the caches on the worker. A failed release leaves the session failed, which the
@@ -103,11 +111,43 @@ public final class RemoteKVCache: KVCache {
         let copyID = session.makeCacheID()
         do {
             let status = try session.perform(.copy(id, into: copyID)).cacheStatus(of: "copy")
-            return RemoteKVCache(id: copyID, session: session, status: status)
+            return RemoteKVCache(
+                id: copyID, session: session, status: status, quantization: quantization)
         } catch {
             session.recordFailure(error)
-            return RemoteKVCache(id: copyID, session: session, status: status)
+            return RemoteKVCache(
+                id: copyID, session: session, status: status, quantization: quantization)
         }
+    }
+
+    /// Converts the layers of the caches on the worker that passed the compression start of
+    /// their quantization, when `configuration` names that quantization and a layer still
+    /// waits: see ``RemoteModelOp/quantize(_:)``. A ``KVCachePlan`` calls it where it converts
+    /// a local cache.
+    ///
+    /// - Parameter configuration: The KV-cache configuration of the generation.
+    /// - Returns: Whether no layer waits to convert any more under `configuration`. A failed op
+    ///   returns `true`: the failure stays on the model, and its next throwing op reports it.
+    func quantize(for configuration: KVCacheConfiguration) -> Bool {
+        guard status.awaitsQuantization, quantization?.matches(configuration) == true else {
+            return true
+        }
+        do {
+            status = try session.perform(.quantize(id)).cacheStatus(of: "quantize")
+        } catch {
+            session.recordFailure(error)
+            return true
+        }
+        return !status.awaitsQuantization
+    }
+
+    /// Whether a ``KVCachePlan`` of `configuration` can run on the caches: one of full
+    /// precision, or one that names the quantization the worker made them under.
+    ///
+    /// - Parameter configuration: The KV-cache configuration of the generation.
+    /// - Returns: The answer.
+    func supports(_ configuration: KVCacheConfiguration) -> Bool {
+        configuration.strategy == .fullPrecision || quantization?.matches(configuration) == true
     }
 
     /// Empties the caches on the worker, and keeps the handle.

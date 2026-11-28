@@ -30,6 +30,7 @@ struct RemoteModelProtocolTests {
         .begin,
         .end,
         .newCache(cache),
+        .newCache(cache, quantization: quantization),
         .forward(tokens: [1, 2, 3], cache: cache, logits: .lastPosition),
         .forward(tokens: [7], cache: cache, logits: .allPositions),
         .forward(tokens: [4, 5], cache: cache, logits: .none),
@@ -39,7 +40,12 @@ struct RemoteModelProtocolTests {
         .release(cache),
         .speculate(round(draftLimit: 3)),
         .speculate(round(draftLimit: 0)),
+        .quantize(cache),
     ]
+
+    /// A quantization with a value in each field.
+    private static let quantization = RemoteKVCacheQuantization(
+        bits: 4, groupSize: 32, compressionStart: 300, compatibility: .requireAllLayers)
 
     /// A round of ``cache`` with a token, rejected drafts and a confidence floor in each field.
     private static func round(draftLimit: Int) -> RemoteDraftRound {
@@ -77,6 +83,49 @@ struct RemoteModelProtocolTests {
 
         #expect(throws: RemoteModelProtocolError.chunkTooLong(tokenCount: tokens.count)) {
             try RemoteOpAnnouncement.encode(request)
+        }
+    }
+
+    @Test("a new cache whose compression start does not fit a word has no announce")
+    func aNewCacheWhoseCompressionStartDoesNotFitAWordHasNoAnnounce() {
+        let start = Int(Int32.max) + 1
+        let request = Self.request(
+            .newCache(
+                Self.cache,
+                quantization: RemoteKVCacheQuantization(
+                    bits: 8, groupSize: 64, compressionStart: start, compatibility: .allowPartial
+                )))
+
+        #expect(throws: RemoteModelProtocolError.invalidCount(Int32.max)) {
+            try RemoteOpAnnouncement.encode(request)
+        }
+    }
+
+    /// The announce words of a new cache of ``quantization`` under `compatibility`.
+    private static func newCacheWords(compatibility: RemoteKVCacheCompatibility) throws
+        -> [Int32]
+    {
+        try RemoteOpAnnouncement.encode(
+            request(
+                .newCache(
+                    cache,
+                    quantization: RemoteKVCacheQuantization(
+                        bits: quantization.bits, groupSize: quantization.groupSize,
+                        compressionStart: quantization.compressionStart,
+                        compatibility: compatibility))))
+    }
+
+    @Test("a new cache whose compatibility names no policy does not decode")
+    func aNewCacheWhoseCompatibilityNamesNoPolicyDoesNotDecode() throws {
+        var words = try Self.newCacheWords(compatibility: .allowPartial)
+        let otherPolicyWords = try Self.newCacheWords(compatibility: .requireAllLayers)
+        // The one word in which two quantizations of different policies differ holds the policy.
+        let policyWord = try #require(words.indices.first { words[$0] != otherPolicyWords[$0] })
+        let unknownPolicy = Int32(RemoteKVCacheCompatibility.allCases.count)
+        words[policyWord] = unknownPolicy
+
+        #expect(throws: RemoteModelProtocolError.unknownCompatibility(unknownPolicy)) {
+            try RemoteOpAnnouncement.decode(words)
         }
     }
 

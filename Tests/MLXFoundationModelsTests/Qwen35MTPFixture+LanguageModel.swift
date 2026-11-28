@@ -33,18 +33,20 @@ extension Qwen35MTPFixture {
     ///   - toolCallFormat: The response protocol of the target, whose cache-reuse rules the
     ///     executor consults, or `nil` for none.
     ///   - speculativeDecoding: The MTP drafter of the model, or `nil` for plain decode.
+    ///   - kvCache: The KV-cache configuration of every generation, or `nil` for full precision.
     /// - Returns: The model.
     func makeLanguageModel(
         weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
         resolver: any ModelConfigurationResolver = DefaultConfigurationResolver(),
         eosTokenIds: Set<Int> = [], tokenizer: (any Tokenizer)? = nil,
-        toolCallFormat: ToolCallFormat? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil
+        toolCallFormat: ToolCallFormat? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil,
+        kvCache: KVCacheConfiguration? = nil
     ) -> MLXLanguageModel {
         Self.makeLanguageModel(
             serving: makeLanguageContext(
                 eosTokenIds: eosTokenIds, tokenizer: tokenizer, toolCallFormat: toolCallFormat),
             weights: weights, capabilities: capabilities, resolver: resolver,
-            speculativeDecoding: speculativeDecoding)
+            speculativeDecoding: speculativeDecoding, kvCache: kvCache)
     }
 
     /// A FoundationModels language model whose target runs in an in-process worker, behind a
@@ -59,12 +61,13 @@ extension Qwen35MTPFixture {
     ///   - speculativeDecoding: The MTP drafter of the model, or `nil` for plain decode.
     ///   - drafting: Whether rank 0 of the worker holds the drafter of the fixture.
     ///   - followerCount: The ranks other than 0 the worker stands for.
+    ///   - kvCache: The KV-cache configuration of every generation, or `nil` for full precision.
     /// - Returns: The model, and the worker that runs its target.
     /// - Throws: The error of the worker handshake.
     func makeClusteredLanguageModel(
         weights: URL, capabilities: [LanguageModelCapabilities.Capability] = [],
         tokenizer: (any Tokenizer)? = nil, speculativeDecoding: MLXSpeculativeDecoding? = nil,
-        drafting: Bool = false, followerCount: Int = 0
+        drafting: Bool = false, followerCount: Int = 0, kvCache: KVCacheConfiguration? = nil
     ) throws -> (model: MLXLanguageModel, worker: InProcessRemoteModelWorker) {
         let worker = makeWorker(drafting: drafting, followerCount: followerCount)
         var context = makeLanguageContext(
@@ -72,7 +75,8 @@ extension Qwen35MTPFixture {
         context.model = try ClusterLanguageModel.connect(over: worker)
         let model = Self.makeLanguageModel(
             serving: context, weights: weights, capabilities: capabilities,
-            resolver: DefaultConfigurationResolver(), speculativeDecoding: speculativeDecoding)
+            resolver: DefaultConfigurationResolver(), speculativeDecoding: speculativeDecoding,
+            kvCache: kvCache)
         return (model, worker)
     }
 
@@ -95,7 +99,8 @@ extension Qwen35MTPFixture {
     private static func makeLanguageModel(
         serving context: ModelContext, weights: URL,
         capabilities: [LanguageModelCapabilities.Capability],
-        resolver: any ModelConfigurationResolver, speculativeDecoding: MLXSpeculativeDecoding?
+        resolver: any ModelConfigurationResolver, speculativeDecoding: MLXSpeculativeDecoding?,
+        kvCache: KVCacheConfiguration? = nil
     ) -> MLXLanguageModel {
         let container = ModelContainer(context: context)
         return MLXLanguageModel(
@@ -103,6 +108,7 @@ extension Qwen35MTPFixture {
             capabilities: capabilities,
             configurationResolver: resolver,
             speculativeDecoding: speculativeDecoding,
+            kvCache: kvCache,
             weightsLocation: { _ in weights },
             load: { _, _ in container })
     }

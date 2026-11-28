@@ -14,14 +14,14 @@ import MLX
 ///
 /// | Word | Holds |
 /// |---|---|
-/// | 0 | The opcode: 1 describe, 2 begin, 3 end, 4 newCache, 5 forward, 6 trim, 7 copy, 8 reset, 9 release, 10 park, 11 speculate. |
+/// | 0 | The opcode: 1 describe, 2 begin, 3 end, 4 newCache, 5 forward, 6 trim, 7 copy, 8 reset, 9 release, 10 park, 11 speculate, 12 quantize. |
 /// | 1 | The flags: bit 0 is the stop flag, which only ``RemoteModelOp/end`` raises; bits 1 and 2 hold the ``RemoteLogitsScope`` of a forward. |
-/// | 2 | The count: the tokens of a forward, the positions of a trim, the draft limit of a round, else 0. |
+/// | 2 | The count: the tokens of a forward, the positions of a trim, the draft limit of a round, the bits of the quantization of a new cache (0 for none), else 0. |
 /// | 3, 4 | ``RemoteModelRequest/sequence``, low half then high half. |
 /// | 5, 6 | ``RemoteModelRequest/requestID``, low half then high half. |
 /// | 7, 8 | The cache handle of the op, low half then high half, else 0. |
 /// | 9, 10 | The target handle of a copy, low half then high half, else 0. |
-/// | 11 ... | The tokens of a forward, then zeros, ``RemoteModelProtocol/maximumChunkTokenCount`` words. A round puts its token, its rejected drafts and the bits of its confidence floor in the first three. |
+/// | 11 ... | The tokens of a forward, then zeros, ``RemoteModelProtocol/maximumChunkTokenCount`` words. A round puts its token, its rejected drafts and the bits of its confidence floor in the first three. A new cache puts the group size, the compression start and the compatibility of its quantization in the first three. |
 ///
 /// No opcode is 0, thus a buffer of zeros never decodes to an op.
 ///
@@ -45,12 +45,18 @@ public enum RemoteOpAnnouncement {
     /// The opcode of each op.
     private enum Opcode: Int32 {
         case describe = 1
-        case begin, end, newCache, forward, trim, copy, reset, release, park, speculate
+        case begin, end, newCache, forward, trim, copy, reset, release, park, speculate, quantize
     }
 
     /// The payload words of a ``RemoteDraftRound``, after the header.
     private enum RoundWord: Int {
         case token, rejectedCount, minimumDraftProbability
+    }
+
+    /// The payload words of a ``RemoteKVCacheQuantization``, after the header. Its bits stand
+    /// in the count word.
+    private enum QuantizationWord: Int {
+        case groupSize, compressionStart, compatibility
     }
 
     /// The stop flag in the flags word.
@@ -77,7 +83,9 @@ public enum RemoteOpAnnouncement {
     /// - Returns: ``wordCount`` words.
     /// - Throws: ``RemoteModelProtocolError/chunkTooLong(tokenCount:)`` for a forward of more
     ///   than ``RemoteModelProtocol/maximumChunkTokenCount`` tokens, and
-    ///   ``RemoteModelProtocolError/invalidCount(_:)`` for a trim count outside `Int32`.
+    ///   ``RemoteModelProtocolError/invalidCount(_:)`` for a trim count outside `Int32`, a round
+    ///   that fails ``RemoteDraftRound/validate()``, or a quantization value outside
+    ///   `0 ... Int32.max`.
     public static func encode(_ request: RemoteModelRequest) throws -> [Int32] {
         var words = [Int32](repeating: 0, count: wordCount)
         func set(_ word: Word, _ value: Int32) { words[word.rawValue] = value }
@@ -93,9 +101,12 @@ public enum RemoteOpAnnouncement {
         case .end:
             opcode = .end
             set(.flags, stopFlag)
-        case .newCache(let cache):
+        case .newCache(let cache, let quantization):
             opcode = .newCache
             set(.cacheLow, .cacheHigh, cache.rawValue)
+            if let quantization {
+                try write(quantization, into: &words)
+            }
         case .forward(let tokens, let cache, let logits):
             guard tokens.count <= RemoteModelProtocol.maximumChunkTokenCount else {
                 throw RemoteModelProtocolError.chunkTooLong(tokenCount: tokens.count)
@@ -125,6 +136,9 @@ public enum RemoteOpAnnouncement {
         case .speculate(let round):
             opcode = .speculate
             try write(round, into: &words)
+        case .quantize(let cache):
+            opcode = .quantize
+            set(.cacheLow, .cacheHigh, cache.rawValue)
         }
         set(.opcode, opcode.rawValue)
         return words
@@ -165,6 +179,58 @@ public enum RemoteOpAnnouncement {
         headerWordCount + word.rawValue
     }
 
+    /// Writes the bits and the payload words of `quantization` into `words`.
+    ///
+    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` with the offending value, clamped
+    ///   to a word, for bits that are not positive or a value outside `0 ... Int32.max`.
+    private static func write(
+        _ quantization: RemoteKVCacheQuantization, into words: inout [Int32]
+    ) throws {
+        guard quantization.bits > 0 else {
+            throw RemoteModelProtocolError.invalidCount(Int32(clamping: quantization.bits))
+        }
+        func word(_ value: Int) throws -> Int32 {
+            guard let word = Int32(exactly: value), word >= 0 else {
+                throw RemoteModelProtocolError.invalidCount(Int32(clamping: value))
+            }
+            return word
+        }
+        words[Word.count.rawValue] = try word(quantization.bits)
+        words[payloadIndex(.groupSize)] = try word(quantization.groupSize)
+        words[payloadIndex(.compressionStart)] = try word(quantization.compressionStart)
+        words[payloadIndex(.compatibility)] = quantization.compatibility.rawValue
+    }
+
+    /// The quantization of the count and the payload words of `words`, or nil for a count of
+    /// zero bits.
+    ///
+    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` for a negative value, and
+    ///   ``RemoteModelProtocolError/unknownCompatibility(_:)`` for a compatibility that names no
+    ///   policy.
+    private static func quantization(of words: [Int32]) throws -> RemoteKVCacheQuantization? {
+        let bits = words[Word.count.rawValue]
+        guard bits != 0 else { return nil }
+        let values = [
+            bits, words[payloadIndex(.groupSize)], words[payloadIndex(.compressionStart)],
+        ]
+        if let negative = values.first(where: { $0 < 0 }) {
+            throw RemoteModelProtocolError.invalidCount(negative)
+        }
+        let compatibilityValue = words[payloadIndex(.compatibility)]
+        guard let compatibility = RemoteKVCacheCompatibility(rawValue: compatibilityValue) else {
+            throw RemoteModelProtocolError.unknownCompatibility(compatibilityValue)
+        }
+        return RemoteKVCacheQuantization(
+            bits: Int(bits), groupSize: Int(words[payloadIndex(.groupSize)]),
+            compressionStart: Int(words[payloadIndex(.compressionStart)]),
+            compatibility: compatibility)
+    }
+
+    /// The index in the announce words of the payload word `word` of a quantization.
+    private static func payloadIndex(_ word: QuantizationWord) -> Int {
+        headerWordCount + word.rawValue
+    }
+
     /// The request of announce `words`.
     ///
     /// - Parameter words: The words of one announce.
@@ -186,7 +252,7 @@ public enum RemoteOpAnnouncement {
         case .describe: op = .describe
         case .begin: op = .begin
         case .end: op = .end
-        case .newCache: op = .newCache(cache)
+        case .newCache: op = .newCache(cache, quantization: try quantization(of: words))
         case .forward:
             guard (0 ... Int32(RemoteModelProtocol.maximumChunkTokenCount)).contains(count) else {
                 throw RemoteModelProtocolError.invalidCount(count)
@@ -205,6 +271,7 @@ public enum RemoteOpAnnouncement {
         case .reset: op = .reset(cache)
         case .release: op = .release(cache)
         case .speculate: op = .speculate(try round(of: words))
+        case .quantize: op = .quantize(cache)
         case .park: throw RemoteModelProtocolError.parkHasNoRequest
         }
         return RemoteModelRequest(

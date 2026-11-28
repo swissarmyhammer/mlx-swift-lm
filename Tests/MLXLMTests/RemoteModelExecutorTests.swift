@@ -467,6 +467,65 @@ struct RemoteModelExecutorTests {
         #expect(reply == .failed(Self.text(of: .cacheExists(Self.cache))))
     }
 
+    /// An 8-bit quantization of the caches of a new handle.
+    private static let eightBit = RemoteKVCacheQuantization(
+        bits: 8, groupSize: AffineKVCacheConfiguration.eightBit.groupSize, compressionStart: 0,
+        compatibility: .allowPartial)
+
+    /// The ops that begin a request, make ``cache`` under ``eightBit`` and prefill ``prompt``.
+    private static let quantizedPrefill: [RemoteModelOp] = [
+        .begin, .newCache(cache, quantization: eightBit),
+        .forward(tokens: prompt, cache: cache, logits: .none),
+    ]
+
+    @Test("a new cache of a bit width no affine cache takes fails")
+    func aNewCacheOfAnUnsupportedBitWidthFails() throws {
+        let unsupportedBits = 7
+        let quantization = RemoteKVCacheQuantization(
+            bits: unsupportedBits, groupSize: Self.eightBit.groupSize, compressionStart: 0,
+            compatibility: .allowPartial)
+
+        let reply = try Self.run(
+            [.begin, .newCache(Self.cache, quantization: quantization)], on: Self.makeExecutor())
+
+        #expect(
+            reply
+                == .failed(
+                    Self.text(
+                        of: .cacheConfiguration(
+                            KVCacheConfigurationError.invalidAffineBits(unsupportedBits)
+                                .localizedDescription))))
+    }
+
+    @Test("a prefilled cache of a quantization awaits its quantize")
+    func aPrefilledQuantizedCacheAwaitsItsQuantize() throws {
+        let reply = try Self.run(Self.quantizedPrefill, on: Self.makeExecutor())
+
+        #expect(Self.status(of: reply)?.awaitsQuantization == true)
+    }
+
+    @Test("a quantize leaves the cache awaiting no quantize")
+    func aQuantizeLeavesTheCacheAwaitingNoQuantize() throws {
+        let reply = try Self.run(
+            Self.quantizedPrefill + [.quantize(Self.cache)], on: Self.makeExecutor())
+
+        #expect(Self.status(of: reply)?.awaitsQuantization == false)
+    }
+
+    @Test("a cache of no quantization awaits no quantize")
+    func aCacheOfNoQuantizationAwaitsNoQuantize() throws {
+        let reply = try Self.run(Self.prefilled, on: Self.makeExecutor())
+
+        #expect(Self.status(of: reply)?.awaitsQuantization == false)
+    }
+
+    @Test("a quantize of a handle the executor does not hold fails")
+    func aQuantizeOfAnUnknownHandleFails() throws {
+        let reply = try Self.run([.begin, .quantize(Self.cache)], on: Self.makeExecutor())
+
+        #expect(reply == .failed(Self.text(of: .unknownCache(Self.cache))))
+    }
+
     @Test("a trim drops the newest positions")
     func aTrimDropsTheNewestPositions() throws {
         let trimmedCount = 3

@@ -37,7 +37,8 @@ public enum ClusterModelFeature: String, Sendable, Hashable {
     /// Image, video or audio input: the workers would need the embeddings.
     case mediaInput
 
-    /// A KV-cache configuration or `maxKVSize`: the worker makes its caches itself.
+    /// A KV-cache configuration other than an affine quantization, such as a `maxKVSize`: the
+    /// worker makes its caches itself, and bounds none.
     case cacheConfiguration
 
     /// A batch of more than one sequence.
@@ -126,7 +127,8 @@ public enum ClusterModelError: Error, Hashable, LocalizedError {
         switch feature {
         case .mediaInput: "image, video or audio input"
         case .cacheConfiguration:
-            "a KV-cache configuration or maxKVSize; the worker sets its caches"
+            "a KV-cache configuration other than affine quantization, such as maxKVSize; "
+                + "the worker sets its caches"
         case .batchedInput: "a batch of more than one sequence"
         }
     }

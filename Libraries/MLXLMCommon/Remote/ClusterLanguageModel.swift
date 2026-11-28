@@ -18,9 +18,14 @@ private let clusterLogger = MLXLogger(label: "cluster-language-model")
 /// The model holds no weights. ``newCache(parameters:)`` makes one ``RemoteKVCache``, which
 /// names the caches of every layer on the worker.
 ///
+/// A KV-cache configuration of an affine strategy (`kvBits`, `kvGroupSize` and
+/// `quantizedKVStart`, or an affine ``GenerateParameters/kvCache``) quantizes the caches of every
+/// rank, each for the heads it holds, and they convert after the forwards a local generation
+/// converts its caches after (see ``RemoteKVCacheQuantization``).
+///
 /// It refuses what a worker cannot run, each with a ``ClusterModelError``: image, video and
-/// audio input, a KV-cache configuration, and a batch of several sequences. A prompt cache file
-/// cannot hold its cache. It speculates with the MTP drafter of rank 0 (``mtpDrafter``), and a
+/// audio input, any other KV-cache configuration (a `maxKVSize`, a rewind reserve, or another
+/// strategy), and a batch of several sequences. A prompt cache file cannot hold its cache. It speculates with the MTP drafter of rank 0 (``mtpDrafter``), and a
 /// draft model of this process verifies on it as on a local model.
 ///
 /// A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cache:state:)``
@@ -113,20 +118,24 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
             RemoteModelProtocol.maximumChunkTokenCount)
     }
 
-    /// Makes an empty cache on the worker.
+    /// Makes an empty cache on the worker, quantized on every rank as the KV-cache
+    /// configuration of `parameters` asks.
     ///
-    /// - Parameter parameters: The generation parameters. They must ask for no KV-cache
-    ///   configuration and no `maxKVSize`: the worker makes its caches itself.
+    /// - Parameter parameters: The generation parameters. Their KV-cache configuration can ask
+    ///   for an affine strategy alone: the worker makes its caches itself, and bounds none.
     /// - Returns: One ``RemoteKVCache``, which names the caches of every layer.
-    /// - Throws: ``ClusterModelError/unsupported(_:)`` for a cache configuration, or the error
-    ///   of the op.
+    /// - Throws: ``ClusterModelError/unsupported(_:)`` for a `maxKVSize`, a rewind reserve or a
+    ///   strategy other than affine, the ``KVCacheConfigurationError`` of an invalid
+    ///   configuration, or the error of the op.
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
-        guard try parameters?.resolvedKVCacheConfiguration() == nil else {
-            throw ClusterModelError.unsupported(.cacheConfiguration)
-        }
+        let quantization = try parameters?.resolvedKVCacheConfiguration().map(
+            RemoteKVCacheQuantization.init)
         let id = session.makeCacheID()
-        let status = try session.perform(.newCache(id)).cacheStatus(of: "newCache")
-        return [RemoteKVCache(id: id, session: session, status: status)]
+        let status = try session.perform(.newCache(id, quantization: quantization))
+            .cacheStatus(of: "newCache")
+        return [
+            RemoteKVCache(id: id, session: session, status: status, quantization: quantization)
+        ]
     }
 
     /// Begins a request on the worker, prefills all but the tail of the prompt in chunks, and

@@ -32,6 +32,14 @@ import MLX
 /// the exchange of a round whose draft limit is above zero, a rank with no drafter too, and no
 /// rank runs it for a round of no drafts.
 ///
+/// ## A quantized cache
+///
+/// A ``RemoteModelOp/newCache(_:quantization:)`` that carries a ``RemoteKVCacheQuantization``
+/// makes the caches of the handle under that affine configuration, on every rank. A handle keeps
+/// its quantization across a copy and a reset. Its layers convert only at a
+/// ``RemoteModelOp/quantize(_:)``, which checks the compatibility policy of the quantization, and
+/// its status names whether a layer still waits to convert.
+///
 /// ## The rules of the stream
 ///
 /// Each request must carry the sequence number after the last one, starting at 1. A request
@@ -177,9 +185,9 @@ public final class RemoteModelExecutor {
             return .capabilities(modelCapabilities)
         case .begin, .end:
             return .done
-        case .newCache(let id):
+        case .newCache(let id, let quantization):
             guard handles[id] == nil else { throw RemoteModelExecutorError.cacheExists(id) }
-            handles[id] = try emptyHandle()
+            handles[id] = try emptyHandle(quantization: try quantization?.configuration())
             return .cache(try status(of: id))
         case .forward(let tokens, let id, let scope):
             return try forward(tokens, cache: id, scope: scope)
@@ -188,8 +196,7 @@ public final class RemoteModelExecutor {
         case .copy(let id, let target):
             return try copy(id, into: target)
         case .reset(let id):
-            _ = try handle(of: id)
-            handles[id] = try emptyHandle()
+            handles[id] = try emptyHandle(quantization: try handle(of: id).quantization)
             return .cache(try status(of: id))
         case .release(let id):
             _ = try handle(of: id)
@@ -197,14 +204,49 @@ public final class RemoteModelExecutor {
             return .done
         case .speculate(let round):
             return try speculate(round)
+        case .quantize(let id):
+            return try quantize(id)
         }
     }
 
-    /// The caches of an empty sequence, and the drafter state rank 0 keeps beside them.
-    private func emptyHandle() throws -> RemoteCacheHandle {
+    /// The caches of an empty sequence under `quantization`, and the drafter state rank 0 keeps
+    /// beside them.
+    ///
+    /// The model makes the caches from the quantization, as a local generation makes them from
+    /// its parameters, so a model that quantizes a cache from its first position does so here.
+    ///
+    /// - Parameter quantization: The KV-cache configuration of the caches, or nil for full
+    ///   precision.
+    private func emptyHandle(quantization: KVCacheConfiguration?) throws -> RemoteCacheHandle {
         RemoteCacheHandle(
-            layers: try model.newCache(parameters: nil),
-            drafter: drafting.map(RemoteDrafterTrack.init))
+            layers: try model.newCache(
+                parameters: quantization.map { GenerateParameters(kvCache: $0) }),
+            quantization: quantization, drafter: drafting.map(RemoteDrafterTrack.init))
+    }
+
+    /// Converts each layer of the caches of `id` that passed the compression start of their
+    /// quantization, as a local ``KVCachePlan`` converts its caches, and checks the
+    /// compatibility policy of the quantization.
+    ///
+    /// A handle of no quantization, or one whose every layer converted, changes nothing.
+    private func quantize(_ id: RemoteCacheID) throws -> RemoteModelReply {
+        let handle = try handle(of: id)
+        guard handle.awaitsQuantization, let configuration = handle.quantization else {
+            return .cache(status(of: handle))
+        }
+        var layers = handle.layers
+        let isTerminal: Bool
+        do {
+            isTerminal = try applyKVCacheConfigurationValidated(
+                cache: &layers, configuration: configuration
+            ).isTerminal
+        } catch let error as KVCacheConfigurationError {
+            throw RemoteModelExecutorError.cacheConfiguration(error.localizedDescription)
+        }
+        eval(layers.flatMap(\.evaluationState))
+        handles[id]?.layers = layers
+        handles[id]?.awaitsQuantization = !isTerminal
+        return .cache(try status(of: id))
     }
 
     /// Runs `tokens` into the caches of `id`, as a local generation runs them.
@@ -279,9 +321,10 @@ public final class RemoteModelExecutor {
         let source = try handle(of: id)
         guard handles[target] == nil else { throw RemoteModelExecutorError.cacheExists(target) }
         discardSpeculativePromptCacheCheckpoints(source.layers)
-        handles[target] = RemoteCacheHandle(
-            layers: source.layers.map { $0.copy() }, state: source.state,
-            drafter: source.drafter?.copy())
+        var copy = source
+        copy.layers = source.layers.map { $0.copy() }
+        copy.drafter = source.drafter?.copy()
+        handles[target] = copy
         return .cache(try status(of: target))
     }
 
@@ -355,7 +398,7 @@ public final class RemoteModelExecutor {
 
     /// The status of the caches of `handle`, whose bytes count the drafter state too.
     private func status(of handle: RemoteCacheHandle) -> RemoteCacheStatus {
-        RemoteCacheStatus(describing: handle.layers)
+        RemoteCacheStatus(describing: handle.layers, awaitsQuantization: handle.awaitsQuantization)
             .addingResidentBytes(handle.drafter?.residentByteCount ?? 0)
     }
 }
@@ -459,23 +502,33 @@ struct CheckpointFields: Decodable {
     }
 }
 
-/// The caches of every layer of one handle, the model state the last forward left, and the
-/// drafter state rank 0 keeps beside them.
+/// The caches of every layer of one handle, the model state the last forward left, the
+/// quantization of the caches, and the drafter state rank 0 keeps beside them.
 private struct RemoteCacheHandle {
 
-    /// The cache of each layer.
-    let layers: [any KVCache]
+    /// The cache of each layer. A quantize replaces the layers it converts.
+    var layers: [any KVCache]
 
     /// The model state the last forward left, or nil before one.
     var state: LMOutput.State?
 
+    /// The KV-cache configuration the caches quantize under, or nil for full precision.
+    let quantization: KVCacheConfiguration?
+
+    /// Whether a layer still waits to convert under ``quantization``.
+    var awaitsQuantization: Bool
+
     /// The drafter state of rank 0, or nil on a rank without a drafter.
     var drafter: RemoteDrafterTrack?
 
-    /// Makes a handle of `layers`.
-    init(layers: [any KVCache], state: LMOutput.State? = nil, drafter: RemoteDrafterTrack?) {
+    /// Makes a handle of the empty `layers`, which wait to convert when they carry a
+    /// quantization.
+    init(
+        layers: [any KVCache], quantization: KVCacheConfiguration?, drafter: RemoteDrafterTrack?
+    ) {
         self.layers = layers
-        self.state = state
+        self.quantization = quantization
+        self.awaitsQuantization = quantization != nil
         self.drafter = drafter
     }
 }
@@ -587,6 +640,10 @@ public enum RemoteModelExecutorError: Error, Hashable, LocalizedError {
     /// `rewound`.
     case rewind(requested: Int, rewound: Int)
 
+    /// The caches cannot quantize as their ``RemoteKVCacheQuantization`` asks: the reason
+    /// names the ``KVCacheConfigurationError``.
+    case cacheConfiguration(String)
+
     /// A description of the error.
     public var errorDescription: String? {
         switch self {
@@ -612,6 +669,8 @@ public enum RemoteModelExecutorError: Error, Hashable, LocalizedError {
             "The draft exchange gave words of \(count) drafts, which the round cannot hold."
         case .rewind(let requested, let rewound):
             "The worker rewound \(rewound) of the \(requested) rejected drafts of a round."
+        case .cacheConfiguration(let reason):
+            "The worker cannot quantize the KV cache: \(reason)"
         }
     }
 }

@@ -116,9 +116,16 @@ owns the transport, and ``ClusterLanguageModel/close()`` tears the workers down.
 FoundationModels adapter closes it when it evicts the model.
 
 The model refuses, with a ``ClusterModelError``, what a worker cannot run: image, video and
-audio input, MTP and draft-model speculative decoding, a KV-cache configuration or `maxKVSize`,
-a batch of several sequences, and a worker of another protocol version or `model_type`. A
-prompt cache file cannot hold its cache.
+audio input, MTP and draft-model speculative decoding, a KV-cache configuration other than an
+affine quantization (`maxKVSize`, a rewind reserve, TurboQuant), a batch of several sequences,
+and a worker of another protocol version or `model_type`. A prompt cache file cannot hold its
+cache.
+
+An affine KV-cache configuration (`kvBits` 8 or 4, or an affine
+``GenerateParameters/kvCache``) quantizes the caches of every rank, each for the heads it
+holds. The new cache carries the ``RemoteKVCacheQuantization`` to every rank, and the app sends
+``RemoteModelOp/quantize(_:)`` where a local generation converts its caches, so the caches of
+the workers convert after the forwards a local model converts after.
 
 A forward that fails cannot throw, because ``LanguageModel/callAsFunction(_:cache:state:)`` does
 not throw. The model then cancels the task that runs it, which ends the generation, and keeps

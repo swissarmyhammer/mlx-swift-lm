@@ -83,8 +83,10 @@ struct KVCacheLeaf {
         switch kind {
         case .recurrent:
             return nil
-        case .rotating, .remote, .unsupported:
+        case .rotating, .unsupported:
             return strategy == .fullPrecision
+        case .remote(let remote):
+            return remote.supports(configuration)
         case .simple(let simple):
             let state = simple.innerState()
             switch configuration.strategy.storage {

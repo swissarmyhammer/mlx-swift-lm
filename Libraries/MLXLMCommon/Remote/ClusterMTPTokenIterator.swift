@@ -139,6 +139,8 @@ package struct ClusterMTPTokenIterator: TokenIteratorProcessing {
         case .logits(let output):
             logits = output.logits
         }
+        // A local MTP generation converts its caches here, after the prompt.
+        try cacheStorage.plan.applyAndValidate(to: cacheStorage)
         try model.checkFailure()
         roundToken = draw(logits[0..., -1, 0...])
         pendingTokens = [Int(roundToken)]
@@ -204,6 +206,8 @@ package struct ClusterMTPTokenIterator: TokenIteratorProcessing {
         }
         cacheStorage.commitDroppedTokens(rejectedCount)
         cacheStorage.commitProcessedTokens(round.drafts.count + 1)
+        // A local MTP generation converts its caches after each round.
+        cacheStorage.plan.apply(to: cacheStorage)
         let (tokens, accepted) = verify(drafts: round.drafts, logits: round.logits[0])
         pendingTokens = tokens
         committedPendingTokenCount = accepted

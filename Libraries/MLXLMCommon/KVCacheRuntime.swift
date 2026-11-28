@@ -49,9 +49,34 @@ package func applyKVCacheConfigurationValidated(
 }
 
 /// Minimal decode-loop application. Returns true once no simple layer can
-/// become newly eligible on a later token.
+/// become newly eligible on a later token, and no remote cache waits to
+/// convert on its worker.
 @discardableResult
 package func applyKVCacheConfigurationFast(
+    cache: inout [KVCache],
+    configuration: KVCacheConfiguration
+) -> Bool {
+    let remoteIsTerminal = quantizeRemoteKVCaches(in: cache, configuration: configuration)
+    return applyLocalKVCacheConfiguration(cache: &cache, configuration: configuration)
+        && remoteIsTerminal
+}
+
+/// Converts, on its worker, each ``RemoteKVCache`` of `cache` whose quantization
+/// `configuration` names, where a local cache converts.
+///
+/// - Returns: Whether no remote cache of `cache` waits to convert any more.
+private func quantizeRemoteKVCaches(
+    in cache: [KVCache], configuration: KVCacheConfiguration
+) -> Bool {
+    KVCacheTree.leaves(in: cache).reduce(true) { isTerminal, leaf in
+        guard case .remote(let remote) = leaf.kind else { return isTerminal }
+        return remote.quantize(for: configuration) && isTerminal
+    }
+}
+
+/// The application of ``applyKVCacheConfigurationFast(cache:configuration:)`` to
+/// the caches of this process.
+private func applyLocalKVCacheConfiguration(
     cache: inout [KVCache],
     configuration: KVCacheConfiguration
 ) -> Bool {

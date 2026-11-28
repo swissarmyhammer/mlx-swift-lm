@@ -258,8 +258,9 @@ extension RemoteModelOp {
     /// The cache handle the op names, which a reply's status describes.
     fileprivate var cache: RemoteCacheID {
         switch self {
-        case .newCache(let cache), .forward(_, let cache, _), .trim(let cache, _),
-            .copy(_, into: let cache), .reset(let cache), .release(let cache):
+        case .newCache(let cache, _), .forward(_, let cache, _), .trim(let cache, _),
+            .copy(_, into: let cache), .reset(let cache), .release(let cache),
+            .quantize(let cache):
             cache
         case .speculate(let round): round.cache
         case .describe, .begin, .end: RemoteCacheID(rawValue: 0)

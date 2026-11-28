@@ -96,6 +96,11 @@ public struct RemoteCacheStatus: Codable, Sendable, Hashable {
     /// The bytes the caches hold on the worker: ``KVCache/residentByteCount``.
     public let residentByteCount: Int
 
+    /// Whether the caches carry a ``RemoteKVCacheQuantization`` that has a layer still to
+    /// convert, which the next ``RemoteModelOp/quantize(_:)`` after its compression start
+    /// converts. False for a cache of no quantization, and once every layer converted.
+    public let awaitsQuantization: Bool
+
     /// Makes a status.
     ///
     /// - Parameters:
@@ -107,9 +112,11 @@ public struct RemoteCacheStatus: Codable, Sendable, Hashable {
     ///   - rewindLimit: How many positions the cache can append and still rewind.
     ///   - canLoseRewind: Whether some layer cannot rewind or can stop being able to.
     ///   - residentByteCount: The bytes the caches hold on the worker.
+    ///   - awaitsQuantization: Whether the quantization of the caches has a layer to convert.
     public init(
         offset: Int, maxSize: Int?, evictedTokenCount: Int, isTrimmable: Bool, maxTrimCount: Int,
-        rewindLimit: RemoteRewindLimit, canLoseRewind: Bool, residentByteCount: Int
+        rewindLimit: RemoteRewindLimit, canLoseRewind: Bool, residentByteCount: Int,
+        awaitsQuantization: Bool = false
     ) {
         self.offset = offset
         self.maxSize = maxSize
@@ -119,13 +126,16 @@ public struct RemoteCacheStatus: Codable, Sendable, Hashable {
         self.rewindLimit = rewindLimit
         self.canLoseRewind = canLoseRewind
         self.residentByteCount = residentByteCount
+        self.awaitsQuantization = awaitsQuantization
     }
 
     /// The status of `caches`, the cache of each layer of one handle, as a worker reports it.
     ///
-    /// - Parameter caches: The cache of each layer, as ``LanguageModel/newCache(parameters:)``
-    ///   made them.
-    public init(describing caches: [any KVCache]) {
+    /// - Parameters:
+    ///   - caches: The cache of each layer, as ``LanguageModel/newCache(parameters:)`` made
+    ///     them.
+    ///   - awaitsQuantization: Whether the quantization of the caches has a layer to convert.
+    public init(describing caches: [any KVCache], awaitsQuantization: Bool = false) {
         self.init(
             offset: caches.first?.offset ?? 0,
             maxSize: caches.compactMap(\.maxSize).min(),
@@ -134,7 +144,8 @@ public struct RemoteCacheStatus: Codable, Sendable, Hashable {
             maxTrimCount: caches.map(\.maxTrimCount).min() ?? 0,
             rewindLimit: RemoteRewindLimit(of: caches),
             canLoseRewind: PromptCacheCheckpoint.applies(to: caches),
-            residentByteCount: caches.reduce(0) { $0 + $1.residentByteCount })
+            residentByteCount: caches.reduce(0) { $0 + $1.residentByteCount },
+            awaitsQuantization: awaitsQuantization)
     }
 
     /// This status with `bytes` more on the worker, which state beside the caches holds, such
@@ -146,7 +157,8 @@ public struct RemoteCacheStatus: Codable, Sendable, Hashable {
         RemoteCacheStatus(
             offset: offset, maxSize: maxSize, evictedTokenCount: evictedTokenCount,
             isTrimmable: isTrimmable, maxTrimCount: maxTrimCount, rewindLimit: rewindLimit,
-            canLoseRewind: canLoseRewind, residentByteCount: residentByteCount + bytes)
+            canLoseRewind: canLoseRewind, residentByteCount: residentByteCount + bytes,
+            awaitsQuantization: awaitsQuantization)
     }
 }
 
