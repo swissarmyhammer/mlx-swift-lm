@@ -75,8 +75,24 @@ comments:
     - evidence: swift build --build-tests clean (only a SwiftPM bundle-mtime notice); swift-format lint of SpeculativeDecodingOutcomeMetadataTests.swift clean. xcrun xctest: MLXLMTests 1261 XCTest + 2845 Swift Testing passed, 0 failed; MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 662 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed. 0 skipped. MLXLMTests reports 3 known issues from the pre-existing withKnownIssue tests aNearTieRejectsATokenOutsideTheTwoBest (AttentionKernelToleranceTests.swift) and the MiniCPM5 CDATA close-tag test (ToolTests.swift); neither file is in this change.
     - next: review
   timestamp: 2026-11-28T03:15:27.631912+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8g2epz3pz8ywas7cmpz5ab1
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (36752b7f) — 0 findings (7 validator passes attempted, 0 failed); 1 Swift file reviewed, 2 .kanban files matched no validator; both prior findings checked
+    - next: task moved to done
+  timestamp: 2026-11-28T03:16:20.067599+00:00
+- actor: claude-code
+  id: 01m8g2eyd3ajbeeq2qjqyw82ms
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 1 file, both findings checked
+    - test: green — all 5 bundles (MLXLMTests 2845+1261, MLXFoundationModelsTests 662, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 36752b7f
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T03:16:27.683877+00:00
+position_column: done
+position_ordinal: ffffff8d80
 title: 'Speculative decoding: a guided call whose drafter can''t draft through a grammar mask reports its own fallback reason, with the stated reason in the response metadata'
 ---
 ## What
