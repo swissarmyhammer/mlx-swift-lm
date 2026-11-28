@@ -193,6 +193,21 @@ final class RemoteModelSession: @unchecked Sendable {
         try lock.withLock { try send(op) }
     }
 
+    /// Sends `op`, which the worker runs whole or not at all, and returns the reply.
+    ///
+    /// A ``RemoteModelReply/failed(_:)`` reply then leaves the worker as it was before the op,
+    /// thus the session keeps no failure for it, and later ops still run. A failure of the
+    /// transport stays on the session, as for ``perform(_:)``, because the app cannot know the
+    /// state of the worker after it.
+    ///
+    /// - Parameter op: The op. The worker changes nothing when it fails it.
+    /// - Returns: The reply of the worker, never ``RemoteModelReply/failed(_:)``.
+    /// - Throws: The errors of ``perform(_:)``; ``ClusterModelError/workerFailed(_:)`` for a
+    ///   failed reply, which the session does not keep.
+    func performAtomic(_ op: RemoteModelOp) throws -> RemoteModelReply {
+        try lock.withLock { try send(op, keepsWorkerFailure: false) }
+    }
+
     /// Ends the open request, if any, and begins a new one.
     ///
     /// - Throws: The error of ``perform(_:)``.
@@ -252,7 +267,16 @@ final class RemoteModelSession: @unchecked Sendable {
     }
 
     /// Sends `op` as the next request. The caller holds ``lock``.
-    private func send(_ op: RemoteModelOp) throws -> RemoteModelReply {
+    ///
+    /// - Parameters:
+    ///   - op: The op.
+    ///   - keepsWorkerFailure: Whether a ``RemoteModelReply/failed(_:)`` reply becomes the
+    ///     failure of the session. A failure of the transport always does.
+    /// - Returns: The reply of the worker, never ``RemoteModelReply/failed(_:)``.
+    /// - Throws: The errors of ``perform(_:)``.
+    private func send(_ op: RemoteModelOp, keepsWorkerFailure: Bool = true) throws
+        -> RemoteModelReply
+    {
         if let failure { throw failure }
         sequence += 1
         let reply: RemoteModelReply
@@ -265,7 +289,9 @@ final class RemoteModelSession: @unchecked Sendable {
             throw failure
         }
         if case .failed(let reason) = reply {
-            failure = .workerFailed(reason)
+            if keepsWorkerFailure {
+                failure = .workerFailed(reason)
+            }
             throw ClusterModelError.workerFailed(reason)
         }
         return reply

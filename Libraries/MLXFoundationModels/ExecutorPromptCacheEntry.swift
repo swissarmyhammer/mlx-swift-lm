@@ -172,8 +172,9 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// An entry that holds the same tokens and the same state as this entry, and that a pass
     /// can write without a change to this entry.
     ///
-    /// Each cache is a new object (``KVCache/copy()``), thus the two entries never share a
-    /// mutable cache. The arrays of a copied cache share their buffers with the arrays of this
+    /// Each cache is a new object (``KVCache/checkedCopy()``), thus the two entries never share
+    /// a mutable cache. The worker of a ``RemoteKVCache`` copies its caches under a new handle.
+    /// The arrays of a copied local cache share their buffers with the arrays of this
     /// entry: an MLX array does not change in place, and a write into a cache makes a new
     /// array. A buffer that two arrays hold is not donated to a write, thus the first write of
     /// one session copies the buffer, and the other session keeps the old buffer
@@ -188,9 +189,13 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// conservative.
     ///
     /// - Returns: the new entry.
-    func copy() -> ExecutorPromptCacheEntry {
+    /// - Throws: the error of the copy of a ``RemoteKVCache`` on its worker. The copies made
+    ///   before it are dropped, thus their workers release them, and this entry does not
+    ///   change.
+    func copy() throws -> ExecutorPromptCacheEntry {
         ExecutorPromptCacheEntry(
-            caches: caches.map { $0.copy() }, tokens: tokens, renderTokens: renderTokens,
+            caches: try caches.map { try $0.checkedCopy() }, tokens: tokens,
+            renderTokens: renderTokens,
             uncommittedTokens: uncommittedTokens, state: state, checkpoint: checkpoint,
             drafterState: drafterState?.copy(), minimumByteCount: byteCount)
     }

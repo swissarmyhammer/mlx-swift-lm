@@ -86,8 +86,12 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// limit.
     private var remainingRounds: Int?
 
+    /// The copies the worker still runs before each copy fails, or nil for no limit.
+    private var remainingCopies: Int?
+
     /// The error each op throws after ``remainingSuccesses`` runs out, each forward after
-    /// ``remainingForwards`` runs out, and each round after ``remainingRounds`` runs out.
+    /// ``remainingForwards`` runs out, each round after ``remainingRounds`` runs out, and each
+    /// copy after ``remainingCopies`` runs out.
     private var fault: any Error = InProcessWorkerFault()
 
     /// The number of times the transport was closed.
@@ -182,6 +186,8 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         /// The speculative rounds only, as a member lost in the middle of a speculative
         /// generation fails it.
         case rounds
+        /// The copies of a cache only, as a worker that fails the copy op fails it.
+        case copies
     }
 
     /// Makes every request of `kind` after the next `count` requests of that kind throw
@@ -209,6 +215,7 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         case .ops: \.remainingSuccesses
         case .forwards: \.remainingForwards
         case .rounds: \.remainingRounds
+        case .copies: \.remainingCopies
         }
     }
 
@@ -247,7 +254,9 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// - Returns: The reply.
     /// - Throws: The fault of ``failOps(after:with:)`` after its ops, the fault of
     ///   ``failForwards(after:with:)`` after its forwards, the fault of
-    ///   ``failRounds(after:with:)`` after its rounds, or the error of the announce words.
+    ///   ``failRounds(after:with:)`` after its rounds, the fault of
+    ///   ``fail(_:after:with:)`` of ``FailureKind/copies`` after its copies, or the error of the
+    ///   announce words.
     public func send(_ request: RemoteModelRequest) throws -> RemoteModelReply {
         try lock.withLock {
             let announced = try RemoteOpAnnouncement.decode(RemoteOpAnnouncement.encode(request))
@@ -256,6 +265,7 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
             switch announced.op {
             case .forward: try spend(&remainingForwards)
             case .speculate: try spend(&remainingRounds)
+            case .copy: try spend(&remainingCopies)
             default: break
             }
             let reply = try executor.handle(announced)

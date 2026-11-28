@@ -21,8 +21,9 @@ public enum PromptCacheCopyResult: Sendable, Hashable {
         /// A pass of the destination runs now and holds its cache.
         case destinationInUse
 
-        /// No entry of the source could be copied: each file on disk failed to copy. The log
-        /// has the error.
+        /// No entry of the source could be copied: each file on disk failed to copy, and the
+        /// worker of a clustered model failed the copy of each remote cache. The destination
+        /// has no cache, and the source keeps its cache. The log has the error.
         case copyFailed
     }
 
@@ -72,6 +73,12 @@ extension MLXLanguageModel {
     ///   ``promptCacheUsage``, also the bytes that it shares with the source: while both
     ///   sessions live, the shared bytes count two times. The budget
     ///   applies at once, thus the least recently used entries can go to disk.
+    /// - A clustered model: the worker copies the caches of the source under a new handle.
+    ///   The copy counts its bytes on the workers against the worker budget
+    ///   (``configurePromptCache(workerBudgetBytes:)``), and the least recently used remote
+    ///   caches can be released for it, but not the source. When the worker fails the copy,
+    ///   the call returns ``PromptCacheCopyResult/Refusal/copyFailed``, and the source keeps
+    ///   its cache. A lost member of the cluster fails the next pass of the model.
     /// - A source that a pass holds: the call does not wait. It returns
     ///   ``PromptCacheCopyResult/sourceInUse`` and copies nothing.
     ///

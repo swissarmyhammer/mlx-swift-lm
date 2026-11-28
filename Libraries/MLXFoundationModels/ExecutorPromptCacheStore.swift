@@ -587,6 +587,11 @@ actor ExecutorPromptCacheStore {
     ///   most recently used entry, it counts its whole ``ExecutorPromptCacheEntry/byteCount``,
     ///   and the memory budget applies. The entry of the source becomes the most recently used
     ///   entry before the copy, thus the budget does not send it to disk for its own copy.
+    ///   An entry that holds a remote cache makes its worker copy the caches under a new
+    ///   handle. The copy then counts its worker bytes against ``workerBudgetBytes``, and the
+    ///   least recently used remote entries can be released for it, but not the source. When
+    ///   the worker fails the copy, the store keeps no entry for `destination`, and the entry
+    ///   of the source stays.
     /// - A file on disk gives a clone of the file under a new name of `destination` (on APFS,
     ///   the two files share their blocks until one changes). The new file keeps the metadata
     ///   of the source, thus its handle records the key of the source for the read. The disk
@@ -639,18 +644,16 @@ actor ExecutorPromptCacheStore {
     ///   - key: a key of the source that the store holds on one tier.
     ///   - copyKey: the key of the copy. The store holds nothing for it.
     /// - Returns: the length of the token ledger of the copy, or nil when the file could not
-    ///   be cloned.
+    ///   be cloned or the worker of a remote cache failed the copy.
     private func copyEntry(
         of key: ExecutorPromptCacheKey, to copyKey: ExecutorPromptCacheKey
     ) -> Int? {
         if let entry = entries[key] {
             entries.insert(entry, for: key)
-            keepInMemory(entry.copy(), for: copyKey)
-            return entry.tokens.count
+            return keepCopy(of: entry, of: key, under: copyKey)
         }
         if let spill = spilling[key] {
-            keepInMemory(spill.entry.copy(), for: copyKey)
-            return spill.entry.tokens.count
+            return keepCopy(of: spill.entry, of: key, under: copyKey)
         }
         guard let file = onDisk[key] else { return nil }
         lastGeneration += 1
@@ -673,6 +676,33 @@ actor ExecutorPromptCacheStore {
             for: copyKey)
         evictDiskToBudget()
         return file.tokenCount
+    }
+
+    /// Keeps a copy of `entry`, the entry of `key` in memory, under `copyKey`, as
+    /// ``keepInMemory(_:for:)`` keeps it.
+    ///
+    /// - Parameters:
+    ///   - entry: the entry to copy.
+    ///   - key: the key of `entry`.
+    ///   - copyKey: the key of the copy. The store holds nothing for it.
+    /// - Returns: the length of the token ledger of the copy, or nil when the worker of a
+    ///   remote cache of `entry` failed the copy. The store then keeps nothing under
+    ///   `copyKey`, and the log has the error.
+    private func keepCopy(
+        of entry: ExecutorPromptCacheEntry, of key: ExecutorPromptCacheKey,
+        under copyKey: ExecutorPromptCacheKey
+    ) -> Int? {
+        let copy: ExecutorPromptCacheEntry
+        do {
+            copy = try entry.copy()
+        } catch {
+            ExecutorPromptCacheLog.info(
+                "prompt cache cannot copy the entry of \(key.sessionID.rawValue) to "
+                    + "\(copyKey.sessionID.rawValue): \(error)")
+            return nil
+        }
+        keepInMemory(copy, for: copyKey)
+        return entry.tokens.count
     }
 
     /// Releases the cache of every session of `modelID`, or of every session

@@ -108,15 +108,36 @@ public final class RemoteKVCache: KVCache {
     /// - Returns: The copy. When the op fails, the copy mirrors this status, and the failure
     ///   stays on the model: each later op fails, and the next throwing op reports it.
     public func copy() -> any KVCache {
-        let copyID = session.makeCacheID()
         do {
-            let status = try session.perform(.copy(id, into: copyID)).cacheStatus(of: "copy")
-            return RemoteKVCache(
-                id: copyID, session: session, status: status, quantization: quantization)
+            return try copyOnWorker()
         } catch {
             session.recordFailure(error)
             return RemoteKVCache(
-                id: copyID, session: session, status: status, quantization: quantization)
+                id: session.makeCacheID(), session: session, status: status,
+                quantization: quantization)
+        }
+    }
+
+    /// A copy of the caches under a new handle, which the worker makes, or the error of the
+    /// op.
+    ///
+    /// The worker copies whole or not at all. A copy that the worker fails thus leaves the
+    /// model usable, and this cache holds what it held. A failure of the transport, such as a
+    /// lost member, stays on the model, and its next throwing op reports it.
+    ///
+    /// - Returns: The copy.
+    /// - Throws: ``ClusterModelError/workerFailed(_:)`` when the worker failed the copy, or
+    ///   the error the model keeps after a failure of the transport or a reply of another op.
+    package func copyOnWorker() throws -> RemoteKVCache {
+        let copyID = session.makeCacheID()
+        let reply = try session.performAtomic(.copy(id, into: copyID))
+        do {
+            return RemoteKVCache(
+                id: copyID, session: session, status: try reply.cacheStatus(of: "copy"),
+                quantization: quantization)
+        } catch {
+            session.recordFailure(error)
+            throw error
         }
     }
 
@@ -262,6 +283,19 @@ extension KVCache {
     /// - Returns: the bytes this cache holds in that place.
     package func residentByteCount(onWorker: Bool) -> Int {
         isRemote == onWorker ? residentByteCount : 0
+    }
+
+    /// A copy of this cache that a pass can write without a change to this cache, or the error
+    /// of the copy.
+    ///
+    /// A local cache gives ``KVCache/copy()``, which cannot fail. A ``RemoteKVCache`` gives
+    /// ``RemoteKVCache/copyOnWorker()``, whose op on the worker can fail.
+    ///
+    /// - Returns: The copy.
+    /// - Throws: The error of ``RemoteKVCache/copyOnWorker()``.
+    package func checkedCopy() throws -> any KVCache {
+        guard let remote = self as? RemoteKVCache else { return copy() }
+        return try remote.copyOnWorker()
     }
 
     /// Whether this cache is a ``RemoteKVCache``, whose buffers live on its worker. A prompt

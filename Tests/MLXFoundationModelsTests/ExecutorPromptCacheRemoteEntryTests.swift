@@ -4,6 +4,7 @@
 
 import Foundation
 import MLX
+import MLXLMTestSupport
 import os
 import Testing
 
@@ -327,6 +328,177 @@ struct ExecutorPromptCacheWorkerBudgetTests: PromptCacheKeyFixtures, PromptCache
     }
 }
 
+/// A copy of a session whose entry holds a remote cache
+/// (``ExecutorPromptCacheStore/copy(modelID:from:to:)``) goes in like a check-in of a remote
+/// entry, and a copy that the worker fails gives ``PromptCacheCopyResult/Refusal/copyFailed``.
+///
+/// No worker runs: the caches of each test answer over one ``RecordingStatusTransport``, which
+/// copies, refuses each copy, or loses a member at each copy.
+@Suite("A copy of a remote entry goes in like a check-in, and a failed copy keeps nothing")
+struct ExecutorPromptCacheRemoteCopyTests: PromptCacheKeyFixtures, PromptCacheSpoolFixtures {
+
+    /// The model every key of this suite names.
+    static let modelID = "test/prompt-cache-remote-copy"
+
+    /// The bytes each remote cache reports on its worker: one gibibyte.
+    private static let workerByteCount = 1 << 30
+
+    /// The worker budget that holds the remote entries of two sessions: the source and its
+    /// copy.
+    private static let workerBudgetBytes = 2 * workerByteCount
+
+    /// The memory budget of each store: one mebibyte.
+    private static let memoryBudgetBytes = 1 << 20
+
+    /// The member a copy loses.
+    private static let lostMember = "m5u2.local"
+
+    /// The session that each test copies.
+    private static let source = "source"
+
+    /// The session that each copy makes.
+    private static let destination = "destination"
+
+    /// The session that checks in after the source, and that no test copies.
+    private static let other = "other"
+
+    @Test("a copy over the worker budget releases the least recently used remote entry")
+    func aCopyOverTheWorkerBudgetReleasesTheLeastRecentlyUsedRemoteEntry() async {
+        let fixture = RemoteCacheFixture(workerByteCount: Self.workerByteCount)
+        let store = await Self.store()
+        await store.checkIn(key(Self.other), fixture.entry())
+        let otherID = await Self.cacheID(of: Self.other, in: store)
+        await store.checkIn(key(Self.source), fixture.entry())
+
+        _ = await Self.copySourceToDestination(in: store)
+
+        #expect(fixture.releasedIDs == [otherID])
+    }
+
+    @Test("a copy over the worker budget keeps the source, which it touched")
+    func aCopyOverTheWorkerBudgetKeepsTheSource() async {
+        let fixture = RemoteCacheFixture(workerByteCount: Self.workerByteCount)
+        let store = await Self.store()
+        let sourceEntry = fixture.entry()
+        await store.checkIn(key(Self.source), sourceEntry)
+        await store.checkIn(key(Self.other), fixture.entry())
+
+        _ = await Self.copySourceToDestination(in: store)
+
+        #expect(await store.peek(key(Self.source)) === sourceEntry)
+    }
+
+    @Test("a copy that the worker refuses gives copyFailed")
+    func aRefusedCopyGivesCopyFailed() async {
+        let store = await Self.storeWithSource(copyAnswer: .refused).store
+
+        #expect(await Self.copySourceToDestination(in: store) == .refused(.copyFailed))
+    }
+
+    @Test("a copy that the worker refuses keeps no entry for the destination")
+    func aRefusedCopyKeepsNoDestinationEntry() async {
+        let store = await Self.storeWithSource(copyAnswer: .refused).store
+
+        _ = await Self.copySourceToDestination(in: store)
+
+        #expect(await store.checkOut(key(Self.destination)) == .none)
+    }
+
+    @Test("a copy that the worker refuses keeps the source entry")
+    func aRefusedCopyKeepsTheSourceEntry() async {
+        let store = await Self.storeWithSource(copyAnswer: .refused).store
+        let sourceEntry = await store.peek(key(Self.source))
+
+        _ = await Self.copySourceToDestination(in: store)
+
+        #expect(await store.peek(key(Self.source)) === sourceEntry)
+    }
+
+    @Test("a copy that the worker refuses leaves the model usable")
+    func aRefusedCopyLeavesTheModelUsable() async {
+        let (store, fixture) = await Self.storeWithSource(copyAnswer: .refused)
+
+        _ = await Self.copySourceToDestination(in: store)
+
+        #expect(throws: Never.self) { try fixture.session.beginRequest() }
+    }
+
+    @Test("a copy that the worker refuses releases no handle on the worker")
+    func aRefusedCopyReleasesNoHandle() async {
+        let (store, fixture) = await Self.storeWithSource(copyAnswer: .refused)
+
+        _ = await Self.copySourceToDestination(in: store)
+
+        #expect(fixture.releasedIDs.isEmpty)
+    }
+
+    @Test("a copy that loses a member gives copyFailed")
+    func aCopyThatLosesAMemberGivesCopyFailed() async {
+        let store = await Self.storeWithSource(copyAnswer: .lost(Self.lostMember)).store
+
+        #expect(await Self.copySourceToDestination(in: store) == .refused(.copyFailed))
+    }
+
+    @Test("the next request after a copy that lost a member throws memberLost")
+    func theNextRequestAfterALostMemberThrowsMemberLost() async {
+        let (store, fixture) = await Self.storeWithSource(copyAnswer: .lost(Self.lostMember))
+
+        _ = await Self.copySourceToDestination(in: store)
+
+        #expect(throws: ClusterModelError.memberLost(Self.lostMember)) {
+            try fixture.session.beginRequest()
+        }
+    }
+
+    // MARK: - Fixtures
+
+    /// A store with ``memoryBudgetBytes`` in memory and ``workerBudgetBytes`` on the worker.
+    /// Nothing in this suite spills, thus the store needs no spool folder of its own.
+    ///
+    /// - Returns: The store.
+    private static func store() async -> ExecutorPromptCacheStore {
+        let store = await store(in: temporaryDirectory(), budget: memoryBudgetBytes)
+        await store.configure(workerBudgetBytes: workerBudgetBytes)
+        return store
+    }
+
+    /// A store that holds one remote entry of ``source``, whose transport answers each copy
+    /// with `copyAnswer`.
+    ///
+    /// - Parameter copyAnswer: How the transport answers a copy.
+    /// - Returns: The store, and the fixture of the remote caches.
+    private static func storeWithSource(
+        copyAnswer: RecordingStatusTransport.CopyAnswer
+    ) async -> (store: ExecutorPromptCacheStore, fixture: RemoteCacheFixture) {
+        let fixture = RemoteCacheFixture(workerByteCount: workerByteCount, copyAnswer: copyAnswer)
+        let store = await store()
+        await store.checkIn(key(source), fixture.entry())
+        return (store, fixture)
+    }
+
+    /// Copies ``source`` to ``destination`` of ``modelID`` in `store`.
+    ///
+    /// - Parameter store: The store.
+    /// - Returns: What the copy did.
+    private static func copySourceToDestination(
+        in store: ExecutorPromptCacheStore
+    ) async -> PromptCacheCopyResult {
+        await store.copy(modelID: .init(modelID), from: .init(source), to: .init(destination))
+    }
+
+    /// The handle of the remote cache of the entry of `sessionID` in `store`.
+    ///
+    /// - Parameters:
+    ///   - sessionID: The session.
+    ///   - store: The store.
+    /// - Returns: The handle, or nil when the entry holds no remote cache.
+    private static func cacheID(
+        of sessionID: String, in store: ExecutorPromptCacheStore
+    ) async -> RemoteCacheID? {
+        (await store.peek(key(sessionID))?.caches.first as? RemoteKVCache)?.id
+    }
+}
+
 /// Makes remote caches that report one status over one ``RecordingStatusTransport``, and reads
 /// the handles the caches released.
 private struct RemoteCacheFixture {
@@ -342,11 +514,17 @@ private struct RemoteCacheFixture {
 
     /// Makes a fixture whose caches report `workerByteCount`.
     ///
-    /// - Parameter workerByteCount: The bytes each cache reports on its worker.
-    init(workerByteCount: Int) {
+    /// - Parameters:
+    ///   - workerByteCount: The bytes each cache reports on its worker.
+    ///   - copyAnswer: How the transport answers a copy.
+    init(
+        workerByteCount: Int,
+        copyAnswer: RecordingStatusTransport.CopyAnswer = .copied
+    ) {
         self.workerByteCount = workerByteCount
         self.transport = RecordingStatusTransport(
-            status: Self.status(workerByteCount: workerByteCount, canLoseRewind: false))
+            status: Self.status(workerByteCount: workerByteCount, canLoseRewind: false),
+            copyAnswer: copyAnswer)
         self.session = RemoteModelSession(transport: transport)
     }
 
@@ -390,11 +568,31 @@ private struct RemoteCacheFixture {
 
 /// A transport with no worker behind it, which answers every op with the status of one
 /// cache and records the handle of each release. A copy then reports the status of its
-/// source, and a release ignores its answer.
+/// source, unless the transport refuses it or loses a member at it, and a release ignores its
+/// answer.
 private final class RecordingStatusTransport: RemoteModelTransport {
+
+    /// How the transport answers a copy.
+    enum CopyAnswer {
+
+        /// With the status of its source, as a worker that copied the caches.
+        case copied
+
+        /// With ``RemoteModelReply/failed(_:)``, as a worker that ran the copy and failed it.
+        case refused
+
+        /// With an ``InProcessMemberLoss`` that lost the member, as a cluster that lost it.
+        case lost(String)
+    }
+
+    /// The reason of the reply to a refused copy.
+    static let refusalReason = "the worker refused the copy"
 
     /// The status of every answer.
     let status: RemoteCacheStatus
+
+    /// How the transport answers a copy.
+    let copyAnswer: CopyAnswer
 
     /// The handles of the released caches, in order. A cache releases its handle when it goes
     /// away, on the task that drops it.
@@ -402,23 +600,49 @@ private final class RecordingStatusTransport: RemoteModelTransport {
 
     /// Makes a transport that answers with `status`.
     ///
-    /// - Parameter status: The status of every answer.
-    init(status: RemoteCacheStatus) {
+    /// - Parameters:
+    ///   - status: The status of every answer.
+    ///   - copyAnswer: How the transport answers a copy.
+    init(status: RemoteCacheStatus, copyAnswer: CopyAnswer = .copied) {
         self.status = status
+        self.copyAnswer = copyAnswer
     }
 
     /// The handles of the released caches, in order.
     var releasedIDs: [RemoteCacheID] { released.withLock { $0 } }
 
-    /// Records `request` when it is a release, and answers it with ``status``.
+    /// Records `request` when it is a release, and answers it with ``status``, a copy as
+    /// ``copyAnswer`` says, and the begin or the end of a request with
+    /// ``RemoteModelReply/done``.
     ///
     /// - Parameter request: The request.
-    /// - Returns: ``RemoteModelReply/cache(_:)`` of ``status``.
+    /// - Returns: ``RemoteModelReply/cache(_:)`` of ``status``,
+    ///   ``RemoteModelReply/failed(_:)`` for a refused copy, or ``RemoteModelReply/done``.
+    /// - Throws: The ``InProcessMemberLoss`` of a copy that loses a member.
     func send(_ request: RemoteModelRequest) throws -> RemoteModelReply {
         if case .release(let id) = request.op {
             released.withLock { $0.append(id) }
         }
+        if case .copy = request.op {
+            return try answerCopy()
+        }
+        if request.op == .begin || request.op == .end {
+            return .done
+        }
         return .cache(status)
+    }
+
+    /// The answer to a copy, as ``copyAnswer`` says.
+    ///
+    /// - Returns: ``RemoteModelReply/cache(_:)`` of ``status``, or
+    ///   ``RemoteModelReply/failed(_:)`` for a refused copy.
+    /// - Throws: The ``InProcessMemberLoss`` of a copy that loses a member.
+    private func answerCopy() throws -> RemoteModelReply {
+        switch copyAnswer {
+        case .copied: return .cache(status)
+        case .refused: return .failed(Self.refusalReason)
+        case .lost(let member): throw InProcessMemberLoss(lostMember: member)
+        }
     }
 }
 
