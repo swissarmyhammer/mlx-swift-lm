@@ -152,18 +152,11 @@ struct ExecutorPromptCacheCheckpointTests {
     private static let checkpointKey = PromptCacheTestKey.make(
         modelID: .init("test/checkpoint"), sessionID: .init("s"))
 
-    /// The model the plan fixtures make fresh caches with: one attention
-    /// layer and one recurrent layer.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func hybridModel() -> ScriptedLanguageModel {
-        ScriptedLanguageModel(rounds: [], cacheLayerCount: 1, recurrentLayerCount: 1)
-    }
-
     /// An entry whose hybrid caches hold ``ledger`` and carry a checkpoint at
     /// the end of ``checkpointTokens``.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func entryWithCheckpoint() throws -> ExecutorPromptCacheEntry {
-        let caches = try hybridModel().newCache(parameters: nil)
+        let caches = try hybridScriptedModel().newCache(parameters: nil)
         feed(caches, tokenCount: Self.checkpointTokens.count)
         let checkpoint = try #require(
             PromptCacheCheckpoint(
@@ -173,7 +166,7 @@ struct ExecutorPromptCacheCheckpointTests {
             caches: caches, tokens: Self.ledger, checkpoint: checkpoint)
     }
 
-    /// Plans a pass over `render` that reuses ``entryWithCheckpoint()`` on ``hybridModel()``.
+    /// Plans a pass over `render` that reuses ``entryWithCheckpoint()`` on ``hybridScriptedModel()``.
     ///
     /// - Parameters:
     ///   - render: the tokens of the next render.
@@ -185,7 +178,7 @@ struct ExecutorPromptCacheCheckpointTests {
         _ render: [Int], protocolRules: [any PromptCacheReuseRule] = []
     ) throws -> ExecutorPromptCachePlan? {
         try planPromptCache(
-            render: render, reusing: entryWithCheckpoint(), model: hybridModel(),
+            render: render, reusing: entryWithCheckpoint(), model: hybridScriptedModel(),
             protocolRules: protocolRules)
     }
 
@@ -269,7 +262,7 @@ struct ExecutorPromptCacheCheckpointTests {
     @Test("only a model with a layer that cannot rewind is served by a checkpoint")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func onlyAModelWithALayerThatCannotRewindIsServedByACheckpoint() {
-        #expect(PromptCacheCheckpoint.applies(to: hybridModel()))
+        #expect(PromptCacheCheckpoint.applies(to: hybridScriptedModel()))
         #expect(
             !PromptCacheCheckpoint.applies(
                 to: ScriptedLanguageModel(rounds: [], cacheLayerCount: 1)))
@@ -290,7 +283,7 @@ struct ExecutorPromptCacheCheckpointTests {
     @Test("a boundary before the end of the prompt is fed before generation")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBoundaryBeforeTheEndOfThePromptIsFedBeforeGeneration() throws {
-        let model = hybridModel()
+        let model = hybridScriptedModel()
         let render = Self.ledger
         let planned = try #require(
             try ExecutorPromptCachePlan.make(
@@ -330,7 +323,7 @@ struct ExecutorPromptCacheCheckpointTests {
     @Test("a boundary at the end of the prompt is taken when the prefill ends")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aBoundaryAtTheEndOfThePromptIsTakenWhenThePrefillEnds() throws {
-        let model = hybridModel()
+        let model = hybridScriptedModel()
         let slot = ExecutorPromptCacheSlot(nil, report: { _ in })
         let planned = try #require(
             try Self.promptEndPlan(in: slot, model: model))
@@ -352,7 +345,7 @@ struct ExecutorPromptCacheCheckpointTests {
     @Test("a commit drops the prompt-end plan of a pass whose prefill did not report its end")
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     func aCommitDropsThePromptEndPlanOfAPassWhosePrefillDidNotReportItsEnd() throws {
-        let model = hybridModel()
+        let model = hybridScriptedModel()
         let slot = ExecutorPromptCacheSlot(nil, report: { _ in })
         let stale = try #require(
             try Self.promptEndPlan(in: slot, model: model))

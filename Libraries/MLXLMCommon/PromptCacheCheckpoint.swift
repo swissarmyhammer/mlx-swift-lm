@@ -457,9 +457,9 @@ package struct PromptCacheCheckpoint {
         render: ([Chat.Message]) async throws -> LMInput
     ) async -> Int? {
         guard startsWithSystemBeforeAnotherMessage(messages) else { return nil }
-        return await renderedSample(of: messages, render: render).map {
-            commonPrefixLength(of: promptTokens, and: $0)
-        }
+        return leadingSystemEnd(
+            of: promptTokens, messages: messages,
+            sampleTokens: await renderedSample(of: messages, render: render))
     }
 
     /// The index of `prompt` where its leading system messages end, and the
@@ -484,13 +484,33 @@ package struct PromptCacheCheckpoint {
         let sampleTokens =
             hasLeadingSystem || endsWithUser
             ? await renderedSample(of: messages, render: render) : nil
-        let leadingSystemEnd =
-            hasLeadingSystem
-            ? sampleTokens.map { commonPrefixLength(of: promptTokens, and: $0) } : nil
+        let leadingSystemEnd = leadingSystemEnd(
+            of: promptTokens, messages: messages, sampleTokens: sampleTokens)
         let lastMessageEnd = await lastMessageEnd(
             of: promptTokens, messages: messages, sampleTokens: endsWithUser ? sampleTokens : nil,
             render: render)
         return (leadingSystemEnd, lastMessageEnd)
+    }
+
+    /// The index of `promptTokens` where its leading system messages end, as
+    /// ``leadingSystemEnd(of:messages:render:)`` finds it, from a render of the
+    /// sample conversation made already.
+    ///
+    /// - Parameters:
+    ///   - promptTokens: the tokens of the prepared prompt of `messages`.
+    ///   - messages: the chat messages the prompt renders from.
+    ///   - sampleTokens: the render of the sample conversation of `messages`
+    ///     (see ``renderedSample(of:render:)``), or nil when that render threw.
+    /// - Returns: the index, or nil when `messages` does not start with a
+    ///   system message followed by another message, or when `sampleTokens`
+    ///   is nil.
+    private static func leadingSystemEnd(
+        of promptTokens: [Int], messages: [Chat.Message], sampleTokens: [Int]?
+    ) -> Int? {
+        guard startsWithSystemBeforeAnotherMessage(messages), let sampleTokens else {
+            return nil
+        }
+        return commonPrefixLength(of: promptTokens, and: sampleTokens)
     }
 
     /// The index of `promptTokens` where its last message ends, as
@@ -520,14 +540,21 @@ package struct PromptCacheCheckpoint {
     /// Whether `messages` starts with system messages that another message
     /// follows, thus whether a prompt of them has leading instructions to end.
     private static func startsWithSystemBeforeAnotherMessage(_ messages: [Chat.Message]) -> Bool {
-        let system = messages.prefix { $0.role == .system }
+        let system = leadingSystemMessages(of: messages)
         return !system.isEmpty && system.count < messages.count
+    }
+
+    /// The system messages `messages` starts with: its leading instructions.
+    private static func leadingSystemMessages(
+        of messages: [Chat.Message]
+    ) -> ArraySlice<Chat.Message> {
+        messages.prefix { $0.role == .system }
     }
 
     /// The small sample conversation of `messages`: its leading system
     /// messages and one user message with the text ``boundaryProbeText``.
     private static func sampleConversation(of messages: [Chat.Message]) -> [Chat.Message] {
-        Array(messages.prefix { $0.role == .system }) + [.user(boundaryProbeText)]
+        Array(leadingSystemMessages(of: messages)) + [.user(boundaryProbeText)]
     }
 
     /// The tokens of the render of the sample conversation of `messages`

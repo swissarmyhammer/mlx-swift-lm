@@ -33,17 +33,11 @@ struct ExecutorPromptCacheInstructionsCheckpointTests {
     /// A token that no ledger here holds, thus a render parts from the ledger at it.
     private static let otherToken = 9
 
-    /// The model the plans make fresh caches with: one attention layer and one recurrent layer.
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private func hybridModel() -> ScriptedLanguageModel {
-        ScriptedLanguageModel(rounds: [], cacheLayerCount: 1, recurrentLayerCount: 1)
-    }
-
     /// An entry whose hybrid caches hold ``ledger``, with a checkpoint at the end of
     /// ``transcript`` and an instructions checkpoint at the end of ``instructions``.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func entryWithBothCheckpoints() throws -> ExecutorPromptCacheEntry {
-        let caches = try hybridModel().newCache(parameters: nil)
+        let caches = try hybridScriptedModel().newCache(parameters: nil)
         feed(caches, tokenCount: Self.instructions.count)
         let instructionsCheckpoint = try #require(
             PromptCacheCheckpoint(caches: caches, tokens: Self.instructions, state: nil))
@@ -65,7 +59,7 @@ struct ExecutorPromptCacheInstructionsCheckpointTests {
     private func planRender(_ render: [Int]) throws -> ExecutorPromptCachePlan {
         try #require(
             try planPromptCache(
-                render: render, reusing: entryWithBothCheckpoints(), model: hybridModel()))
+                render: render, reusing: entryWithBothCheckpoints(), model: hybridScriptedModel()))
     }
 
     /// Plans a pass of a slot that carries nothing over ``ledger``, with the instructions
@@ -81,7 +75,7 @@ struct ExecutorPromptCacheInstructionsCheckpointTests {
     {
         try #require(
             try slot.plan(
-                input: LMInput(tokens: MLXArray(Self.ledger)), model: hybridModel(),
+                input: LMInput(tokens: MLXArray(Self.ledger)), model: hybridScriptedModel(),
                 parameters: GenerateParameters(),
                 checkpointBoundaries: ExecutorCheckpointBoundaries(
                     instructionsEnd: Self.instructions.count,

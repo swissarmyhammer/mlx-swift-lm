@@ -31,6 +31,15 @@ extension PromptCachePlanFixtures {
     }
 }
 
+/// The hybrid model the checkpoint suites plan with: one attention layer and one recurrent
+/// layer, thus its caches cannot rewind and a pass that parts from the ledger needs a checkpoint.
+///
+/// - Returns: The model. It scripts no round, so it makes fresh caches only.
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+func hybridScriptedModel() -> ScriptedLanguageModel {
+    ScriptedLanguageModel(rounds: [], cacheLayerCount: 1, recurrentLayerCount: 1)
+}
+
 /// Plans `render` against `entry`.
 ///
 /// - Parameters:

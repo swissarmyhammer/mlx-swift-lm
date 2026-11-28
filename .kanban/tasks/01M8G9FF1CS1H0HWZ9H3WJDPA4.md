@@ -52,6 +52,43 @@ comments:
     - note: MLXLMTests reports 3 known issues, all intentional withKnownIssue markers in unmodified files (AttentionKernelToleranceTests, ToolTests MiniCPM5 CDATA); not caused by these changes.
     - next: review/commit
   timestamp: 2026-11-28T06:52:13.431711+00:00
+- actor: claude-code
+  id: 01m8gfdw2ze1yx3a2qbxwtatht
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (1fd70743): 4 findings (4 confirmed, 8 refuted) — Libraries/MLXFoundationModels/ExecutorPromptCache.swift:265, Libraries/MLXLMCommon/PromptCacheCheckpoint.swift:487, Libraries/MLXLMCommon/PromptCacheCheckpoint.swift:530, Tests/MLXFoundationModelsTests/ExecutorPromptCacheInstructionsCheckpointTests.swift:38
+    - next: implement the 4 reuse findings in the 2026-11-28 00:52 Review Findings section; task stays in review
+  timestamp: 2026-11-28T07:03:04.031318+00:00
+- actor: claude-code
+  id: 01m8gfe9pexbvqktqenp87xxbb
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — instructions-boundary checkpoint + copyPromptCache keepingTokens; 4 new test files (44 tests)
+    - test: green — all 5 bundles (MLXLMTests 2849+1261, MLXFoundationModelsTests 734, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 1fd70743
+    - review: findings — ExecutorPromptCache.swift:265, PromptCacheCheckpoint.swift:487, PromptCacheCheckpoint.swift:530, ExecutorPromptCacheInstructionsCheckpointTests.swift:38
+  timestamp: 2026-11-28T07:03:17.966544+00:00
+- actor: claude-code
+  id: 01m8gg1d0kek4t36b3ythrhvcz
+  text: |-
+    ### implement — changed
+    - evidence: all 4 review findings (2026-11-28 00:52) fixed and checked, behaviour unchanged.
+      1. `ExecutorPromptCacheEntry.checkpoints(longestWhere:)` returns the matching checkpoints sorted longest first. `ExecutorPromptCachePlan.restoring` and `restoredCopy(keepingTokens:)` both call it.
+      2. New private `PromptCacheCheckpoint.leadingSystemEnd(of:messages:sampleTokens:)` holds the only leading-system computation. The public `leadingSystemEnd(of:messages:render:)` calls it with `renderedSample(...)`, after the same guard so it still renders nothing when there are no leading instructions. `leadingSystemAndLastMessageEnds` calls it with the shared sample.
+      3. New private `leadingSystemMessages(of:) -> ArraySlice<Chat.Message>`. `startsWithSystemBeforeAnotherMessage` and `sampleConversation(of:)` both use it.
+      4. New `hybridScriptedModel()` in Tests/MLXFoundationModelsTests/PromptCachePlanTestSupport.swift. ExecutorPromptCacheCheckpointTests and ExecutorPromptCacheInstructionsCheckpointTests no longer have their private `hybridModel()`. PromptCacheCopyKeepingTokensTests also had the same literal; it was new in 1fd70743 and now calls the shared builder too.
+    - Files: Libraries/MLXFoundationModels/ExecutorPromptCache.swift, Libraries/MLXFoundationModels/ExecutorPromptCacheEntry.swift, Libraries/MLXLMCommon/PromptCacheCheckpoint.swift, Tests/MLXFoundationModelsTests/{PromptCachePlanTestSupport,ExecutorPromptCacheCheckpointTests,ExecutorPromptCacheInstructionsCheckpointTests,PromptCacheCopyKeepingTokensTests}.swift
+    - Tests: `swift build --build-tests` passed; its only warning is the SwiftPM "missing creator for mutated node" notice. `xcrun xctest` MLXFoundationModelsTests: 734 passed, exit 0. MLXLMTests in one process: 1261 XCTest, 0 failures, and 2849 Swift Testing passed (the 3 known issues already reported), exit 0. swift-format applied.
+    - next: /review
+  timestamp: 2026-11-28T07:13:43.955911+00:00
+- actor: claude-code
+  id: 01m8ggjqhxdx16hzreqdwb4fyr
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (no source warnings; one SwiftPM "missing creator for mutated node" tooling notice for mlx-swift_Cmlx.bundle). xcrun xctest per bundle, all exit 0: MLXLMTests 1261 XCTest (0 failures) + Swift Testing 2849 tests/282 suites passed with 3 known issues; MLXGuidedGenerationTests 96 tests/23 suites passed; MLXFoundationModelsTests 734 tests/97 suites passed; CXGrammarTests 7 tests/5 suites passed; MLXHuggingFaceMacrosTests 11 XCTest, 0 failures. swift-format lint on all changed Swift files: clean. 0 skipped.
+    - pre-existing: the 3 known issues are in ToolTests.swift "Test MiniCPM5 Format via ToolCallProcessor keeps a function close tag inside CDATA" (withKnownIssue, committed in 021b9341; ToolTests.swift is not modified by this task).
+    - next: review
+  timestamp: 2026-11-28T07:23:11.805502+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Prompt cache: a session seeded by copying a remote template gets no partial hit when its prompt diverges after the shared prefix'
@@ -75,3 +112,17 @@ Make the seeded session get a partial hit on the shared prefix, by trimming, by 
 - The same test locally.
 - If `keepingTokens:` is added: it copies exactly n tokens, or the nearest checkpoint at or below n, and refuses n larger than the ledger.
 #cluster
+
+## Review Findings (2026-11-28 00:52)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 19 file(s) reviewed, 3 not reviewed.
+
+> 3 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M8G9FF1CS1H0HWZ9H3WJDPA4.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8G9FF1CS1H0HWZ9H3WJDPA4.md` — no validator matches this file
+> - `Libraries/MLXFoundationModels/README.md` — no validator matches this file
+
+- [x] `Libraries/MLXFoundationModels/ExecutorPromptCache.swift:265` `reuse/reuse` — `restoring` re-implements the 'longest checkpoint at or below a token count' selection that `ExecutorPromptCacheEntry.restoredCopy(keepingTokens:)` also implements. It filters `entry.checkpoints` by a predicate, sorts by `tokens.count` descending, and takes the first checkpoint that restores. Two copies of this ordering rule can drift apart, and a fix to one would not reach the other. Add one helper on `ExecutorPromptCacheEntry`, for example `checkpoints(longestWhere: (PromptCacheCheckpoint) -> Bool) -> [PromptCacheCheckpoint]` that returns the matching checkpoints sorted longest first. Both `restoring` and `restoredCopy(keepingTokens:)` then call it and keep only the restore step local to each.
+- [x] `Libraries/MLXLMCommon/PromptCacheCheckpoint.swift:487` `reuse/reuse` — `leadingSystemAndLastMessageEnds` re-implements the body of `leadingSystemEnd` (the system-prefix check, the sample-token common-prefix computation) instead of sharing it. The private `lastMessageEnd(of:messages:sampleTokens:render:)` overload already shows the pattern for taking a precomputed render, but `leadingSystemEnd` has no equivalent, so the two copies can drift apart. Extract a private `leadingSystemEnd(of promptTokens: [Int], messages:, sampleTokens: [Int]?)` overload, mirroring the `lastMessageEnd` overload. Have the public `leadingSystemEnd(of:messages:render:)` call it with `renderedSample(...)`, and have `leadingSystemAndLastMessageEnds` call it with the shared `sampleTokens`. That leaves one implementation of the leading-system computation.
+- [x] `Libraries/MLXLMCommon/PromptCacheCheckpoint.swift:530` `reuse/reuse` — `sampleConversation(of:)` recomputes the leading-system slice `messages.prefix { $0.role == .system }` that `startsWithSystemBeforeAnotherMessage` already computes. Both new helpers carry their own copy of the same predicate, so a change to what counts as leading instructions would have to be made in two places. Extract a private `leadingSystemMessages(of messages: [Chat.Message]) -> ArraySlice<Chat.Message>` (or `[Chat.Message]`) helper. Have `startsWithSystemBeforeAnotherMessage` and `sampleConversation(of:)` both call it, so the definition of leading instructions lives in one place.
+- [x] `Tests/MLXFoundationModelsTests/ExecutorPromptCacheInstructionsCheckpointTests.swift:38` `reuse/reuse` — `hybridModel()` re-declares the same one-attention-layer, one-recurrent-layer `ScriptedLanguageModel` fixture that `ExecutorPromptCacheCheckpointTests.hybridModel` already provides. The copy is a parallel definition, not a call to the shared one. Keep one hybrid-model builder in the shared test support (beside `PromptCachePlanFixtures`) and call it from both suites. Do not declare the `ScriptedLanguageModel` literal again in each file.

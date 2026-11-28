@@ -85,9 +85,7 @@ struct PromptCacheCopyKeepingTokensTests {
     /// - Throws: when a checkpoint is not taken.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func hybridEntry(checkpointed: Bool = true) throws -> ExecutorPromptCacheEntry {
-        let caches = try ScriptedLanguageModel(
-            rounds: [], cacheLayerCount: 1, recurrentLayerCount: 1
-        ).newCache(parameters: nil)
+        let caches = try hybridScriptedModel().newCache(parameters: nil)
         feed(caches, tokenCount: instructions.count)
         let instructionsCheckpoint = try #require(
             PromptCacheCheckpoint(caches: caches, tokens: instructions, state: nil))

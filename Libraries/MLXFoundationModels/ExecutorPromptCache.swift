@@ -262,9 +262,7 @@ struct ExecutorPromptCachePlan {
         _ entry: ExecutorPromptCacheEntry, input: LMInput, promptTokens: [Int],
         drafterID: MTPDrafterID?
     ) -> ExecutorPromptCachePlan? {
-        let serving = entry.checkpoints
-            .filter { $0.serves(promptTokens) }
-            .sorted { $0.tokens.count > $1.tokens.count }
+        let serving = entry.checkpoints(longestWhere: { $0.serves(promptTokens) })
         guard
             let (checkpoint, caches) = serving.lazy
                 .compactMap({ checkpoint in

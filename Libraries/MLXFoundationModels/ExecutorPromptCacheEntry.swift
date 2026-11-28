@@ -87,6 +87,21 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
         Self.checkpoints(checkpoint, instructionsCheckpoint)
     }
 
+    /// The ``checkpoints`` that satisfy `predicate`, longest first.
+    ///
+    /// A caller takes the first of them that restores, thus each choice of a
+    /// checkpoint prefers the one that keeps the most tokens.
+    ///
+    /// - Parameter predicate: whether a checkpoint is a candidate.
+    /// - Returns: the candidates, sorted by token count, longest first.
+    func checkpoints(
+        longestWhere predicate: (PromptCacheCheckpoint) -> Bool
+    ) -> [PromptCacheCheckpoint] {
+        checkpoints
+            .filter(predicate)
+            .sorted { $0.tokens.count > $1.tokens.count }
+    }
+
     /// The checkpoints of the two that are present, in order.
     ///
     /// - Parameters:
@@ -304,10 +319,7 @@ final class ExecutorPromptCacheEntry: @unchecked Sendable {
     /// - Returns: the new entry, or nil.
     /// - Throws: the error of the copy of a ``RemoteKVCache`` on its worker.
     private func restoredCopy(keepingTokens tokenCount: Int) throws -> ExecutorPromptCacheEntry? {
-        let kept =
-            checkpoints
-            .filter { $0.tokens.count <= tokenCount }
-            .sorted { $0.tokens.count > $1.tokens.count }
+        let kept = checkpoints(longestWhere: { $0.tokens.count <= tokenCount })
         for checkpoint in kept {
             if let restored = try checkpoint.restoredCopy(of: caches) {
                 return prefixEntry(
