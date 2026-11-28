@@ -79,8 +79,24 @@ comments:
     - note: the first MLXLMTests run ended silently (exit 0) mid ChatSessionToolCallTests with no summary; the suite alone passed 13/13, and one full rerun with unchanged code completed with the totals above.
     - next: review/commit
   timestamp: 2026-11-28T08:36:52.435982+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8gmw3cap7ahkzbaawpq9kf4
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (d572e211) — 0 findings (attempted 7, failed 0, skipped 0); 3 files reviewed, 2 .kanban files matched no validator; all 5 prior findings checked
+    - next: none — task moved to done
+  timestamp: 2026-11-28T08:38:13.130285+00:00
+- actor: claude-code
+  id: 01m8gmwengkseefcbkg22ywnn7
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 files, all 5 findings checked
+    - test: green — all 5 bundles (MLXLMTests 2849+1261, MLXFoundationModelsTests 744, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11). The first MLXLMTests run stopped silently and exited 0; the rerun completed.
+    - commit: d572e211
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T08:38:24.688064+00:00
+position_column: done
+position_ordinal: ffffff9380
 title: 'Prompt cache: the think-then-call phase of a required tool turn takes the carried cache'
 ---
 ## What
