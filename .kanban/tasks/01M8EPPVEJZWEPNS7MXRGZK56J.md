@@ -62,8 +62,24 @@ comments:
     - evidence: swift build --build-tests complete; xcrun xctest: MLXLMTests 1261 XCTest + 2823 Swift Testing passed, 0 failures; MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 652 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed; swift-format lint on changed files clean; 0 skipped. Swift Testing reports 3 known issues (AttentionKernelToleranceTests, MiniCPM5ToolCallParserTests) in files this task did not touch, pre-existing withKnownIssue markers.
     - next: review
   timestamp: 2026-11-28T00:06:04.970561+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8fqn66mtzz0054ms2skqxev
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (91b6663f) — 0 findings, 0 confirmed, 0 refuted; 7 validator runs attempted, 0 failed; 8 files reviewed, 2 .kanban files not matched by any validator. All 7 prior findings from 2026-11-27 17:31 are checked.
+    - next: none — task moved to done
+  timestamp: 2026-11-28T00:07:37.941+00:00
+- actor: claude-code
+  id: 01m8fqndxnqqjeqr1vs4cncg3g
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 8 files, all 7 findings checked
+    - test: green — all 5 bundles (MLXLMTests 2823+1261, MLXFoundationModelsTests 652, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 91b6663f
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T00:07:45.845748+00:00
+position_column: done
+position_ordinal: ffffff8a80
 title: 'Clustered models: support speculative decoding with the MTP drafter (Qwen MTP, Inkling DSpark)'
 ---
 ## What
