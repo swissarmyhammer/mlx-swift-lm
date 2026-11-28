@@ -132,27 +132,22 @@ public enum RemoteOpAnnouncement {
 
     /// Writes the count, the cache and the payload words of `round` into `words`.
     ///
-    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` for a draft limit whose verify
-    ///   does not fit a chunk, or a rejected count outside `0 ... Int32.max`.
+    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` for a round that fails
+    ///   ``RemoteDraftRound/validate()``.
     private static func write(_ round: RemoteDraftRound, into words: inout [Int32]) throws {
-        guard round.verifyFitsAChunk else {
-            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.draftLimit))
-        }
-        guard let rejected = Int32(exactly: round.rejectedCount), rejected >= 0 else {
-            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.rejectedCount))
-        }
+        try round.validate()
         words[Word.count.rawValue] = Int32(round.draftLimit)
         write(round.cache.rawValue, into: &words, low: .cacheLow, high: .cacheHigh)
         words[payloadIndex(.token)] = round.token
-        words[payloadIndex(.rejectedCount)] = rejected
+        words[payloadIndex(.rejectedCount)] = Int32(round.rejectedCount)
         words[payloadIndex(.minimumDraftProbability)] = Int32(
             bitPattern: round.minimumDraftProbability.bitPattern)
     }
 
     /// The round of the count, the cache and the payload words of `words`.
     ///
-    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` for a draft limit whose verify
-    ///   does not fit a chunk, or a negative rejected count.
+    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` for a round that fails
+    ///   ``RemoteDraftRound/validate()``.
     private static func round(of words: [Int32]) throws -> RemoteDraftRound {
         let round = RemoteDraftRound(
             cache: RemoteCacheID(rawValue: read(words, low: .cacheLow, high: .cacheHigh)),
@@ -161,12 +156,7 @@ public enum RemoteOpAnnouncement {
             draftLimit: Int(words[Word.count.rawValue]),
             minimumDraftProbability: Float(
                 bitPattern: UInt32(bitPattern: words[payloadIndex(.minimumDraftProbability)])))
-        guard round.verifyFitsAChunk else {
-            throw RemoteModelProtocolError.invalidCount(Int32(round.draftLimit))
-        }
-        guard round.rejectedCount >= 0 else {
-            throw RemoteModelProtocolError.invalidCount(Int32(round.rejectedCount))
-        }
+        try round.validate()
         return round
     }
 

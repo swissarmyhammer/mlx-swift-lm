@@ -294,12 +294,7 @@ public final class RemoteModelExecutor {
     /// Every rank checks the round the same way before the exchange, so a round that fails does
     /// so on every rank, and none of them waits in the exchange.
     private func speculate(_ round: RemoteDraftRound) throws -> RemoteModelReply {
-        guard round.verifyFitsAChunk else {
-            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.draftLimit))
-        }
-        guard round.rejectedCount >= 0 else {
-            throw RemoteModelProtocolError.invalidCount(Int32(clamping: round.rejectedCount))
-        }
+        try round.validate()
         let id = round.cache
         let layers = try handle(of: id).layers
         let rewound = Self.rewind(layers, count: round.rejectedCount)

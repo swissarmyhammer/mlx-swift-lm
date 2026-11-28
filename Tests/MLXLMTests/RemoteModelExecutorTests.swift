@@ -41,11 +41,13 @@ struct RemoteModelExecutorTests {
     /// The quantization the configuration of a test executor names.
     private static let quantization = BaseConfiguration.Quantization(groupSize: 64, bits: 4)
 
-    /// An executor over the target of a new fixture, in `dtype` when one is given.
+    /// An executor over the target of a new fixture, in `dtype` when one is given, that holds
+    /// the drafter of the fixture, as rank 0 does, when `drafter` is true.
     private static func makeExecutor(
-        rankCount: Int = 1, dtype: DType? = nil
+        rankCount: Int = 1, dtype: DType? = nil, drafter: Bool = false
     ) throws -> RemoteModelExecutor {
-        let target = try Qwen35MTPFixture().target
+        let fixture = try Qwen35MTPFixture()
+        let target = fixture.target
         if let dtype {
             target.apply { $0.asType(dtype) }
         }
@@ -53,7 +55,8 @@ struct RemoteModelExecutorTests {
             model: target,
             configuration: .init(
                 vocabularySize: Qwen35MTPFixture.vocabularySize, rankCount: rankCount,
-                modelType: modelType, quantization: quantization))
+                modelType: modelType, quantization: quantization),
+            drafter: drafter ? fixture.drafter : nil)
     }
 
     /// The text of the failed reply of `error`.
@@ -110,15 +113,6 @@ struct RemoteModelExecutorTests {
             status
         case .capabilities, .done, .failed: nil
         }
-    }
-
-    /// An executor over the target of a new fixture whose drafter it holds, as rank 0 does.
-    private static func makeDraftingExecutor() throws -> RemoteModelExecutor {
-        let fixture = try Qwen35MTPFixture()
-        return RemoteModelExecutor(
-            model: fixture.target,
-            configuration: .init(vocabularySize: Qwen35MTPFixture.vocabularySize),
-            drafter: fixture.drafter)
     }
 
     /// The most drafts of each round of a test.
@@ -196,7 +190,7 @@ struct RemoteModelExecutorTests {
 
     @Test("describe names the drafter of an executor that holds one")
     func describeNamesTheDrafterOfAnExecutorThatHoldsOne() throws {
-        let reply = try Self.makeDraftingExecutor().handle(
+        let reply = try Self.makeExecutor(drafter: true).handle(
             RemoteModelRequest(requestID: .none, sequence: 1, op: .describe))
 
         #expect(
@@ -355,7 +349,7 @@ struct RemoteModelExecutorTests {
     @Test("a round with a drafter drafts up to its limit")
     func aRoundWithADrafterDraftsUpToItsLimit() throws {
         let reply = try Self.run(
-            Self.prefilled + [Self.round(token: 4)], on: Self.makeDraftingExecutor())
+            Self.prefilled + [Self.round(token: 4)], on: Self.makeExecutor(drafter: true))
 
         #expect(Self.drafted(reply)?.drafts.count == Self.draftLimit)
     }
@@ -363,7 +357,7 @@ struct RemoteModelExecutorTests {
     @Test("a round with a drafter returns the logits of each verified token")
     func aRoundWithADrafterReturnsTheLogitsOfEachVerifiedToken() throws {
         let reply = try Self.run(
-            Self.prefilled + [Self.round(token: 4)], on: Self.makeDraftingExecutor())
+            Self.prefilled + [Self.round(token: 4)], on: Self.makeExecutor(drafter: true))
 
         let round = try #require(Self.drafted(reply))
         #expect(round.logits.shape == [1, round.drafts.count + 1, Qwen35MTPFixture.vocabularySize])
@@ -372,7 +366,7 @@ struct RemoteModelExecutorTests {
     @Test("a round with a drafter holds its token and its drafts")
     func aRoundWithADrafterHoldsItsTokenAndItsDrafts() throws {
         let reply = try Self.run(
-            Self.prefilled + [Self.round(token: 4)], on: Self.makeDraftingExecutor())
+            Self.prefilled + [Self.round(token: 4)], on: Self.makeExecutor(drafter: true))
 
         let drafts = try #require(Self.drafted(reply)?.drafts)
         #expect(Self.status(of: reply)?.offset == Self.prompt.count + 1 + drafts.count)
@@ -380,7 +374,7 @@ struct RemoteModelExecutorTests {
 
     @Test("a round rewinds the drafts the round before it rejected")
     func aRoundRewindsTheDraftsTheRoundBeforeItRejected() throws {
-        let executor = try Self.makeDraftingExecutor()
+        let executor = try Self.makeExecutor(drafter: true)
         let first = try #require(
             Self.drafted(try Self.run(Self.prefilled + [Self.round(token: 4)], on: executor)))
 
@@ -397,7 +391,7 @@ struct RemoteModelExecutorTests {
     func aRoundVerifiesAsTheLocalModelDecodes() throws {
         let fixture = try Qwen35MTPFixture()
         let reply = try Self.run(
-            Self.prefilled + [Self.round(token: 4)], on: Self.makeDraftingExecutor())
+            Self.prefilled + [Self.round(token: 4)], on: Self.makeExecutor(drafter: true))
         let round = try #require(Self.drafted(reply))
         let cache = try fixture.target.newCache(parameters: nil)
         _ = fixture.target(
@@ -415,14 +409,15 @@ struct RemoteModelExecutorTests {
 
     @Test("a round on a handle the worker does not hold fails")
     func aRoundOnAHandleTheWorkerDoesNotHoldFails() throws {
-        let reply = try Self.run([.begin, Self.round(token: 4)], on: Self.makeDraftingExecutor())
+        let reply = try Self.run(
+            [.begin, Self.round(token: 4)], on: Self.makeExecutor(drafter: true))
 
         #expect(reply == .failed(Self.text(of: .unknownCache(Self.cache))))
     }
 
     @Test("a trim after a round rewinds into the round")
     func aTrimAfterARoundRewindsIntoTheRound() throws {
-        let executor = try Self.makeDraftingExecutor()
+        let executor = try Self.makeExecutor(drafter: true)
         let first = try #require(
             Self.drafted(try Self.run(Self.prefilled + [Self.round(token: 4)], on: executor)))
 

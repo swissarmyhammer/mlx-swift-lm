@@ -58,9 +58,6 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// The executors of the other ranks, which apply the announce words of each op.
     private let followers: [RemoteModelExecutor]
 
-    /// The draft words rank 0 exchanged in the op that runs, which each follower takes.
-    private let draftWords: DraftWordsRelay
-
     /// The cache status each follower last reported for each handle, one map per follower.
     private var followerStatuses: [[RemoteCacheID: RemoteCacheStatus]]
 
@@ -105,8 +102,8 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     ) {
         let configuration = RemoteModelExecutor.Configuration(
             vocabularySize: vocabularySize, rankCount: followerCount + 1, modelType: modelType)
+        // The draft words rank 0 exchanged in the op that runs, which each follower takes.
         let draftWords = DraftWordsRelay()
-        self.draftWords = draftWords
         self.executor = RemoteModelExecutor(
             model: model, configuration: configuration, drafter: drafter,
             draftExchange: RemoteDraftExchange { words, _ in

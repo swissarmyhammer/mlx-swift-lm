@@ -90,6 +90,43 @@ struct RemoteModelProtocolTests {
         }
     }
 
+    @Test("the largest round whose verify fits a chunk survives its announce words")
+    func theLargestRoundWhoseVerifyFitsAChunkSurvivesItsAnnounceWords() throws {
+        let draftLimit = RemoteModelProtocol.maximumChunkTokenCount - 1
+        let request = Self.request(.speculate(Self.round(draftLimit: draftLimit)))
+
+        #expect(try RemoteOpAnnouncement.decode(RemoteOpAnnouncement.encode(request)) == request)
+    }
+
+    @Test("a round whose verify does not fit a chunk fails validation")
+    func aRoundWhoseVerifyDoesNotFitAChunkFailsValidation() {
+        let draftLimit = RemoteModelProtocol.maximumChunkTokenCount
+
+        #expect(throws: RemoteModelProtocolError.invalidCount(Int32(draftLimit))) {
+            try Self.round(draftLimit: draftLimit).validate()
+        }
+    }
+
+    @Test("a round that rewinds a negative count fails validation")
+    func aRoundThatRewindsANegativeCountFailsValidation() {
+        let round = RemoteDraftRound(
+            cache: Self.cache, token: 1, rejectedCount: -1, draftLimit: 1,
+            minimumDraftProbability: 0)
+
+        #expect(throws: RemoteModelProtocolError.invalidCount(-1)) { try round.validate() }
+    }
+
+    @Test("a round that rewinds more than a word holds fails validation")
+    func aRoundThatRewindsMoreThanAWordHoldsFailsValidation() {
+        let round = RemoteDraftRound(
+            cache: Self.cache, token: 1, rejectedCount: Int(Int32.max) + 1, draftLimit: 1,
+            minimumDraftProbability: 0)
+
+        #expect(throws: RemoteModelProtocolError.invalidCount(Int32.max)) {
+            try round.validate()
+        }
+    }
+
     @Test("a round that rewinds a negative count has no announce")
     func aRoundThatRewindsANegativeCountHasNoAnnounce() {
         let round = RemoteDraftRound(

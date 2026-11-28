@@ -112,6 +112,22 @@ public enum Inkling2TinyModels {
         """
     }
 
+    /// The result of `body`, whose random draws come from a task-local state of `seed`.
+    ///
+    /// Task-local rather than `MLXRandom.seed`: parallel tests must not share (or perturb) the
+    /// global random stream, or the weights differ from run to run.
+    ///
+    /// - Parameters:
+    ///   - seed: the seed of the random state of `body`.
+    ///   - body: the work that draws random values.
+    /// - Returns: the result of `body`.
+    /// - Throws: what `body` throws.
+    private static func seeded<Result>(_ seed: UInt64, _ body: () throws -> Result) rethrows
+        -> Result
+    {
+        try withRandomState(MLXRandom.RandomState(seed: seed), body: body)
+    }
+
     /// A target of `json` with random weights and NVFP4 experts. In bfloat16, the tensors that
     /// the checkpoint stores in float32 stay float32, and the model is prepared as after a load.
     ///
@@ -123,12 +139,8 @@ public enum Inkling2TinyModels {
     public static func target(json: String, bfloat16: Bool = false) throws -> Inkling2 {
         let config = try JSONDecoder().decode(
             Inkling2Configuration.self, from: Data(json.utf8))
-        let model = withRandomState(MLXRandom.RandomState(seed: initializerSeed)) {
-            Inkling2(config)
-        }
-        // Task-local rather than MLXRandom.seed: parallel tests must not share (or perturb) the
-        // global random stream, or the weights differ from run to run.
-        try withRandomState(MLXRandom.RandomState(seed: targetSeed)) {
+        let model = seeded(initializerSeed) { Inkling2(config) }
+        try seeded(targetSeed) {
             var parameters: [String: MLXArray] = [:]
             for (key, value) in model.parameters().flattened() where value.dtype == .float32 {
                 parameters[key] = MLXRandom.normal(value.shape) * weightScale
@@ -187,12 +199,8 @@ public enum Inkling2TinyModels {
     public static func drafter(json: String) throws -> Inkling2DraftModel {
         let configuration = try JSONDecoder().decode(
             Inkling2DraftConfiguration.self, from: Data(json.utf8))
-        let drafter = withRandomState(MLXRandom.RandomState(seed: initializerSeed)) {
-            Inkling2DraftModel(configuration)
-        }
-        // Task-local rather than MLXRandom.seed: parallel tests must not share (or perturb) the
-        // global random stream.
-        let parameters = withRandomState(MLXRandom.RandomState(seed: drafterSeed)) {
+        let drafter = seeded(initializerSeed) { Inkling2DraftModel(configuration) }
+        let parameters = seeded(drafterSeed) {
             Dictionary(
                 uniqueKeysWithValues: drafter.parameters().flattened().map { key, value in
                     (key, MLXRandom.normal(value.shape) * weightScale)

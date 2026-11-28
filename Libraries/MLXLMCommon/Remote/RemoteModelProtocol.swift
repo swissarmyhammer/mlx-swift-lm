@@ -219,6 +219,21 @@ public struct RemoteDraftRound: Codable, Sendable, Hashable {
     var verifyFitsAChunk: Bool {
         (0 ..< RemoteModelProtocol.maximumChunkTokenCount).contains(draftLimit)
     }
+
+    /// Checks that the round is one the op set carries and a rank runs: its verify fits a
+    /// chunk, and its rejected count fits an announce word and is not negative.
+    ///
+    /// - Throws: ``RemoteModelProtocolError/invalidCount(_:)`` with the offending count,
+    ///   clamped to a word, for a draft limit whose verify does not fit a chunk, or a rejected
+    ///   count outside `0 ... Int32.max`.
+    func validate() throws {
+        guard verifyFitsAChunk else {
+            throw RemoteModelProtocolError.invalidCount(Int32(clamping: draftLimit))
+        }
+        guard (0 ... Int(Int32.max)).contains(rejectedCount) else {
+            throw RemoteModelProtocolError.invalidCount(Int32(clamping: rejectedCount))
+        }
+    }
 }
 
 /// The MTP drafter rank 0 of a worker holds, as ``RemoteModelCapabilities/drafter`` names it.

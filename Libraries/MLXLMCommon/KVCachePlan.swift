@@ -200,6 +200,10 @@ package final class KVCacheStorage {
     /// rejected drafts of a speculative round inside the op of the next round, or as a
     /// ``RemoteKVCache/trim(_:)`` drops them when the guard of ``trim(_:)`` would not.
     ///
+    /// ``trim(_:)``, ``rewindSpeculative(_:)`` and ``rewindLastRound(_:)`` take their own
+    /// drops back through it too, so the timeline moves back in one place, and the rewind
+    /// record of the last commit, which no longer describes the cache, is dropped with it.
+    ///
     /// - Parameter count: The positions the cache dropped.
     package func commitDroppedTokens(_ count: Int) {
         precondition(
@@ -215,11 +219,7 @@ package final class KVCacheStorage {
         precondition(count >= 0, "Trim count cannot be negative")
         precondition(!roundIsOpen, "cannot trim while a staged round is open")
         let trimmed = trimPromptCache(cache, numTokens: count)
-        precondition(
-            trimmed <= processedTokenCount,
-            "Cache trimmed beyond its processed-token timeline")
-        processedTokenCount -= trimmed
-        lastRound = nil
+        commitDroppedTokens(trimmed)
         return trimmed
     }
 
@@ -228,10 +228,7 @@ package final class KVCacheStorage {
     package func rewindSpeculative(_ count: Int) -> Int {
         precondition(count >= 0, "Rewind count cannot be negative")
         let rewound = rewindSpeculativePromptCache(cache, numTokens: count)
-        precondition(
-            rewound <= processedTokenCount,
-            "Cache rewound beyond its processed-token timeline")
-        processedTokenCount -= rewound
+        commitDroppedTokens(rewound)
         return rewound
     }
 
@@ -366,8 +363,7 @@ package final class KVCacheStorage {
                     """)
             }
         }
-        processedTokenCount -= rewound
-        lastRound = nil
+        commitDroppedTokens(rewound)
 
         assertNativeAttentionOffsetsAligned(
             "rewinding a committed round left the leaves and the timeline out of step")
