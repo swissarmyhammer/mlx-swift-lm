@@ -40,6 +40,42 @@ struct ExecutorCheckpointBoundaries: Equatable, Sendable {
     }
 }
 
+/// The prompt of a pass that a protocol rule spliced past a committed turn: the caches of the
+/// pass represent other tokens than its render (see
+/// ``ExecutorPromptCachePlan/representedTokens``).
+///
+/// A pass that continues the generation of a spliced pass -- the grammar phase of a required
+/// tool turn after its reasoning phase -- reads these tokens in the place of the render, thus it
+/// continues the caches that pass left.
+struct ExecutorSplicedPrompt: Equatable, Sendable {
+
+    /// The length of the render of the spliced pass.
+    let renderedTokenCount: Int
+
+    /// The tokens the caches of the spliced pass represent once it fed its prompt: the tokens
+    /// the model wrote, and the tail of the render the pass fed.
+    let representedTokens: [Int]
+
+    /// `boundaries`, which index the render of the spliced pass, as indexes of
+    /// ``representedTokens``.
+    ///
+    /// The splice feeds the render from the commit that closes the turn the model wrote, thus
+    /// the end of the last message stands in the tail it fed, and moves by the length the
+    /// splice adds or drops, as the checkpoint of the spliced pass moved there
+    /// (`PromptCacheCheckpoint.prefillToCheckpoint`).
+    /// The instructions stand before the turn the model wrote, which the render held whole, thus
+    /// their end keeps its index.
+    ///
+    /// - Parameter boundaries: the boundaries of the render.
+    /// - Returns: the boundaries of the represented tokens.
+    func representing(_ boundaries: ExecutorCheckpointBoundaries) -> ExecutorCheckpointBoundaries {
+        let addedTokenCount = representedTokens.count - renderedTokenCount
+        return ExecutorCheckpointBoundaries(
+            instructionsEnd: boundaries.instructionsEnd,
+            transcriptEnd: boundaries.transcriptEnd.map { $0 + addedTokenCount })
+    }
+}
+
 /// What one generation pass does with the prompt cache of its session.
 struct ExecutorPromptCachePlan {
 
@@ -62,6 +98,14 @@ struct ExecutorPromptCachePlan {
     /// that splices past a committed turn names the tokens the model wrote
     /// instead, plus the tail of the render it fed.
     let representedTokens: [Int]
+
+    /// The splice of this pass, or nil when `caches` represent the render.
+    var splicedPrompt: ExecutorSplicedPrompt? {
+        representedTokens == promptTokens
+            ? nil
+            : ExecutorSplicedPrompt(
+                renderedTokenCount: promptTokens.count, representedTokens: representedTokens)
+    }
 
     /// The model state to seed the iterator with: the state the entry carried
     /// when this pass reuses its caches, and nil when the pass builds fresh

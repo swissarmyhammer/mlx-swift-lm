@@ -279,6 +279,58 @@ struct ExecutorPromptCachePlanTests: PromptCacheKeyFixtures, PromptCachePlanFixt
         #expect(committed?.renderTokens == Self.spliceRender)
     }
 
+    @Test("a spliced pass names the tokens its caches represent in the place of the render")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aSplicedPassNamesTheTokensItsCachesRepresent() throws {
+        let planned = try #require(
+            try planPromptCache(
+                render: Self.spliceRender, reusing: spliceFixture(),
+                protocolRules: [SplicingRule(commit: Self.commit)]))
+
+        #expect(
+            planned.splicedPrompt
+                == ExecutorSplicedPrompt(
+                    renderedTokenCount: Self.spliceRender.count,
+                    representedTokens: [1, 2, 70, Self.commit, 20, 21]))
+    }
+
+    @Test("a pass that extends the ledger names no splice")
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    func aPassThatExtendsTheLedgerNamesNoSplice() throws {
+        let planned = try #require(
+            try planPromptCache(render: [1, 2, 3, 4], reusing: entry(tokens: [1, 2])))
+
+        #expect(planned.splicedPrompt == nil)
+    }
+
+    @Test("a splice moves the end of the transcript by the tokens it adds")
+    func aSpliceMovesTheEndOfTheTranscriptByTheTokensItAdds() {
+        let splice = ExecutorSplicedPrompt(
+            renderedTokenCount: 6, representedTokens: [1, 2, 70, 71, Self.commit, 20, 21])
+
+        #expect(
+            splice.representing(ExecutorCheckpointBoundaries(transcriptEnd: 5)).transcriptEnd == 6)
+    }
+
+    @Test("a splice moves the end of the transcript back by the tokens it drops")
+    func aSpliceMovesTheEndOfTheTranscriptBackByTheTokensItDrops() {
+        let splice = ExecutorSplicedPrompt(
+            renderedTokenCount: 6, representedTokens: [1, 2, Self.commit, 20, 21])
+
+        #expect(
+            splice.representing(ExecutorCheckpointBoundaries(transcriptEnd: 5)).transcriptEnd == 4)
+    }
+
+    @Test("a splice keeps the end of the instructions")
+    func aSpliceKeepsTheEndOfTheInstructions() {
+        let splice = ExecutorSplicedPrompt(
+            renderedTokenCount: 6, representedTokens: [1, 2, 70, 71, Self.commit, 20, 21])
+
+        #expect(
+            splice.representing(ExecutorCheckpointBoundaries(instructionsEnd: 2)).instructionsEnd
+                == 2)
+    }
+
     @Test("a plan without a rule records the render it fed for the next pass")
     func aPlanWithoutARuleRecordsTheRenderItFedForTheNextPass() throws {
         let caches: [KVCache] = [KVCacheSimple()]

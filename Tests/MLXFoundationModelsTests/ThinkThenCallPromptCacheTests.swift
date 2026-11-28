@@ -5,7 +5,7 @@
 import Foundation
 import FoundationModels
 import MLXGuidedGeneration
-import MLXLMCommon
+@testable import MLXLMCommon
 import MLXLMTestSupport
 import Synchronization
 import Testing
@@ -27,6 +27,10 @@ import Testing
 /// The random weights close no reasoning on their own. A probe turn, with no cache, reads the
 /// reasoning the target writes for the tool turn, and the reasoning then closes at a token of
 /// that reasoning that stands there first.
+///
+/// In a spliced history, the render of the tool turn rewrites the answer of the plain turn, and
+/// the Qwen committed-turn rule splices the reasoning phase onto the tokens the model wrote. The
+/// grammar phase then continues those tokens, not the render.
 @Suite(.serialized)
 struct ThinkThenCallPromptCacheTests {
 
@@ -58,6 +62,98 @@ struct ThinkThenCallPromptCacheTests {
                         unpaddedVocabularySize: Qwen35MTPFixture.vocabularySize))
             case .attentionOnly:
                 try Qwen35AttentionOnlyTarget.make()
+            }
+        }
+    }
+
+    /// How the tool turn renders the answer of the plain turn.
+    enum History: Sendable {
+
+        /// The render writes the answer as the model wrote it, thus the tool turn extends the
+        /// ledger of the plain turn.
+        case rendered
+
+        /// The render rewrites the answer (see ``CommittedTurnAlphabetTokenizer``), and the Qwen
+        /// committed-turn rule splices the tool turn onto the tokens the model wrote.
+        case spliced
+
+        /// The tokenizer that renders each turn.
+        var tokenizer: any Tokenizer {
+            switch self {
+            case .rendered: ToolCallAlphabetTokenizer()
+            case .spliced: CommittedTurnAlphabetTokenizer()
+            }
+        }
+
+        /// The response protocol whose cache-reuse rules the executor consults, or nil for none.
+        var toolCallFormat: ToolCallFormat? {
+            switch self {
+            case .rendered: nil
+            case .spliced: .qwen35
+            }
+        }
+
+        /// The answer whose render is `response` as the model wrote it: the answer a turn with
+        /// no cache replays, thus it reads what the spliced caches of the warm session hold.
+        ///
+        /// - Parameter response: The answer of the plain turn.
+        /// - Returns: The answer to replay.
+        func replaying(_ response: String) -> String {
+            switch self {
+            case .rendered: response
+            case .spliced: response + CommittedTurnAlphabetTokenizer.rewrittenTail
+            }
+        }
+    }
+
+    /// A ``ToolCallAlphabetTokenizer`` whose chat template closes each assistant answer with the
+    /// Qwen end-of-turn marker, and writes the answer without its last character, as the Qwen
+    /// template trims the answer the model wrote. A render after an answer thus holds other
+    /// tokens than the model wrote, and the Qwen committed-turn rule splices past the marker.
+    ///
+    /// The marker is the end-of-sequence token, thus a generation never writes it inside its
+    /// answer. The tokenizer has no think-block markers, thus the rule splices every turn.
+    private struct CommittedTurnAlphabetTokenizer: Tokenizer {
+
+        /// The tokenizer that spells each character.
+        private let base = ToolCallAlphabetTokenizer()
+
+        /// A character the template drops from the end of an answer.
+        static let rewrittenTail = "a"
+
+        var bosToken: String? { base.bosToken }
+        var eosToken: String? { base.eosToken }
+        var unknownToken: String? { base.unknownToken }
+
+        /// The end-of-turn marker of the Qwen protocol: the end-of-sequence token.
+        private var endOfTurnToken: Int? { base.eosToken.flatMap(base.convertTokenToId) }
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            base.encode(text: text, addSpecialTokens: addSpecialTokens)
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            base.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            token == QwenCommittedTurnRule.endOfTurnMarker
+                ? endOfTurnToken : base.convertTokenToId(token)
+        }
+
+        func convertIdToToken(_ id: Int) -> String? { base.convertIdToToken(id) }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]], tools _: [[String: any Sendable]]?,
+            additionalContext _: [String: any Sendable]?
+        ) throws -> [Int] {
+            messages.flatMap { message in
+                let content = message["content"] as? String ?? ""
+                guard message["role"] as? String == "assistant" else {
+                    return encode(text: content, addSpecialTokens: false)
+                }
+                return encode(text: String(content.dropLast()), addSpecialTokens: false)
+                    + (endOfTurnToken.map { [$0] } ?? [])
             }
         }
     }
@@ -128,18 +224,20 @@ struct ThinkThenCallPromptCacheTests {
         let model: MLXLanguageModel
         let store: ExecutorPromptCacheStore
         let resolver = ClosingReasoningResolver()
-        let tokenizer = ToolCallAlphabetTokenizer()
+        let tokenizer: any Tokenizer
 
         /// The folders the setup made, which ``remove()`` deletes.
         private let folders: [URL]
 
-        /// Makes the model of `target` at `placement`, and an empty store.
+        /// Makes the model of `target` at `placement` in `history`, and an empty store.
         ///
         /// - Parameters:
         ///   - placement: Where the target runs.
         ///   - target: The model each turn runs.
+        ///   - history: How the tool turn renders the answer of the plain turn.
         /// - Throws: The error of the fixture, of the target, or of the worker handshake.
-        init(_ placement: Placement, _ target: Target) throws {
+        init(_ placement: Placement, _ target: Target, _ history: History) throws {
+            tokenizer = history.tokenizer
             let weights = try makeScriptedWeightsDirectory()
             let folder = PromptCacheTestStore.folder(named: "ThinkThenCallPromptCacheTests")
             folders = [weights, folder]
@@ -155,7 +253,7 @@ struct ThinkThenCallPromptCacheTests {
             model = try Qwen35MTPFixture().makeLanguageModel(
                 weights: weights, target: served,
                 capabilities: [.reasoning, .toolCalling, .guidedGeneration],
-                resolver: resolver, tokenizer: tokenizer)
+                resolver: resolver, tokenizer: tokenizer, toolCallFormat: history.toolCallFormat)
             store = ExecutorPromptCacheStore(
                 directory: folder,
                 capacityReader: PromptCacheSpoolFixtureVolume.capacity(ofVolumeOf:))
@@ -265,19 +363,24 @@ struct ThinkThenCallPromptCacheTests {
     }
 
     /// Runs the plain turn, the probe turn, the tool turn after the plain turn, and the same
-    /// tool turn with no cache, at `placement` on `target`.
+    /// tool turn with no cache, at `placement` on `target` in `history`.
     ///
     /// The reasoning closes at the token of ``closingPosition(of:)`` of the probe's reasoning
-    /// from the tool turn after the plain turn on.
+    /// from the tool turn after the plain turn on. The probe turn and the tool turn with no
+    /// cache replay the answer whose render is the tokens the model wrote
+    /// (``History/replaying(_:)``).
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    private static func turns(_ placement: Placement, _ target: Target) async throws -> Turns {
-        let setup = try Setup(placement, target)
+    private static func turns(
+        _ placement: Placement, _ target: Target, _ history: History = .rendered
+    ) async throws -> Turns {
+        let setup = try Setup(placement, target, history)
         defer { setup.remove() }
         let plain = try await MTPExecutorTurns.respond(
             to: plainRequest(setup: setup), model: setup.model, inside: setup.store)
+        try #require(!plain.responseText.isEmpty)
+        let replayed = history.replaying(plain.responseText)
         let probe = try await MTPExecutorTurns.respond(
-            to: toolRequest(
-                sessionID: probeSession, plainResponse: plain.responseText, setup: setup),
+            to: toolRequest(sessionID: probeSession, plainResponse: replayed, setup: setup),
             model: setup.model, inside: setup.store)
         let reasoning = setup.tokenizer.encode(text: probe.reasoningText, addSpecialTokens: false)
         let closing = try closingPosition(of: reasoning)
@@ -288,8 +391,7 @@ struct ThinkThenCallPromptCacheTests {
                 sessionID: warmSession, plainResponse: plain.responseText, setup: setup),
             setup: setup)
         let cold = try await respondGuided(
-            to: toolRequest(
-                sessionID: coldSession, plainResponse: plain.responseText, setup: setup),
+            to: toolRequest(sessionID: coldSession, plainResponse: replayed, setup: setup),
             setup: setup)
         return Turns(plain: plain, warm: warm, cold: cold)
     }
@@ -344,16 +446,33 @@ struct ThinkThenCallPromptCacheTests {
         #expect(Self.cached(turns.warm.turn) == Self.prompt(turns.warm.turn) - fed)
     }
 
+    /// Expects that the grammar phase of the warm tool turn fed no more prompt tokens than its
+    /// reasoning phase wrote.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func expectGrammarPhaseFedNoMoreThanTheReasoning(_ turns: Turns) throws {
+        let reasoningTokenCount = try #require(turns.warm.turn.usage.first).reasoningTokenCount
+        let fed = try #require(turns.warm.sink.fedPromptTokenCounts.last)
+
+        #expect(fed <= reasoningTokenCount)
+    }
+
+    /// Expects that the warm tool turn wrote the reasoning, the sampled tokens and the tool
+    /// call of the tool turn with no cache.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func expectWarmTurnWroteTheColdTurn(_ turns: Turns) {
+        #expect(!turns.cold.sink.sampledTokenIDs.isEmpty)
+        #expect(turns.warm.turn.reasoningText == turns.cold.turn.reasoningText)
+        #expect(turns.warm.sink.sampledTokenIDs == turns.cold.sink.sampledTokenIDs)
+        #expect(turns.warm.turn.toolCalls == turns.cold.turn.toolCalls)
+    }
+
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test(arguments: Placement.allCases, Target.allCases)
     func theGrammarPhaseFeedsNoMoreThanTheReasoning(placement: Placement, target: Target)
         async throws
     {
-        let turns = try await Self.turns(placement, target)
-        let reasoningTokenCount = try #require(turns.warm.turn.usage.first).reasoningTokenCount
-        let fed = try #require(turns.warm.sink.fedPromptTokenCounts.last)
-
-        #expect(fed <= reasoningTokenCount)
+        try Self.expectGrammarPhaseFedNoMoreThanTheReasoning(
+            try await Self.turns(placement, target))
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -361,12 +480,24 @@ struct ThinkThenCallPromptCacheTests {
     func theToolTurnWritesTheToolCallOfAColdTurn(placement: Placement, target: Target)
         async throws
     {
-        let turns = try await Self.turns(placement, target)
+        Self.expectWarmTurnWroteTheColdTurn(try await Self.turns(placement, target))
+    }
 
-        #expect(!turns.cold.sink.sampledTokenIDs.isEmpty)
-        #expect(turns.warm.turn.reasoningText == turns.cold.turn.reasoningText)
-        #expect(turns.warm.sink.sampledTokenIDs == turns.cold.sink.sampledTokenIDs)
-        #expect(turns.warm.turn.toolCalls == turns.cold.turn.toolCalls)
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(arguments: Placement.allCases, Target.allCases)
+    func theGrammarPhaseAfterASpliceFeedsNoMoreThanTheReasoning(
+        placement: Placement, target: Target
+    ) async throws {
+        try Self.expectGrammarPhaseFedNoMoreThanTheReasoning(
+            try await Self.turns(placement, target, .spliced))
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(arguments: Placement.allCases, Target.allCases)
+    func aSplicedToolTurnWritesTheToolCallOfAColdTurn(placement: Placement, target: Target)
+        async throws
+    {
+        Self.expectWarmTurnWroteTheColdTurn(try await Self.turns(placement, target, .spliced))
     }
 }
 

@@ -445,7 +445,10 @@ extension MLXLanguageModel.Executor {
     /// session and checks its own ledger in, as a plain pass does (see
     /// ``runToolCallReasoningPhase(input:checkpointBoundaries:config:primedInside:maxTokens:requestedTemperature:samplingConfiguration:reasoningEntryID:responseEntryID:promptCache:speculation:context:channel:)``).
     /// The prompt of the grammar phase is the prompt of the reasoning phase
-    /// and its reasoning, which that ledger holds whole: the slot takes caches
+    /// and its reasoning -- the tokens the model wrote in the place of the
+    /// render when the plan of the reasoning phase spliced past a committed
+    /// turn (``grammarPhasePrompt(continuing:opener:reasoning:splicedPrompt:checkpointBoundaries:)``)
+    /// -- which that ledger holds whole: the slot takes caches
     /// that rewind back to the last reasoning token
     /// (``ExecutorPromptCacheSlot/rewindLedger(toFeedLastTokenOf:)``), and
     /// the plan of a model whose caches cannot rewind goes back to the
@@ -531,6 +534,7 @@ extension MLXLanguageModel.Executor {
         // that frame; phase 2 continues from the opener and the reasoning.
         var reasoningTokenIDs: [Int] = []
         var openerTokenIDs: [Int] = []
+        var splicedPrompt: ExecutorSplicedPrompt?
         var reasoningPromptUsage: LanguageModelExecutorGenerationChannel.Usage.Input?
         if let thinkThenCallConfig {
             openerTokenIDs = frame.reasoningOpenerMarkers.flatMap {
@@ -556,6 +560,7 @@ extension MLXLanguageModel.Executor {
                 speculation: speculation,
                 context: context, channel: channel)
             reasoningTokenIDs = phase1.tokenIDs
+            splicedPrompt = phase1.splicedPrompt
             if !phase1.closed {
                 // Cut off mid-thought (budget exhausted before
                 // `</think>`). Don't prefill a truncated thought
@@ -574,11 +579,13 @@ extension MLXLanguageModel.Executor {
         // Phase 2 continues from the model's completed reasoning;
         // carry the raw IDs (no decode/re-encode) so the grammar
         // starts from the exact post-`</think>` state.
-        let phase2Input =
+        let phase2Prompt =
             reasoningTokenIDs.isEmpty
-            ? toolAwareInput
-            : Self.continuationInput(
-                from: toolAwareInput, appending: openerTokenIDs + reasoningTokenIDs)
+            ? (input: toolAwareInput, checkpointBoundaries: checkpointBoundaries)
+            : Self.grammarPhasePrompt(
+                continuing: toolAwareInput, opener: openerTokenIDs, reasoning: reasoningTokenIDs,
+                splicedPrompt: splicedPrompt, checkpointBoundaries: checkpointBoundaries)
+        let phase2Input = phase2Prompt.input
         if !reasoningTokenIDs.isEmpty {
             promptCache.rewindLedger(toFeedLastTokenOf: phase2Input.text.tokens.asArray(Int.self))
         }
@@ -594,7 +601,8 @@ extension MLXLanguageModel.Executor {
 
         var outputBuffer = ""
         let pass = try Self.runGuidedLoop(
-            input: phase2Input, checkpointBoundaries: checkpointBoundaries, grammar: grammar,
+            input: phase2Input, checkpointBoundaries: phase2Prompt.checkpointBoundaries,
+            grammar: grammar,
             maxTokens: phase2MaxTokens, promptCache: promptCache, speculation: speculation,
             context: context
         ) { outputBuffer += $0 }
@@ -2031,15 +2039,60 @@ extension MLXLanguageModel.Executor {
         from input: LMInput, appending tokenIDs: [Int]
     ) -> LMInput {
         let promptTokens = input.text.tokens
-        var appended = MLXArray(tokenIDs.map { Int32($0) })
-            .asType(promptTokens.dtype)
-        if promptTokens.ndim == LMInput.Text.batchedTokenRank {
-            appended = appended[.newAxis, 0...]
-        }
+        let appended = tokenArray(tokenIDs, shapedLike: promptTokens)
         return LMInput(
             text: .init(tokens: concatenated([promptTokens, appended], axis: -1)),
             image: input.image,
             video: input.video)
+    }
+
+    /// `tokenIDs` as a token array in the dtype and the rank of `promptTokens`: one row of a
+    /// batch for a prompt a VLM processor batched, and a plain vector otherwise.
+    ///
+    /// - Parameters:
+    ///   - tokenIDs: The token IDs.
+    ///   - promptTokens: The prompt tokens whose dtype and rank the array takes.
+    /// - Returns: The token array.
+    static func tokenArray(_ tokenIDs: [Int], shapedLike promptTokens: MLXArray) -> MLXArray {
+        let tokens = MLXArray(tokenIDs.map { Int32($0) }).asType(promptTokens.dtype)
+        return promptTokens.ndim == LMInput.Text.batchedTokenRank ? tokens[.newAxis, 0...] : tokens
+    }
+
+    /// The prompt of the grammar phase of a required tool turn after its reasoning phase, and
+    /// the checkpoint boundaries of that prompt.
+    ///
+    /// The grammar phase continues the caches the reasoning phase left: its prompt is the
+    /// prompt of the reasoning phase and the reasoning. A reasoning phase whose plan spliced
+    /// past a committed turn left caches that hold the tokens the model wrote, not the render,
+    /// thus the prompt then holds those tokens, and the grammar phase reads what the reasoning
+    /// phase read. Its boundaries move onto those tokens
+    /// (``ExecutorSplicedPrompt/representing(_:)``). A splice comes from a plan, which a prompt
+    /// with media never has, thus such a prompt keeps the render.
+    ///
+    /// - Parameters:
+    ///   - input: The tool-aware prompt of the turn.
+    ///   - openerTokenIDs: The opener of the frame, which the prompt of the reasoning phase
+    ///     appends to `input`. The tokens a splice represents hold it already.
+    ///   - reasoningTokenIDs: The reasoning the reasoning phase wrote.
+    ///   - splicedPrompt: The splice of the plan of the reasoning phase, or nil.
+    ///   - checkpointBoundaries: The checkpoint boundaries of `input`.
+    /// - Returns: The prompt of the grammar phase, and its checkpoint boundaries.
+    static func grammarPhasePrompt(
+        continuing input: LMInput, opener openerTokenIDs: [Int], reasoning reasoningTokenIDs: [Int],
+        splicedPrompt: ExecutorSplicedPrompt?, checkpointBoundaries: ExecutorCheckpointBoundaries
+    ) -> (input: LMInput, checkpointBoundaries: ExecutorCheckpointBoundaries) {
+        guard let splicedPrompt else {
+            return (
+                continuationInput(from: input, appending: openerTokenIDs + reasoningTokenIDs),
+                checkpointBoundaries
+            )
+        }
+        let tokens = tokenArray(
+            splicedPrompt.representedTokens + reasoningTokenIDs, shapedLike: input.text.tokens)
+        return (
+            LMInput(text: .init(tokens: tokens)),
+            splicedPrompt.representing(checkpointBoundaries)
+        )
     }
 
     static func reasoningPrimedInside(
@@ -2063,6 +2116,10 @@ extension MLXLanguageModel.Executor {
         /// prompt cache served, and after the tokens the phase fed before its generation to take
         /// a checkpoint (``ExecutorPromptCacheSlot/prefilledTokenCount``).
         let fedTokenCount: Int
+
+        /// The splice of the plan of the phase, or nil when its caches represent its prompt
+        /// as rendered or the phase carried no cache (a prompt with media).
+        let splicedPrompt: ExecutorSplicedPrompt?
     }
 
     /// Think-then-call Phase 1: generate reasoning unconstrained until
@@ -2172,7 +2229,8 @@ extension MLXLanguageModel.Executor {
         return ToolCallReasoningPhaseOutcome(
             tokenIDs: collector.reasoningTokenIDs, closed: passStop.hasStopped,
             fedTokenCount: completionInfo?.promptTokenCount
-                ?? (plan?.input ?? input).text.tokens.size)
+                ?? (plan?.input ?? input).text.tokens.size,
+            splicedPrompt: plan?.splicedPrompt)
     }
 
     /// Parses a required-mode tool call in the frame of the turn and emits
