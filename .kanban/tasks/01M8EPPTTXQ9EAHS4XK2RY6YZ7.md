@@ -78,8 +78,24 @@ comments:
     - evidence: swift build --build-tests clean (0 source warnings); swift-format lint on the 3 changed files clean; xcrun xctest per bundle: MLXLMTests 2844 tests/281 suites passed (3 known issues, pre-existing, untouched files: AttentionKernelToleranceTests.aNearTieRejectsATokenOutsideTheTwoBest = intentional negative check; ToolTests MiniCPM5 CDATA close tag = existing withKnownIssue); MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 654 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed. 0 failures, 0 skipped.
     - next: review/commit
   timestamp: 2026-11-28T01:06:06.607357+00:00
-position_column: doing
-position_ordinal: '80'
+- actor: claude-code
+  id: 01m8fv2g4fhafss7yggr7hc0pw
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (72e6cd60): 0 findings (7 attempted, 0 failed); 3 prior findings all checked
+    - next: task moved to done
+  timestamp: 2026-11-28T01:07:19.823218+00:00
+- actor: claude-code
+  id: 01m8fv2tam6ze76e20abhe60z0
+  text: |-
+    ### finish iteration 2 — clean
+    - implement: changed — 3 files, all 3 findings checked
+    - test: green — all 5 bundles (MLXLMTests 2844, MLXFoundationModelsTests 654, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: 72e6cd60
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T01:07:30.260900+00:00
+position_column: done
+position_ordinal: ffffff8b80
 title: 'Clustered models: support a quantized KV cache (kvBits 8/4) on the workers'
 ---
 ## What
