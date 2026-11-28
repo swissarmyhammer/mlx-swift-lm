@@ -84,8 +84,11 @@ struct GuidedGenerationInklingMTPTests {
         var guidedTarget = try GuidedTarget(model: target, parameters: GenerateParameters())
         #expect(guidedTarget.drafterTargetLayerIds == nil)
 
-        #expect(
-            GuidedSpeculation.drafter(of: speculation, for: &guidedTarget) is Inkling2DraftModel)
+        var selected: (any GuidedMTPDrafter)?
+        if case .local(let local) = GuidedSpeculation.drafter(of: speculation, for: &guidedTarget) {
+            selected = local
+        }
+        #expect(selected is Inkling2DraftModel)
         #expect(guidedTarget.drafterTargetLayerIds == drafter.targetLayerIds)
         #expect(guidedTarget.drafterTargetLayerIds != nil)
     }

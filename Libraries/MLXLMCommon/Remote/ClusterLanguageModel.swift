@@ -300,6 +300,35 @@ public final class ClusterLanguageModel: Module, LanguageModel, SuppressedTokens
         }
     }
 
+    /// Runs one speculative round on the one remote cache of `cache`: see
+    /// ``RemoteModelOp/speculate(_:)``. A failed round keeps its failure on the model, cancels
+    /// the current task outside ``withoutCancellingOnFailure(_:)``, and throws the failure.
+    ///
+    /// - Parameters:
+    ///   - cache: The caches of ``newCache(parameters:)``.
+    ///   - token: The token the round starts from.
+    ///   - rejectedCount: The drafts of the round before that the target rejected.
+    ///   - draftLimit: The most drafts of the round.
+    ///   - minimumDraftProbability: The confidence floor of a chaining drafter.
+    /// - Returns: The drafts of rank 0 and the logits of each verified position, shape
+    ///   `[1, drafts + 1, vocabulary]`.
+    /// - Throws: ``ClusterModelError/foreignCache`` for caches this model did not make, or the
+    ///   failure the round kept, for example ``ClusterModelError/memberLost(_:)``.
+    package func speculate(
+        in cache: [KVCache], from token: Int32, rejectedCount: Int, draftLimit: Int,
+        minimumDraftProbability: Float
+    ) throws -> (drafts: [Int32], logits: MLXArray) {
+        guard
+            let round = speculate(
+                on: try remoteCache(of: cache), from: token, rejectedCount: rejectedCount,
+                draftLimit: draftLimit, minimumDraftProbability: minimumDraftProbability)
+        else {
+            try checkFailure()
+            preconditionFailure("A cluster round that failed keeps no failure")
+        }
+        return round
+    }
+
     /// Keeps `error` as the failure of the model, and cancels the current task, which ends its
     /// generation: an op of a forward pass cannot throw. Inside
     /// ``withoutCancellingOnFailure(_:)`` the task stays uncancelled, and the generation reads

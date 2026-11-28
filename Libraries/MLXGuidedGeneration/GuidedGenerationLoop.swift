@@ -19,8 +19,9 @@ import MLXLMCommon
 /// and can inject fast-forwarded tokens into both the output stream and the
 /// KV cache.
 ///
-/// With an MTP drafter the loop speculates (see `GuidedSpeculation`) and
-/// writes the output plain decoding writes.
+/// With an MTP drafter the loop speculates (see `GuidedSpeculation`, and
+/// `GuidedClusterSpeculation` for a cluster target) and writes the output plain
+/// decoding writes.
 public enum GuidedGenerationLoop {
 
     /// Runs the guided generation loop, yielding text deltas through `emit`.
@@ -125,11 +126,13 @@ public enum GuidedGenerationLoop {
     }
 
     /// Runs the guided generation loop, speculating with the MTP drafter of `speculation`
-    /// when the target can verify its rounds in place.
+    /// when the target can verify its rounds in place, or with the drafter rank 0 of a cluster
+    /// target holds.
     ///
-    /// The prefill feeds the drafter the hidden rows of each prompt chunk, so a new drafter
-    /// state covers the whole prompt; this loop keeps no prompt cache. The output is the output
-    /// of plain guided decoding: see ``GuidedSpeculation``. A drafter that cannot draft for the
+    /// The prefill feeds a drafter of this process the hidden rows of each prompt chunk, so a
+    /// new drafter state covers the whole prompt; this loop keeps no prompt cache. Rank 0 of a
+    /// cluster target feeds its drafter itself. The output is the output of plain guided
+    /// decoding: see ``GuidedSpeculation`` and ``GuidedClusterSpeculation``. A drafter that cannot draft for the
     /// target, or a target that cannot verify in place, leaves the generation to plain decoding,
     /// and the generation records why on its diagnostic sink, which the response metadata reads.
     ///
@@ -174,8 +177,9 @@ public enum GuidedGenerationLoop {
         var target = try GuidedTarget(model: context.model, parameters: parameters)
         let speculation = logitProcessor == nil && logitSampler == nil ? speculation : nil
         let drafter = GuidedSpeculation.drafter(of: speculation, for: &target)
-        let feed = drafter.flatMap { _ in
-            speculation?.prefillFeed(
+        var feed: MTPDrafterPrefillFeed?
+        if case .local = drafter {
+            feed = speculation?.prefillFeed(
                 target: context.model, parameters: parameters, cachePosition: 0,
                 continuation: nil)
         }
@@ -203,13 +207,20 @@ public enum GuidedGenerationLoop {
             defer { decoder.finalizeProcessor() }
             guard decoder.hasBudget, let first = try decoder.decide(from: prefilled.logits)
             else { return try decoder.finish() }
-            if let speculation, let drafter,
-                var speculating = GuidedSpeculation(
-                    speculation: speculation, drafter: drafter, feed: feed, prefill: prefilled,
-                    firstFeed: first, target: target)
-            {
-                try speculating.decode(from: first, decoder: &decoder, target: &target)
-            } else {
+            switch drafter {
+            case .cluster(var speculating):
+                try speculating.decode(from: first, decoder: &decoder, target: target)
+            case .local(let drafter):
+                if let speculation,
+                    var speculating = GuidedSpeculation(
+                        speculation: speculation, drafter: drafter, feed: feed,
+                        prefill: prefilled, firstFeed: first, target: target)
+                {
+                    try speculating.decode(from: first, decoder: &decoder, target: &target)
+                } else {
+                    try decodePlainly(from: first, decoder: &decoder, target: &target)
+                }
+            case nil:
                 try decodePlainly(from: first, decoder: &decoder, target: &target)
             }
             return try decoder.finish()

@@ -57,6 +57,88 @@ comments:
     - test/commit/review: not run
     - Blocker: A or B is a spec decision for the requester or the user. Asked foundationmodelsacpagent-a1 and foundationmodelsrouter-22; recommended B.
   timestamp: 2026-11-28T03:20:42.911252+00:00
+- actor: claude-code
+  id: 01m8g2qeap1g1y53es8ycka59r
+  text: |-
+    ### Decision: Option B (2026-11-27)
+    foundationmodelsacpagent-a1 and foundationmodelsrouter-22 both chose B. This replaces the description's "RemoteMTPDrafter conforms to ResumableMTPDrafterModel and StatefulMTPDistributionDrafterModel".
+
+    **Approach**
+    - On a cluster target, the guided loop uses the existing `speculate` op unchanged. There is no protocol change (version stays 5), and nothing changes on the plain path or in FoundationModelsCluster.
+    - Rank 0 drafts without the grammar mask. The host accepts drafts by walking the grammar along the verified tokens, and a rejected draft is folded into the next round.
+    - Output must equal plain guided decoding exactly.
+
+    **Rejected: the low-acceptance guard.** foundationmodelsacpagent-a1 also asked for a runtime guard: switch to plain decoding when acceptance falls below break-even, with fallback `lowAcceptance`. The user rejected adaptive MTP guards on 2026-10-30 ("I don't want that guard at all"), so it is not built. If acceptance is low, the fix is a cheaper round.
+
+    **Tests (TDD)**
+    - A guided schema turn on a clustered model with a drafter speculates (draft count > 0), and its output equals plain guided decoding on the cluster and on one Mac.
+    - Acceptance counts are reported, and `speculated=true` is recorded.
+    - Every rank's cache offset equals the ledger.
+    - A second turn reuses the cache.
+    - kvBits 8 works.
+    - A lost member throws `memberLost` in under 10 s.
+
+    **Measure on m5u1+m5u2 with the bench selection shape**
+    - Inkling oQ4e mtp target, a prompt of about 8k tokens, the Selection JSON schema.
+    - Report acceptance and tok/s (decode and end-to-end) against plain guided decoding on the cluster.
+  timestamp: 2026-11-28T03:21:06.134429+00:00
+- actor: claude-code
+  id: 01m8g307tpn0t58wtg93kreemn
+  text: |-
+    Picked up for Option B. Research notes:
+    - The guided loop keeps no prompt cache (runSchemaGeneration calls `promptCache.carriesNoCache()`), so "cache offsets equal ledger" means the worker cache (every rank) ends at prompt + fed tokens, as plain guided leaves it; "second turn reuses the cache" is checked as a plain session after a speculative schema turn.
+    - Walk design: the host keeps a queue of known-next tokens (the decision's token + its forced tokens). Each round pops the queue head as the `speculate` round token. Each draft is accepted while it equals the queue head; when the queue empties, the host decides the next token from the verify row (the same `decoder.advance()` + `decoder.decide` as plain decoding). So no grammar matcher rollback is needed: every decision is plain guided decoding's decision, read from a verify row. Rejected drafts fold into the next round's `rejectedCount`; the last round's rejects are trimmed at the end.
+    - A forced suffix the drafts missed is fed as the round token of the next round(s), so a round always moves at least one token: worst case one round trip per token, the cost of plain decoding.
+    - `InProcessRemoteModelWorker.failForwards` counts `.forward` ops only, so a loss during speculative rounds needs a round-counting fault in the test worker.
+    - ClusterLanguageModel.speculate / remoteCache(of:) are internal to MLXLMCommon; MLXGuidedGeneration needs a `package` entry.
+  timestamp: 2026-11-28T03:25:54.390016+00:00
+- actor: claude-code
+  id: 01m8g4babrmmenpk7fp201vatd
+  text: |-
+    Option B implemented (not committed). On a cluster target the guided loop runs the existing `speculate` op unchanged: protocol stays v5, and the worker, FoundationModelsCluster, the plain cluster MTP path and plain decoding are unchanged.
+
+    Code:
+    - New `Libraries/MLXGuidedGeneration/GuidedClusterSpeculation.swift`. Each round is one `speculate` from the head of the queue of known tokens. A draft is kept while it equals the token plain guided decoding feeds there. When the queue empties, the host decides from that draft's verify row with the same `decoder.advance()` + `decode(...)` calls as `decodePlainly`, so no matcher rollback is needed. Rejects go into the next round's `rejectedCount`, and the last round's rejects are trimmed at the end.
+    - `GuidedSpeculation.drafter(of:for:)` now returns `GuidedDrafter` (`.local` or `.cluster`). A `RemoteMTPDrafter` on its own `ClusterLanguageModel` selects `.cluster`. A local drafter that is not guided still reports `.unsupportedGuidance`.
+    - `GuidedTarget.speculate(on:...)` commits the ledger the way `ClusterMTPTokenIterator` does, then runs `plan.apply` after each round (^2ry6yz7 quantize-after-round). `GuidedTarget.trimSpeculated` trims and then runs `checkFailure`.
+    - `ClusterLanguageModel.speculate(in:...)` is a `package` throwing wrapper. A failed round keeps its failure, and the loop throws it in that same round (^axrb0cw, inside `withoutCancellingOnFailure`).
+    - No runtime guard and no lowAcceptance fallback.
+
+    Tests:
+    - New `GuidedGenerationClusterMTPTests` (loop level, 1 follower rank). Every schema speculates, and its accepted count is > 0. Output, token count and decision records equal plain guided on the cluster (both drafter modes) and on one Mac. Every rank's offset equals what plain guided leaves (checked by mutation: without the final trim, both cases fail). kvBits 8 speculates and equals plain.
+    - `ClusterExecutorTests`: the unsupportedGuidance and fallback-detail tests flip to a schema turn that speculates (speculativeDecoding=true), metadata drafted/accepted equal to the sink's counts, schema output equal to the local response, and a follow-up plain turn after a speculative schema turn reusing the prompt cache (cachedPromptTokenCount > 0). A loss in a speculative round (new `InProcessRemoteModelWorker.failRounds`) throws memberLost in under 10 s.
+    - `InProcessRemoteModelWorker` gains `rankStatuses(of:)` and `failRounds(after:with:)`. `GuidedFixtureRun.generate` gains `kvCache`.
+
+    Real 2-Mac measurement (m5u1+m5u2, Inkling-2-Mini-oQ4e-mtp, MTP configured, policy .always, worker built at FoundationModelsCluster da091cc, v5):
+    - Harness: a scratchpad package `guided-bench` with the SelectionTier shape: 7,833-token instructions of `<candidate>` blocks plus a 794-token prompt (about 8.6k tokens), `@Generable Selection { ids: [String] }`, greedy. Calls ran through `LanguageModelSession.streamResponse`; 10 timed calls followed 1 warm-up.
+    - Baseline: the same harness built against stable HEAD 448e8643 (guided falls back with `unsupportedGuidance` and decodes plainly), run before and after B.
+    - Outputs: 16–41 tokens per call. ids and token counts are identical in all three runs (md5 of per-call ids and counts equal).
+
+    | | e2e mean | decode tok/s | drafts accepted |
+    |---|---|---|---|
+    | plain guided (HEAD), run 1 | 3.451 s | 91.4 | none drafted |
+    | plain guided (HEAD), run 2 | 3.440 s | 92.4 | none drafted |
+    | guided with B | 3.292 s | 155.8 | 177 of 190 (93.2%) |
+
+    - Decode is 1.70x faster with B. End to end is 4.6% faster, because the ~3.12 s prefill of the 8.6k prompt dominates these short outputs.
+    - Per call, B decodes at 145–171 tok/s and plain at 84–112 tok/s.
+  timestamp: 2026-11-28T03:49:26.008284+00:00
+- actor: claude-code
+  id: 01m8g4bky4yp42rfc076araky7
+  text: |-
+    ### implement — changed
+    - evidence: new Libraries/MLXGuidedGeneration/GuidedClusterSpeculation.swift; changed GuidedSpeculation.swift, GuidedGenerationLoop.swift, GuidedTarget.swift, MLXLMCommon/Remote/ClusterLanguageModel.swift; tests: new Tests/MLXFoundationModelsTests/GuidedGenerationClusterMTPTests.swift, changed ClusterExecutorTests.swift, GuidedGenerationInklingMTPTests.swift, GuidedGenerationMTPTestSupport.swift, MLXLMTestSupport/InProcessRemoteModelWorker.swift. All five bundles ran in full with `xcrun xctest` and 0 failures: MLXLMTests 1261 XCTest + 2845 Swift Testing (3 known issues, pre-existing withKnownIssue), MLXFoundationModelsTests 672, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11. FoundationModels + GuidedGeneration were re-run after the final edit: green. swift-format run. Real 2-Mac: guided with B decodes at 155.8 tok/s vs plain guided at 91.4/92.4 (1.70x), 93.2% of drafts accepted (177/190), e2e 3.292 s vs 3.451/3.440 s (-4.6%), and the outputs are identical.
+    - next: /review. Not committed.
+  timestamp: 2026-11-28T03:49:35.812595+00:00
+- actor: claude-code
+  id: 01m8g4wmdfymcyh9hqg4h4bd6h
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (0 source warnings). xcrun xctest per bundle, all exit 0: MLXLMTests 1261 XCTest + 2845 Swift Testing, 0 failures; MLXGuidedGenerationTests 96 ST; MLXFoundationModelsTests 672 ST (GuidedGenerationClusterMTPTests passed); CXGrammarTests 7 ST; MLXHuggingFaceMacrosTests 11 XCTest. 0 skipped. swift-format lint on changed files clean.
+    - note: MLXLMTests reports 3 known issues, all deliberate withKnownIssue in untouched files (ToolTests MiniCPM5 CDATA, AttentionKernelToleranceTests near-tie); pre-existing.
+    - next: review/commit
+    - task: ^9mvg23k
+  timestamp: 2026-11-28T03:58:53.359828+00:00
 depends_on:
 - 01M8FZZ0C8R7PYY6JH0ARXS2A5
 position_column: doing

@@ -289,12 +289,12 @@ struct ClusterExecutorTests {
         #expect(detail?.contains("holds no MTP drafter") == true, "\(detail ?? "no detail")")
     }
 
-    /// A schema turn, then a plain turn, of one clustered model whose rank 0 holds the drafter
-    /// of the fixture. The drafter of rank 0 drafts for the target, but not through a grammar
-    /// mask.
+    /// A schema turn, then a session of a prompt and a follow-up, of one clustered model whose
+    /// rank 0 holds the drafter of the fixture. The schema pass speculates with the drafter of
+    /// rank 0, which drafts without the grammar mask.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private static func schemaThenPlainTurns(weights: URL) async throws -> (
-        schema: GuidedTurn, plain: MTPTurn
+        schema: GuidedTurn, plain: [MTPTurn]
     ) {
         let tokenizer = ToolCallAlphabetTokenizer()
         let (model, _) = try Qwen35MTPFixture().makeClusteredLanguageModel(
@@ -302,37 +302,60 @@ struct ClusterExecutorTests {
             speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding(), drafting: true)
         let schema = try await respondGuided(to: schemaRequest(tokenizer: tokenizer), model: model)
         let plain = try await respond(
-            model, to: [tokenizer.decode(tokenIds: prompt, skipSpecialTokens: false)])
-        return (schema, plain[0])
+            model,
+            to: [prompt, followUp].map {
+                tokenizer.decode(tokenIds: $0, skipSpecialTokens: false)
+            })
+        return (schema, plain)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
-    func aSchemaTurnOfAClusteredModelWithADrafterReportsUnsupportedGuidance() async throws {
+    func aSchemaTurnOfAClusteredModelWithADrafterSpeculates() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
 
         let turns = try await Self.schemaThenPlainTurns(weights: weights)
 
         #expect(
-            turns.schema.turn.metadata[SpeculativeDecodingOutcome.MetadataKey.fallbackReason]
-                as? String == "unsupportedGuidance")
+            turns.schema.turn.metadata[SpeculativeDecodingOutcome.MetadataKey.speculativeDecoding]
+                as? Bool == true)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
-    func aSchemaTurnOfAClusteredModelWithADrafterStatesWhyInItsMetadata() async throws {
+    func aSchemaTurnOfAClusteredModelWithADrafterReportsTheDraftsOfItsRounds() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
 
         let turns = try await Self.schemaThenPlainTurns(weights: weights)
 
-        let detail =
-            turns.schema.turn.metadata[SpeculativeDecodingOutcome.MetadataKey.fallbackDetail]
-            as? String
+        let metadata = turns.schema.turn.metadata
+        #expect(turns.schema.draftedTokenCount > 0)
         #expect(
-            detail?.contains("RemoteMTPDrafter cannot draft through a grammar mask") == true,
-            "\(detail ?? "no detail")")
+            metadata[SpeculativeDecodingOutcome.MetadataKey.draftedTokenCount] as? Int
+                == turns.schema.draftedTokenCount)
+        #expect(
+            metadata[SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount] as? Int
+                == turns.schema.acceptedDraftTokenCount)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSchemaTurnOfAClusteredModelWithADrafterWritesTheLocalResponse() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let tokenizer = ToolCallAlphabetTokenizer()
+        let local = try Qwen35MTPFixture().makeLanguageModel(
+            weights: weights, capabilities: [.guidedGeneration], tokenizer: tokenizer)
+
+        let turns = try await Self.schemaThenPlainTurns(weights: weights)
+        let plain = try await Self.respondGuided(
+            to: Self.schemaRequest(tokenizer: tokenizer), model: local)
+
+        #expect(!plain.turn.responseText.isEmpty)
+        #expect(turns.schema.sampledTokens == plain.sampledTokens)
+        #expect(turns.schema.turn.responseText == plain.turn.responseText)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -343,7 +366,21 @@ struct ClusterExecutorTests {
 
         let turns = try await Self.schemaThenPlainTurns(weights: weights)
 
-        #expect(turns.plain.speculated)
+        #expect(turns.plain[0].speculated)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aFollowUpAfterASpeculativeSchemaTurnOfAClusteredModelReusesThePromptCache() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let turns = try await Self.schemaThenPlainTurns(weights: weights)
+
+        #expect(
+            turns.schema.turn.metadata[SpeculativeDecodingOutcome.MetadataKey.speculativeDecoding]
+                as? Bool == true)
+        #expect((turns.plain[1].usage.first?.cachedPromptTokenCount ?? 0) > 0)
     }
 
     /// The forwards a worker runs before it loses a member: the prompt and a few decode steps,
@@ -444,6 +481,29 @@ struct ClusterExecutorTests {
         return GuidedLoss(failure: turn.turn.failure, elapsed: clock.now - start)
     }
 
+    /// The rounds a worker runs before it loses a member in a speculative schema turn: a few,
+    /// thus the loss strikes in the middle of the answer.
+    private static let roundsBeforeLoss = 2
+
+    /// Runs the schema request on a clustered model whose rank 0 holds the drafter of the
+    /// fixture, whose worker loses ``lostMember`` after ``roundsBeforeLoss`` speculative rounds,
+    /// and times the pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func respondSpeculativelyLosingAMember(weights: URL) async throws
+        -> GuidedLoss
+    {
+        let tokenizer = ToolCallAlphabetTokenizer()
+        let (model, worker) = try Qwen35MTPFixture().makeClusteredLanguageModel(
+            weights: weights, capabilities: [.guidedGeneration], tokenizer: tokenizer,
+            speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding(), drafting: true)
+        worker.failRounds(
+            after: roundsBeforeLoss, with: InProcessMemberLoss(lostMember: lostMember))
+        let clock = ContinuousClock()
+        let start = clock.now
+        let turn = try await respondGuided(to: schemaRequest(tokenizer: tokenizer), model: model)
+        return GuidedLoss(failure: turn.turn.failure, elapsed: clock.now - start)
+    }
+
     /// The failure a pass that lost ``lostMember`` reports: the loss itself, unwrapped.
     private static let lossFailure = String(describing: ClusterModelError.memberLost(lostMember))
 
@@ -464,6 +524,29 @@ struct ClusterExecutorTests {
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
+    func aSpeculativeSchemaTurnWhoseRoundLosesAMemberThrowsTheLoss() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let loss = try await Self.respondSpeculativelyLosingAMember(weights: weights)
+
+        #expect(loss.failure == Self.lossFailure)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSpeculativeSchemaTurnWhoseRoundLosesAMemberThrowsPromptly() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let loss = try await Self.respondSpeculativelyLosingAMember(weights: weights)
+
+        #expect(loss.failure != nil)
+        #expect(loss.elapsed < Self.guidedLossDeadline)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
     func aRequiredToolTurnWhoseForwardLosesAMemberThrowsTheLossPromptly() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
@@ -477,11 +560,14 @@ struct ClusterExecutorTests {
         #expect(loss.elapsed < Self.guidedLossDeadline)
     }
 
-    /// What one guided pass streamed, and the tokens its decoder sampled.
+    /// What one guided pass streamed, the tokens its decoder sampled, and the drafts its MTP
+    /// rounds proposed and kept.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private struct GuidedTurn {
         let turn: MTPTurn
         let sampledTokens: [Int]
+        let draftedTokenCount: Int
+        let acceptedDraftTokenCount: Int
     }
 
     /// Runs `request` on `model` with a diagnostic sink bound.
@@ -493,7 +579,10 @@ struct ClusterExecutorTests {
         let turn = try await GuidedGenerationDiagnosticSink.$current.withValue(sink) {
             try await MTPExecutorTurns.respond(to: request, model: model)
         }
-        return GuidedTurn(turn: turn, sampledTokens: sink.sampledTokenIDs)
+        return GuidedTurn(
+            turn: turn, sampledTokens: sink.sampledTokenIDs,
+            draftedTokenCount: sink.draftedTokenCount,
+            acceptedDraftTokenCount: sink.acceptedDraftTokenCount)
     }
 
     /// A greedy request of ``prompt`` that requires a call of a `lookup` tool, as `tokenizer`

@@ -9,6 +9,19 @@ import MLXLMCommon
 /// such drafters.
 typealias GuidedMTPDrafter = ResumableMTPDrafterModel & StatefulMTPDistributionDrafterModel
 
+/// How a guided generation speculates: with a drafter of this process, or with the drafter rank 0
+/// of a cluster target holds.
+enum GuidedDrafter {
+
+    /// A drafter of this process, which drafts through the grammar mask: see
+    /// ``GuidedSpeculation``.
+    case local(any GuidedMTPDrafter)
+
+    /// The drafter rank 0 of a ``ClusterLanguageModel`` target holds, which drafts without the
+    /// grammar mask: see ``GuidedClusterSpeculation``.
+    case cluster(GuidedClusterSpeculation)
+}
+
 /// MTP speculation of one guided generation.
 ///
 /// Each round drafts after a decided token. Every draft step's logits take the mask and the
@@ -71,13 +84,15 @@ struct GuidedSpeculation {
 
     /// The drafter of `speculation`, when guided generation can speculate with it on `target`.
     ///
-    /// A drafter that cannot draft for the target, a drafter that drafts for the target but not
-    /// under a grammar (``SpeculativeDecodingFallbackReason/unsupportedGuidance``), or a target
-    /// that cannot verify in place, is logged once and recorded on the diagnostic sink with its
-    /// stated reason.
+    /// The drafter rank 0 of a ``ClusterLanguageModel`` target holds speculates over the
+    /// rounds of the worker (``GuidedClusterSpeculation``). A drafter that cannot draft for the
+    /// target, a drafter of this process that drafts for the target but not under a grammar
+    /// (``SpeculativeDecodingFallbackReason/unsupportedGuidance``), or a target that cannot
+    /// verify in place, is logged once and recorded on the diagnostic sink with its stated
+    /// reason.
     ///
-    /// A selected drafter is set on `target`, so that each of its forwards that asks for
-    /// drafter state emits the hidden states the drafter reads.
+    /// A selected drafter of this process is set on `target`, so that each of its forwards that
+    /// asks for drafter state emits the hidden states the drafter reads.
     ///
     /// - Parameters:
     ///   - speculation: The speculation of the generation, or `nil`.
@@ -85,13 +100,19 @@ struct GuidedSpeculation {
     /// - Returns: The drafter, or `nil` for plain decoding.
     static func drafter(
         of speculation: MTPSpeculation?, for target: inout GuidedTarget
-    ) -> (any GuidedMTPDrafter)? {
+    ) -> GuidedDrafter? {
         guard let speculation else { return nil }
         if let fallback = MTPDrafterFallback.incompatibility(
             of: speculation.drafter, with: target.model)
         {
             report(fallback)
             return nil
+        }
+        if let remote = speculation.drafter as? RemoteMTPDrafter,
+            let cluster = target.model as? ClusterLanguageModel
+        {
+            return .cluster(
+                GuidedClusterSpeculation(speculation: speculation, drafter: remote, model: cluster))
         }
         guard let drafter = speculation.drafter as? any GuidedMTPDrafter,
             !drafter.requiresSharedTargetKV
@@ -110,7 +131,7 @@ struct GuidedSpeculation {
             return nil
         }
         target.draft(with: drafter)
-        return drafter
+        return .local(drafter)
     }
 
     /// Reports why a generation decodes without speculation: the generation records the fallback

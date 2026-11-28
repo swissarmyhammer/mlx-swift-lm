@@ -206,6 +206,7 @@ struct GuidedFixtureRun {
     ///   - target: The model that decodes in place of the fixture's target, or `nil` for the
     ///     fixture's target.
     ///   - tokenBudget: The token budget of the generation.
+    ///   - kvCache: The KV-cache configuration of the generation, or `nil` for full precision.
     ///   - sink: The sink the generation records on.
     ///   - bufferPoolClearing: The cadence that clears the MLX pool as tokens are emitted.
     ///   - prefill: The prompt prefill parameters.
@@ -215,7 +216,7 @@ struct GuidedFixtureRun {
     static func generate(
         schema: String, prompt: [Int], fixture: Qwen35MTPFixture, blockSize: Int?,
         drafter: (any MTPDrafterModel)? = nil, target: (any MLXLMCommon.LanguageModel)? = nil,
-        tokenBudget: Int = maxTokens,
+        tokenBudget: Int = maxTokens, kvCache: KVCacheConfiguration? = nil,
         sink: GuidedGenerationDiagnosticSink = GuidedGenerationDiagnosticSink(),
         bufferPoolClearing: GenerationBufferPoolClearing = GenerationBufferPoolClearing(),
         prefill: PrefillParameters = .init(),
@@ -243,7 +244,8 @@ struct GuidedFixtureRun {
                         text: .init(tokens: image == nil ? promptTokens : promptTokens[.newAxis]),
                         image: image),
                     context: context, constraint: grammar.constraint, maxTokens: tokenBudget,
-                    vocabSize: grammar.vocabSize, completionReserve: completionReserve,
+                    vocabSize: grammar.vocabSize, kvCache: kvCache,
+                    completionReserve: completionReserve,
                     hardReserve: hardReserve, closingBias: grammar.closingBias,
                     whitespaceBias: grammar.whitespaceBias,
                     whitespaceTokenIDs: grammar.whitespaceTokenIDs,

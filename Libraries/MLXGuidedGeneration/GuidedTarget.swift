@@ -188,6 +188,58 @@ struct GuidedTarget {
         cacheStorage.plan.apply(to: cacheStorage)
     }
 
+    /// Runs one speculative round of `model`, the cluster target, on its cache: every rank
+    /// rewinds the `rejectedCount` drafts of the round before, rank 0 drafts after `token`
+    /// without the grammar mask, and one forward verifies `token` and the drafts.
+    ///
+    /// The timeline drops the rewound drafts and takes the verified tokens, which the caches of
+    /// every rank then hold, and the caches convert after the round as the cache plan asks.
+    ///
+    /// - Parameters:
+    ///   - model: The target, a cluster model whose rank 0 holds the drafter.
+    ///   - token: The token the round starts from, which no forward fed.
+    ///   - rejectedCount: The drafts of the round before that the generation did not keep.
+    ///   - draftLimit: The most drafts of the round.
+    ///   - minimumDraftProbability: The confidence floor of a chaining drafter.
+    /// - Returns: The drafts and the target logits of each verified position, shape
+    ///   `[1, drafts + 1, vocabulary]`.
+    /// - Throws: The failure the round kept, for example ``ClusterModelError/memberLost(_:)``.
+    func speculate(
+        on model: ClusterLanguageModel, from token: Int32, rejectedCount: Int, draftLimit: Int,
+        minimumDraftProbability: Float
+    ) throws -> (drafts: [Int32], logits: MLXArray) {
+        let round = try model.speculate(
+            in: cache, from: token, rejectedCount: rejectedCount, draftLimit: draftLimit,
+            minimumDraftProbability: minimumDraftProbability)
+        cacheStorage.commitDroppedTokens(rejectedCount)
+        cacheStorage.commitProcessedTokens(round.drafts.count + 1)
+        cacheStorage.plan.apply(to: cacheStorage)
+        return round
+    }
+
+    /// Trims the last `count` positions of a cluster target's cache, drafts the generation did
+    /// not keep, from the caches of every rank and from the timeline, so the cache holds the
+    /// prompt and each token a forward fed.
+    ///
+    /// - Parameter count: The positions to trim.
+    /// - Throws: The failure the trim kept, for example ``ClusterModelError/memberLost(_:)``.
+    func trimSpeculated(_ count: Int) throws {
+        guard count > 0 else { return }
+        // A cluster target makes one remote cache, whose trim the worker runs on every rank.
+        let trimmed = cache.first?.trim(count) ?? 0
+        try checkFailure()
+        cacheStorage.commitDroppedTokens(trimmed)
+        if trimmed != count {
+            assertionFailure("The worker trimmed \(trimmed) of \(count) speculated tokens")
+            Self.logger.error(
+                "The worker trimmed \(trimmed) of \(count) speculated tokens; the cache holds "
+                    + "positions no generated token names")
+        }
+    }
+
+    /// The logger of the target.
+    private static let logger = MLXLogger(label: "GuidedTarget")
+
     /// The most tokens one forward of the target's verify holds: its in-place rewind depth and
     /// the token at its head.
     var mostVerifiedTokens: Int {

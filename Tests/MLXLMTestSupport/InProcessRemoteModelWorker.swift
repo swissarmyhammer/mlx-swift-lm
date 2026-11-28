@@ -61,6 +61,9 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// The cache status each follower last reported for each handle, one map per follower.
     private var followerStatuses: [[RemoteCacheID: RemoteCacheStatus]]
 
+    /// The cache status rank 0 last reported for each handle.
+    private var leaderStatuses: [RemoteCacheID: RemoteCacheStatus] = [:]
+
     /// The failed replies of the followers, in order.
     private var followerFailureReasons: [String] = []
 
@@ -79,8 +82,12 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// The forwards the worker still runs before each forward fails, or nil for no limit.
     private var remainingForwards: Int?
 
-    /// The error each op throws after ``remainingSuccesses`` runs out, and each forward after
-    /// ``remainingForwards`` runs out.
+    /// The speculative rounds the worker still runs before each round fails, or nil for no
+    /// limit.
+    private var remainingRounds: Int?
+
+    /// The error each op throws after ``remainingSuccesses`` runs out, each forward after
+    /// ``remainingForwards`` runs out, and each round after ``remainingRounds`` runs out.
     private var fault: any Error = InProcessWorkerFault()
 
     /// The number of times the transport was closed.
@@ -127,6 +134,18 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     ///   for `cache` is missing.
     public func followerStatuses(of cache: RemoteCacheID) -> [RemoteCacheStatus] {
         lock.withLock { followerStatuses.compactMap { $0[cache] } }
+    }
+
+    /// The status every rank last reported for the caches of `cache`: rank 0 first, then each
+    /// follower.
+    ///
+    /// - Parameter cache: The handle of the caches.
+    /// - Returns: The statuses, in the order of the ranks; a rank that reported none for `cache`
+    ///   is missing.
+    public func rankStatuses(of cache: RemoteCacheID) -> [RemoteCacheStatus] {
+        lock.withLock {
+            [leaderStatuses[cache]].compactMap { $0 } + followerStatuses.compactMap { $0[cache] }
+        }
     }
 
     /// The reasons of the failed replies of the followers, in order.
@@ -179,21 +198,40 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         }
     }
 
+    /// Makes every speculative round after the next `count` rounds throw `fault`, as a member
+    /// lost in the middle of a speculative generation fails it. The other ops still succeed.
+    ///
+    /// - Parameters:
+    ///   - count: The rounds that still succeed.
+    ///   - fault: The error each later round throws.
+    public func failRounds(after count: Int, with fault: any Error = InProcessWorkerFault()) {
+        lock.withLock {
+            remainingRounds = count
+            self.fault = fault
+        }
+    }
+
     /// Runs `request` on the executor.
     ///
     /// - Parameter request: The request.
     /// - Returns: The reply.
     /// - Throws: The fault of ``failOps(after:with:)`` after its ops, the fault of
-    ///   ``failForwards(after:with:)`` after its forwards, or the error of the announce words.
+    ///   ``failForwards(after:with:)`` after its forwards, the fault of
+    ///   ``failRounds(after:with:)`` after its rounds, or the error of the announce words.
     public func send(_ request: RemoteModelRequest) throws -> RemoteModelReply {
         try lock.withLock {
             let announced = try RemoteOpAnnouncement.decode(RemoteOpAnnouncement.encode(request))
             received.append(announced)
             try spend(&remainingSuccesses)
-            if case .forward = announced.op {
-                try spend(&remainingForwards)
+            switch announced.op {
+            case .forward: try spend(&remainingForwards)
+            case .speculate: try spend(&remainingRounds)
+            default: break
             }
             let reply = try executor.handle(announced)
+            if let status = reply.reportedStatus {
+                leaderStatuses[announced.op.cache] = status
+            }
             try follow(RemoteOpAnnouncement.encode(announced))
             return reported(reply)
         }
@@ -206,13 +244,12 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// - Throws: The error of a follower's executor.
     private func follow(_ words: [Int32]) throws {
         for (index, follower) in followers.enumerated() {
-            switch try follower.apply(announcement: words) {
-            case .failed(let reason): followerFailureReasons.append(reason)
-            case .cache(let status), .trimmed(_, let status), .forwarded(let status, _),
-                .drafted(let status, _, _):
+            let reply = try follower.apply(announcement: words)
+            if case .failed(let reason) = reply {
+                followerFailureReasons.append(reason)
+            } else if let status = reply?.reportedStatus {
                 let cache = try RemoteOpAnnouncement.decode(words).op.cache
                 followerStatuses[index][cache] = status
-            case .capabilities, .done, nil: break
             }
         }
     }
@@ -251,6 +288,19 @@ private final class DraftWordsRelay: @unchecked Sendable {
 
     /// The words of the last exchange.
     var words: [Int32] = []
+}
+
+extension RemoteModelReply {
+
+    /// The cache status the reply reports, or nil for a reply that reports none.
+    fileprivate var reportedStatus: RemoteCacheStatus? {
+        switch self {
+        case .cache(let status), .trimmed(_, let status), .forwarded(let status, _),
+            .drafted(let status, _, _):
+            status
+        case .capabilities, .done, .failed: nil
+        }
+    }
 }
 
 extension RemoteModelOp {
