@@ -26,6 +26,8 @@ import Synchronization
 ///   round.
 /// - ``MetadataKey/fallbackReason``: the case name of the first fallback a pass of the call
 ///   reported, in the order the passes ran; absent when no pass fell back.
+/// - ``MetadataKey/fallbackDetail``: that first fallback in words; absent when no pass fell
+///   back, or when that fallback stated no reason.
 /// - ``MetadataKey/draftedTokenCount`` and ``MetadataKey/acceptedDraftTokenCount``: the sums
 ///   over every pass of the call.
 ///
@@ -47,6 +49,10 @@ final class SpeculativeDecodingOutcome: Sendable {
         /// reported: `String`.
         static let fallbackReason = "speculativeDecodingFallbackReason"
 
+        /// The fallback of ``fallbackReason`` in words: what cannot speculate, and why:
+        /// `String`. Absent when no pass fell back, or when the fallback stated no reason.
+        static let fallbackDetail = "speculativeDecodingFallbackDetail"
+
         /// The drafts of the call that the target accepted: `Int`.
         static let acceptedDraftTokenCount = "acceptedDraftTokenCount"
 
@@ -58,11 +64,21 @@ final class SpeculativeDecodingOutcome: Sendable {
     /// speculates.
     @TaskLocal static var current: SpeculativeDecodingOutcome?
 
+    /// One fallback a pass reported: its kind, and the fallback in words when the pass stated
+    /// it.
+    private struct Fallback: Sendable {
+        /// The kind of the fallback.
+        let reason: SpeculativeDecodingFallbackReason
+
+        /// The fallback in words, or `nil` when the pass stated no reason.
+        let detail: String?
+    }
+
     /// What the passes so far reported.
     private struct Tally {
         var draftedTokenCount = 0
         var acceptedDraftTokenCount = 0
-        var fallbackReason: SpeculativeDecodingFallbackReason?
+        var fallback: Fallback?
     }
 
     /// What one guided pass found on its sink.
@@ -75,7 +91,7 @@ final class SpeculativeDecodingOutcome: Sendable {
         init(of sink: GuidedGenerationDiagnosticSink) {
             draftedTokenCount = sink.draftedTokenCount
             acceptedDraftTokenCount = sink.acceptedDraftTokenCount
-            fallbackCount = sink.speculationFallbacks.count
+            fallbackCount = sink.speculationFallbackRecords.count
         }
     }
 
@@ -89,15 +105,20 @@ final class SpeculativeDecodingOutcome: Sendable {
         record(
             drafted: telemetry?.draftTokenCount ?? 0,
             accepted: telemetry?.acceptedDraftTokenCount ?? 0,
-            fallbackReason: info.speculativeDecodingFallbackReason)
+            fallback: info.speculativeDecodingFallbackReason.map {
+                Fallback(reason: $0, detail: info.passthroughReason)
+            })
     }
 
     /// Records a fallback of the whole call that no pass reports, such as a drafter the memory
     /// policy did not admit, which leaves every pass of the call to plain decode.
     ///
-    /// - Parameter fallbackReason: Why the call decodes plainly.
-    func record(fallbackReason: SpeculativeDecodingFallbackReason) {
-        record(drafted: 0, accepted: 0, fallbackReason: fallbackReason)
+    /// - Parameters:
+    ///   - fallbackReason: Why the call decodes plainly.
+    ///   - detail: The fallback in words.
+    func record(fallbackReason: SpeculativeDecodingFallbackReason, detail: String) {
+        record(
+            drafted: 0, accepted: 0, fallback: Fallback(reason: fallbackReason, detail: detail))
     }
 
     /// Runs one guided pass and records the MTP rounds and fallbacks it reported to its sink.
@@ -136,8 +157,9 @@ final class SpeculativeDecodingOutcome: Sendable {
             MetadataKey.draftedTokenCount: counts.draftedTokenCount,
             MetadataKey.acceptedDraftTokenCount: counts.acceptedDraftTokenCount,
         ]
-        if let fallbackReason = counts.fallbackReason {
-            metadata[MetadataKey.fallbackReason] = String(describing: fallbackReason)
+        if let fallback = counts.fallback {
+            metadata[MetadataKey.fallbackReason] = String(describing: fallback.reason)
+            metadata[MetadataKey.fallbackDetail] = fallback.detail
         }
         return metadata
     }
@@ -148,17 +170,17 @@ final class SpeculativeDecodingOutcome: Sendable {
         record(
             drafted: after.draftedTokenCount - before.draftedTokenCount,
             accepted: after.acceptedDraftTokenCount - before.acceptedDraftTokenCount,
-            fallbackReason: sink.speculationFallbacks.dropFirst(before.fallbackCount).first)
+            fallback: sink.speculationFallbackRecords.dropFirst(before.fallbackCount).first.map {
+                Fallback(reason: $0.reason, detail: $0.statedReason)
+            })
     }
 
-    /// Adds the counts of one pass, and keeps its fallback reason when it is the first one.
-    private func record(
-        drafted: Int, accepted: Int, fallbackReason: SpeculativeDecodingFallbackReason?
-    ) {
+    /// Adds the counts of one pass, and keeps its fallback when it is the first one.
+    private func record(drafted: Int, accepted: Int, fallback: Fallback?) {
         tally.withLock { tally in
             tally.draftedTokenCount += drafted
             tally.acceptedDraftTokenCount += accepted
-            tally.fallbackReason = tally.fallbackReason ?? fallbackReason
+            tally.fallback = tally.fallback ?? fallback
         }
     }
 }

@@ -30,6 +30,12 @@ public enum SpeculativeDecodingFallbackReason: Sendable, Equatable {
     /// The MTP drafter cannot draft for the session's model. Call
     /// ``MTPDrafterContainer/validateCompatibility(with:)`` to learn why.
     case incompatibleDrafter
+
+    /// The MTP drafter can draft for the session's model, but not under the grammar mask of a
+    /// guided generation: it cannot draft through a logit processor, it cannot resume from the
+    /// prompt chunks the prefill feeds it, or it reads the K/V the target shares. A plain
+    /// generation with the same drafter still speculates.
+    case unsupportedGuidance
 }
 
 private func defaultSpeculativeDecodingMemoryLimit() -> Int? {

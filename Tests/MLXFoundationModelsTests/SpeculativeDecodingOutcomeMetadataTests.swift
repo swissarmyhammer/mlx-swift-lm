@@ -52,12 +52,14 @@ struct SpeculativeDecodingOutcomeMetadataTests {
     private enum Key {
         static let speculativeDecoding = "speculativeDecoding"
         static let fallbackReason = "speculativeDecodingFallbackReason"
+        static let fallbackDetail = "speculativeDecodingFallbackDetail"
         static let acceptedDraftTokenCount = "acceptedDraftTokenCount"
         static let draftedTokenCount = "draftedTokenCount"
 
         /// Every key of the outcome.
         static let all: Set = [
-            speculativeDecoding, fallbackReason, acceptedDraftTokenCount, draftedTokenCount,
+            speculativeDecoding, fallbackReason, fallbackDetail, acceptedDraftTokenCount,
+            draftedTokenCount,
         ]
     }
 
@@ -66,6 +68,7 @@ struct SpeculativeDecodingOutcomeMetadataTests {
     private struct ReportedOutcome {
         var speculativeDecoding: Bool?
         var fallbackReason: String?
+        var fallbackDetail: String?
         var acceptedDraftTokenCount: Int?
         var draftedTokenCount: Int?
 
@@ -73,6 +76,7 @@ struct SpeculativeDecodingOutcomeMetadataTests {
         init(_ metadata: [String: GeneratedContent]) {
             speculativeDecoding = try? metadata[Key.speculativeDecoding]?.value(Bool.self)
             fallbackReason = try? metadata[Key.fallbackReason]?.value(String.self)
+            fallbackDetail = try? metadata[Key.fallbackDetail]?.value(String.self)
             acceptedDraftTokenCount = try? metadata[Key.acceptedDraftTokenCount]?.value(Int.self)
             draftedTokenCount = try? metadata[Key.draftedTokenCount]?.value(Int.self)
         }
@@ -81,6 +85,7 @@ struct SpeculativeDecodingOutcomeMetadataTests {
         init(_ metadata: [String: any ConvertibleToGeneratedContent & Sendable]) {
             speculativeDecoding = metadata[Key.speculativeDecoding] as? Bool
             fallbackReason = metadata[Key.fallbackReason] as? String
+            fallbackDetail = metadata[Key.fallbackDetail] as? String
             acceptedDraftTokenCount = metadata[Key.acceptedDraftTokenCount] as? Int
             draftedTokenCount = metadata[Key.draftedTokenCount] as? Int
         }
@@ -267,6 +272,24 @@ struct SpeculativeDecodingOutcomeMetadataTests {
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("a text turn whose drafter cannot draft for the target states why in its entry")
+    func anIncompatibleDrafterStatesWhy() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+        let fixture = try Qwen35MTPFixture()
+        let session = LanguageModelSession(
+            model: fixture.makeLanguageModel(
+                weights: weights,
+                speculativeDecoding: try Qwen35MTPFixture.makeIncompatibleSpeculativeDecoding()),
+            tools: [], instructions: nil)
+
+        let (_, metadata) = try await respond(session, to: Prompt(fixture.text(for: Self.prompt)))
+
+        let detail = ReportedOutcome(metadata).fallbackDetail
+        #expect(detail?.contains("cannot draft for the target") == true, "\(detail ?? "none")")
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test("a text turn of a model with no MTP drafter reports none of the MTP keys")
     func aModelWithoutADrafterReportsNoKeys() async throws {
         let weights = try makeScriptedWeightsDirectory()
@@ -384,6 +407,48 @@ struct SpeculativeDecodingOutcomeMetadataTests {
 
         #expect(turns.speculative.turn.failure == nil)
         expectIncompatibleFallback(ReportedOutcome(turns.speculative.turn.metadata))
+    }
+
+    /// A schema pass of a model whose drafter drafts for the target, but cannot draft through a
+    /// grammar mask.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func unguidedDrafterSchemaPass(weights: URL) async throws -> GuidedExecutorModels.Turn {
+        let models = try GuidedExecutorModels(
+            weights: weights, capabilities: [.guidedGeneration],
+            speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding(drafter: {
+                StatelessMTPDrafter()
+            }))
+        let request = makeExecutorRequest(
+            transcript: models.transcript(prompt: Self.prompt),
+            schema: FixtureLookupArguments.generationSchema,
+            generationOptions: GuidedExecutorModels.greedy)
+        return try await models.respond(to: request).speculative
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("a schema pass whose drafter cannot draft through a grammar reports unsupportedGuidance")
+    func aSchemaPassWithAnUnguidedDrafterReportsUnsupportedGuidance() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let pass = try await unguidedDrafterSchemaPass(weights: weights)
+
+        #expect(pass.turn.failure == nil)
+        expectNoDrafts(ReportedOutcome(pass.turn.metadata), fallbackReason: "unsupportedGuidance")
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("a schema pass whose drafter cannot draft through a grammar states why")
+    func aSchemaPassWithAnUnguidedDrafterStatesWhy() async throws {
+        let weights = try makeScriptedWeightsDirectory()
+        defer { try? FileManager.default.removeItem(at: weights) }
+
+        let pass = try await unguidedDrafterSchemaPass(weights: weights)
+
+        let detail = ReportedOutcome(pass.turn.metadata).fallbackDetail
+        #expect(
+            detail?.contains("StatelessMTPDrafter cannot draft through a grammar mask") == true,
+            "\(detail ?? "none")")
     }
 
     // MARK: - Passes that throw

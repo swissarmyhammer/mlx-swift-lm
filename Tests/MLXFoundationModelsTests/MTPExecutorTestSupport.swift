@@ -53,6 +53,7 @@ struct MTPTurn: Sendable {
     static let speculativeDecodingOutcomeKeys: Set = [
         SpeculativeDecodingOutcome.MetadataKey.speculativeDecoding,
         SpeculativeDecodingOutcome.MetadataKey.fallbackReason,
+        SpeculativeDecodingOutcome.MetadataKey.fallbackDetail,
         SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount,
         SpeculativeDecodingOutcome.MetadataKey.draftedTokenCount,
     ]

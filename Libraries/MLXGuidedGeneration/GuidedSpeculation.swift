@@ -71,9 +71,10 @@ struct GuidedSpeculation {
 
     /// The drafter of `speculation`, when guided generation can speculate with it on `target`.
     ///
-    /// A drafter that cannot draft under a grammar for the target, or a target that cannot
-    /// verify in place, is logged once and recorded on the diagnostic sink with its stated
-    /// reason.
+    /// A drafter that cannot draft for the target, a drafter that drafts for the target but not
+    /// under a grammar (``SpeculativeDecodingFallbackReason/unsupportedGuidance``), or a target
+    /// that cannot verify in place, is logged once and recorded on the diagnostic sink with its
+    /// stated reason.
     ///
     /// A selected drafter is set on `target`, so that each of its forwards that asks for
     /// drafter state emits the hidden states the drafter reads.
@@ -97,7 +98,7 @@ struct GuidedSpeculation {
         else {
             report(
                 MTPDrafterFallback(
-                    reason: .incompatibleDrafter,
+                    reason: .unsupportedGuidance,
                     statedReason: unguidedDrafterReason(of: speculation.drafter)))
             return nil
         }

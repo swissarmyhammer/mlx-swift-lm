@@ -80,13 +80,23 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     public private(set) var rollbacks: [GuidedRollbackRecord] = []
 
     /// Why the configured MTP drafter did not speculate, or stopped speculating, in words: it
-    /// cannot draft for the target, it could not start over the prompt, or the target stopped
-    /// giving drafter state or verifying in place; `nil` otherwise.
-    public private(set) var speculationFallbackReason: String?
+    /// cannot draft for the target, it cannot draft through a grammar mask, it could not start
+    /// over the prompt, or the target stopped giving drafter state or verifying in place; `nil`
+    /// otherwise. The stated reason of the last of ``speculationFallbackRecords``.
+    public var speculationFallbackReason: String? {
+        speculationFallbackRecords.last?.statedReason
+    }
 
     /// Why each guided generation with a configured MTP drafter decoded plainly, or stopped
-    /// speculating, one reason for each such generation, in order.
-    public private(set) var speculationFallbacks: [SpeculativeDecodingFallbackReason] = []
+    /// speculating, one reason for each such generation, in order: the reasons of
+    /// ``speculationFallbackRecords``.
+    public var speculationFallbacks: [SpeculativeDecodingFallbackReason] {
+        speculationFallbackRecords.map(\.reason)
+    }
+
+    /// Each fallback of a guided generation with a configured MTP drafter, with its reason in
+    /// words, in order: one for each generation that decoded plainly or stopped speculating.
+    package private(set) var speculationFallbackRecords: [MTPDrafterFallback] = []
 
     private let cancelAfterEmitCount: Int?
     private let cancelOnToolReasoningClose: Bool
@@ -193,8 +203,8 @@ public final class GuidedGenerationDiagnosticSink: @unchecked Sendable {
     public func recordSpeculationFallback(
         _ statedReason: String, reason: SpeculativeDecodingFallbackReason
     ) {
-        speculationFallbackReason = statedReason
-        speculationFallbacks.append(reason)
+        speculationFallbackRecords.append(
+            MTPDrafterFallback(reason: reason, statedReason: statedReason))
     }
 }
 

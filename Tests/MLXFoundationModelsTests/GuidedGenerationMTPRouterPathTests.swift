@@ -122,7 +122,8 @@ struct GuidedGenerationMTPRouterPathTests {
         )
     }
 
-    /// A drafter that cannot draft through a logit processor cannot draft under a grammar.
+    /// A drafter that cannot draft through a logit processor cannot draft under a grammar,
+    /// though it drafts for the target.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test
     func aDrafterWithoutGuidedDraftsRecordsItsFallback() throws {
@@ -130,7 +131,7 @@ struct GuidedGenerationMTPRouterPathTests {
 
         #expect(run.text == plain.text)
         #expect(run.sink.draftedTokenCount == 0)
-        #expect(run.sink.speculationFallbacks == [.incompatibleDrafter])
+        #expect(run.sink.speculationFallbacks == [.unsupportedGuidance])
         #expect(run.sink.speculationFallbackReason?.contains("StatelessMTPDrafter") == true)
     }
 

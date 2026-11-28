@@ -237,7 +237,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         of drafter: RemoteMTPDrafter?, _ speculativeDecoding: MLXSpeculativeDecoding
     ) -> MTPSpeculation? {
         guard let drafter else {
-            SpeculativeDecodingOutcome.current?.record(fallbackReason: .incompatibleDrafter)
+            SpeculativeDecodingOutcome.current?.record(
+                fallbackReason: .incompatibleDrafter,
+                detail: "rank 0 of the cluster holds no MTP drafter, so the call decodes "
+                    + "without speculation")
             return nil
         }
         return MTPSpeculation(
@@ -250,7 +253,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     ///
     /// - Returns: `nil`.
     private static func memoryBudgetFallback() -> MTPSpeculation? {
-        SpeculativeDecodingOutcome.current?.record(fallbackReason: .memoryBudgetExceeded)
+        SpeculativeDecodingOutcome.current?.record(
+            fallbackReason: .memoryBudgetExceeded,
+            detail: "the memory policy of the speculative decoding does not admit the MTP "
+                + "drafter beside the target, so the call decodes without speculation")
         return nil
     }
 
