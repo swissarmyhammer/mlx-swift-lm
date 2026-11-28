@@ -66,32 +66,49 @@ struct PromptCacheDivergentCopyTests {
         let model: MLXLanguageModel
         let store: ExecutorPromptCacheStore
 
+        /// The worker of the model at ``Placement/cluster``, or nil in this process.
+        let worker: InProcessRemoteModelWorker?
+
         /// The folders the setup made, which ``remove()`` deletes.
         private let folders: [URL]
 
         /// Makes the model at `placement` and an empty store.
         ///
-        /// - Parameter placement: Where the model runs.
-        /// - Throws: The error of the fixture, of the target, or of the worker handshake.
-        init(placement: Placement) throws {
+        /// - Parameters:
+        ///   - placement: Where the model runs.
+        ///   - speculates: Whether rank 0 of the worker holds the DSpark drafter of the target,
+        ///     and the model speculates with it. Only a model at ``Placement/cluster`` can.
+        ///   - window: The window of the sliding layers of the target.
+        /// - Throws: The error of the fixture, of the target, of the drafter, or of the worker
+        ///   handshake.
+        init(placement: Placement, speculates: Bool = false, window: TargetWindow = .narrow)
+            throws
+        {
             let weights = try makeScriptedWeightsDirectory()
             let folder = PromptCacheTestStore.folder(named: "PromptCacheDivergentCopyTests")
             folders = [weights, folder]
             fixture = try Qwen35MTPFixture()
-            let target = try Inkling2TinyModels.target(
-                json: Inkling2TinyModels.draftJSON(
-                    vocabularySize: PromptCacheDivergentCopyTests.vocabularySize,
-                    unpaddedVocabularySize: PromptCacheDivergentCopyTests.vocabularySize))
-            let served: any MLXLMCommon.LanguageModel =
-                switch placement {
-                case .local: target
-                case .cluster:
-                    try ClusterLanguageModel.connect(
-                        over: InProcessRemoteModelWorker(
-                            model: target,
-                            vocabularySize: PromptCacheDivergentCopyTests.vocabularySize))
-                }
-            model = fixture.makeLanguageModel(weights: weights, target: served)
+            let json = Inkling2TinyModels.draftJSON(
+                vocabularySize: PromptCacheDivergentCopyTests.vocabularySize,
+                unpaddedVocabularySize: PromptCacheDivergentCopyTests.vocabularySize,
+                slidingWindowSize: window.size)
+            let target = try Inkling2TinyModels.target(json: json)
+            let served: any MLXLMCommon.LanguageModel
+            switch placement {
+            case .local:
+                served = target
+                worker = nil
+            case .cluster:
+                let worker = InProcessRemoteModelWorker(
+                    model: target, vocabularySize: PromptCacheDivergentCopyTests.vocabularySize,
+                    drafter: speculates ? try Inkling2TinyModels.drafter(json: json) : nil)
+                served = try ClusterLanguageModel.connect(over: worker)
+                self.worker = worker
+            }
+            model = fixture.makeLanguageModel(
+                weights: weights, target: served,
+                speculativeDecoding: speculates
+                    ? try Qwen35MTPFixture.makeSpeculativeDecoding() : nil)
             store = ExecutorPromptCacheStore(
                 directory: folder,
                 capacityReader: PromptCacheSpoolFixtureVolume.capacity(ofVolumeOf:))
@@ -137,20 +154,24 @@ struct PromptCacheDivergentCopyTests {
                 prompt: PromptCacheDivergentCopyTests.divergentPrompt)
         }
 
-        /// Runs one greedy pass of `sessionID` over the instructions and `prompt`.
+        /// Runs one greedy pass of `sessionID` over the instructions, `history` and `prompt`.
         ///
         /// - Parameters:
         ///   - sessionID: The session of the pass.
-        ///   - prompt: The tokens of the prompt after the instructions.
+        ///   - prompt: The tokens of the prompt after the instructions and `history`.
+        ///   - history: The entries of the turns before, after the instructions.
         /// - Returns: What the pass streamed.
         /// - Throws: The error of the pass or of its channel.
-        func respond(as sessionID: String, prompt: [Int]) async throws -> MTPTurn {
-            let transcript = Transcript(entries: [
-                TestTranscript.instructions(
-                    id: sessionID,
-                    fixture.text(for: PromptCacheDivergentCopyTests.instructions)),
-                TestTranscript.prompt(fixture.text(for: prompt)),
-            ])
+        func respond(
+            as sessionID: String, prompt: [Int], after history: [Transcript.Entry] = []
+        ) async throws -> MTPTurn {
+            let instructions = TestTranscript.instructions(
+                id: sessionID, fixture.text(for: PromptCacheDivergentCopyTests.instructions))
+            let transcript = Transcript(
+                entries: [instructions] + history + [
+                    TestTranscript.prompt(fixture.text(for: prompt))
+                ]
+            )
             let request = makeExecutorRequest(
                 transcript: transcript,
                 generationOptions: GenerationOptions(
@@ -262,6 +283,205 @@ struct PromptCacheDivergentCopyTests {
         let coldTurn = try await setup.respond(as: Self.cold, prompt: Self.divergentPrompt)
 
         #expect(seededTurn.responseText == coldTurn.responseText)
+    }
+}
+
+extension PromptCacheDivergentCopyTests {
+
+    /// The window of the sliding layers of the target.
+    enum TargetWindow: CaseIterable, Sendable {
+
+        /// Eight positions, fewer than the instructions: the caches of the template cannot trim
+        /// back to the end of the instructions, and only a checkpoint serves there.
+        case narrow
+
+        /// More positions than any ledger of a test, as the window of a real Inkling 2 is longer
+        /// than a turn: only the convolution layers keep the caches from trimming back.
+        case wide
+
+        /// The positions of the window.
+        var size: Int {
+            switch self {
+            case .narrow: 8
+            case .wide: 64
+            }
+        }
+    }
+
+    /// What a copy of the template keeps: its whole ledger, or the instructions alone.
+    enum SeededCopy: CaseIterable, Sendable {
+
+        /// The whole ledger of the template.
+        case wholeLedger
+
+        /// The tokens of the instructions alone.
+        case instructionsAlone
+
+        /// The tokens of the ledger of the template the copy keeps, or nil for the whole ledger.
+        var keptTokenCount: Int? {
+            switch self {
+            case .wholeLedger: nil
+            case .instructionsAlone: PromptCacheDivergentCopyTests.instructions.count
+            }
+        }
+    }
+
+    /// The first speculative pass of the seeded session after `copy` of the template, on a
+    /// cluster whose rank 0 holds the DSpark drafter, and the start position of the drafter of
+    /// rank 0 in each round of that pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private struct SeededSpeculativePass {
+        let turn: MTPTurn
+        let drafterStarts: [Int]
+
+        /// Runs the template, `copy`, and the seeded session on `setup`.
+        ///
+        /// - Parameters:
+        ///   - copy: What the copy of the template keeps.
+        ///   - setup: A setup at ``Placement/cluster`` that speculates.
+        /// - Throws: The error of a pass, or the failed requirement when the setup has no worker
+        ///   or the copy does not copy.
+        init(after copy: SeededCopy, on setup: CopySetup) async throws {
+            let worker = try #require(setup.worker)
+            _ = try await setup.respondAsTemplate()
+            let copied = await setup.copyTemplate(keepingTokens: copy.keptTokenCount)
+            try #require(copied.copiedTokenCount != nil, "The copy did not copy: \(copied)")
+            let templateRounds = worker.drafterStartPositionsOfRounds.count
+            turn = try await setup.respondAsSeededSession()
+            drafterStarts = Array(worker.drafterStartPositionsOfRounds.dropFirst(templateRounds))
+        }
+    }
+
+    /// The tokens of the second prompt of the template.
+    private static let followUpPrompt = [12, 7, 30, 21]
+
+    /// The tokens at the end of the first response that the render of the second turn of the
+    /// template writes in another form, as a chat template writes the end of a message again.
+    private static let rerenderedTailTokenCount = 2
+
+    /// The second speculative pass of the template over a render that writes the end of the
+    /// first response in another form, and the start position of the drafter of rank 0 in each
+    /// round of that pass.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private struct RerenderedSpeculativePass {
+        let turn: MTPTurn
+        let history: [Transcript.Entry]
+        let drafterStarts: [Int]
+
+        /// Runs both passes of the template on `setup`.
+        ///
+        /// - Parameter setup: A setup at ``Placement/cluster`` that speculates.
+        /// - Throws: The error of a pass, or the failed requirement when the setup has no
+        ///   worker.
+        init(on setup: CopySetup) async throws {
+            let worker = try #require(setup.worker)
+            let first = try await setup.respondAsTemplate()
+            let firstRounds = worker.drafterStartPositionsOfRounds.count
+            history = PromptCacheDivergentCopyTests.rerenderedHistory(of: first, setup: setup)
+            turn = try await setup.respond(
+                as: PromptCacheDivergentCopyTests.template,
+                prompt: PromptCacheDivergentCopyTests.followUpPrompt, after: history)
+            drafterStarts = Array(worker.drafterStartPositionsOfRounds.dropFirst(firstRounds))
+        }
+    }
+
+    /// The entries of the first pass of the template, whose response ends in another form:
+    /// its last ``rerenderedTailTokenCount`` tokens each one token on.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func rerenderedHistory(of first: MTPTurn, setup: CopySetup)
+        -> [Transcript.Entry]
+    {
+        let tokens = setup.fixture.tokenizer.encode(
+            text: first.responseText, addSpecialTokens: false)
+        let kept = tokens.dropLast(rerenderedTailTokenCount)
+        let rewritten = tokens.suffix(rerenderedTailTokenCount).map { ($0 + 1) % vocabularySize }
+        return [
+            TestTranscript.prompt(setup.fixture.text(for: templatePrompt)),
+            TestTranscript.response(setup.fixture.text(for: Array(kept) + rewritten)),
+        ]
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(
+        "a speculative turn over a render that rewinds the ledger starts the drafter warm",
+        arguments: TargetWindow.allCases)
+    func aTurnThatRewindsTheLedgerStartsTheDrafterOfRankZeroWarm(window: TargetWindow)
+        async throws
+    {
+        let setup = try CopySetup(placement: .cluster, speculates: true, window: window)
+        defer { setup.remove() }
+
+        let pass = try await RerenderedSpeculativePass(on: setup)
+
+        #expect(pass.drafterStarts.first == 0)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(
+        "a speculative turn over a render that rewinds the ledger answers as a cold session does",
+        arguments: TargetWindow.allCases)
+    func aTurnThatRewindsTheLedgerAnswersAsAColdSessionDoes(window: TargetWindow) async throws {
+        let setup = try CopySetup(placement: .cluster, speculates: true, window: window)
+        defer { setup.remove() }
+
+        let pass = try await RerenderedSpeculativePass(on: setup)
+        let coldTurn = try await setup.respond(
+            as: Self.cold, prompt: Self.followUpPrompt, after: pass.history)
+
+        #expect(!coldTurn.responseText.isEmpty)
+        #expect(pass.turn.responseText == coldTurn.responseText)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(
+        "the seeded session starts the drafter of rank 0 where the template started it",
+        arguments: SeededCopy.allCases, TargetWindow.allCases)
+    func theSeededSessionStartsTheDrafterOfRankZeroWarm(copy: SeededCopy, window: TargetWindow)
+        async throws
+    {
+        let setup = try CopySetup(placement: .cluster, speculates: true, window: window)
+        defer { setup.remove() }
+
+        let pass = try await SeededSpeculativePass(after: copy, on: setup)
+
+        #expect(pass.drafterStarts.first == 0)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(
+        "the speculative seeded session answers as a cold session does",
+        arguments: SeededCopy.allCases, TargetWindow.allCases)
+    func theSpeculativeSeededSessionAnswersAsAColdSessionDoes(
+        copy: SeededCopy, window: TargetWindow
+    ) async throws {
+        let setup = try CopySetup(placement: .cluster, speculates: true, window: window)
+        defer { setup.remove() }
+
+        let pass = try await SeededSpeculativePass(after: copy, on: setup)
+        let coldTurn = try await setup.respond(as: Self.cold, prompt: Self.divergentPrompt)
+
+        #expect(!coldTurn.responseText.isEmpty)
+        #expect(pass.turn.responseText == coldTurn.responseText)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(
+        "the speculative seeded session reports the drafts it proposed and the drafts it kept",
+        arguments: SeededCopy.allCases, TargetWindow.allCases)
+    func theSpeculativeSeededSessionReportsItsDraftCounts(copy: SeededCopy, window: TargetWindow)
+        async throws
+    {
+        let setup = try CopySetup(placement: .cluster, speculates: true, window: window)
+        defer { setup.remove() }
+
+        let pass = try await SeededSpeculativePass(after: copy, on: setup)
+
+        let metadata = pass.turn.metadata
+        let drafted = metadata[SpeculativeDecodingOutcome.MetadataKey.draftedTokenCount] as? Int
+        let accepted =
+            metadata[SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount] as? Int
+        #expect((drafted ?? 0) > 0)
+        #expect(accepted != nil)
     }
 }
 

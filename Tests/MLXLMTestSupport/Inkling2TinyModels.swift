@@ -80,15 +80,19 @@ public enum Inkling2TinyModels {
     /// - Parameters:
     ///   - vocabularySize: the rows of the embedding and of the vocabulary projection.
     ///   - unpaddedVocabularySize: the tokens of the vocabulary that are not padding.
+    ///   - slidingWindowSize: the window of the target layers that do not attend to all
+    ///     positions.
     /// - Returns: the `config.json`.
-    public static func draftJSON(vocabularySize: Int, unpaddedVocabularySize: Int) -> String {
+    public static func draftJSON(
+        vocabularySize: Int, unpaddedVocabularySize: Int, slidingWindowSize: Int = 8
+    ) -> String {
         """
         {
           "model_type": "inkling2_loop",
           "text_config": {
             "hidden_size": 64, "num_hidden_layers": 6, "vocab_size": \(vocabularySize),
             "unpadded_vocab_size": \(unpaddedVocabularySize), "num_attention_heads": 4,
-            "num_key_value_heads": 2, "head_dim": 32, "sliding_window_size": 8,
+            "num_key_value_heads": 2, "head_dim": 32, "sliding_window_size": \(slidingWindowSize),
             "local_layer_ids": [0, 1, 2, 4], "d_rel": 8, "rel_extent": 16,
             "log_scaling_n_floor": 4, "log_scaling_alpha": 0.1, "rms_norm_eps": 1e-06,
             "qk_l2_clip_threshold": 22.6, "rel_l2_clip_threshold": 8.0, "sconv_kernel_size": 4,

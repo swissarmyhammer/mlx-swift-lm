@@ -67,6 +67,9 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
     /// The failed replies of the followers, in order.
     private var followerFailureReasons: [String] = []
 
+    /// The start position of the drafter state of rank 0 after each speculative round, in order.
+    private var roundDrafterStarts: [Int] = []
+
     /// The protocol version the worker reports in place of the executor's.
     private let protocolVersion: Int32
 
@@ -150,6 +153,14 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
         lock.withLock {
             [leaderStatuses[cache]].compactMap { $0 } + followerStatuses.compactMap { $0[cache] }
         }
+    }
+
+    /// The cache position of the first entry of the drafter state rank 0 kept beside the caches
+    /// of each speculative round, read after the round, in the order of the rounds: zero while
+    /// the drafter has followed the caches since their first position, and the position of its
+    /// last cold start otherwise. A worker whose rank 0 holds no drafter records none.
+    public var drafterStartPositionsOfRounds: [Int] {
+        lock.withLock { roundDrafterStarts }
     }
 
     /// The reasons of the failed replies of the followers, in order.
@@ -271,6 +282,11 @@ public final class InProcessRemoteModelWorker: RemoteModelTransport, @unchecked 
             let reply = try executor.handle(announced)
             if let status = reply.reportedStatus {
                 leaderStatuses[announced.op.cache] = status
+            }
+            if case .speculate(let round) = announced.op,
+                let start = executor.drafterStartPosition(of: round.cache)
+            {
+                roundDrafterStarts.append(start)
             }
             try follow(RemoteOpAnnouncement.encode(announced))
             return reported(reply)

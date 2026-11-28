@@ -129,6 +129,17 @@ public final class RemoteModelExecutor {
     /// The cache handles the executor holds.
     public var cacheCount: Int { handles.count }
 
+    /// The cache position of the first entry of the drafter state rank 0 keeps beside the caches
+    /// of `id`: zero while the drafter has followed the caches since their first position, and
+    /// the position of its last cold start otherwise.
+    ///
+    /// - Parameter id: The handle of the caches.
+    /// - Returns: The position, or nil on a rank that holds no drafter, or for a handle the
+    ///   executor does not hold.
+    package func drafterStartPosition(of id: RemoteCacheID) -> Int? {
+        handles[id]?.drafter?.startPosition
+    }
+
     /// Runs `request` on the model.
     ///
     /// - Parameter request: The request.

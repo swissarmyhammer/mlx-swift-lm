@@ -103,6 +103,13 @@ struct RemoteDrafterTrack {
         self.state = drafting.drafter.makeState(parameters: nil)
     }
 
+    /// The cache position of the first entry of the drafter state: zero while the drafter has
+    /// followed the cache since its first position, and the position of the last cold start
+    /// otherwise.
+    var startPosition: Int {
+        state.cacheStartPosition
+    }
+
     /// The bytes the drafter state holds.
     var residentByteCount: Int {
         state.cache.reduce(0) { $0 + $1.residentByteCount }

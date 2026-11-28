@@ -159,7 +159,7 @@ struct GuidedPromptCacheReuseTests {
     }
 
     /// What a turn of a request asks for: a schema, a required tool call, or plain text.
-    private enum Kind {
+    fileprivate enum Kind {
         case schema(includesSchemaInPrompt: Bool)
         case requiredTool
         case plain
@@ -453,6 +453,129 @@ struct GuidedPromptCacheReuseTests {
                 sessionID: Self.copySessionID))
 
         #expect(Self.cached(copy) >= Self.prompt(first))
+    }
+
+    /// Two speculative turns of one session: a guided turn and the turn after it, or a plain
+    /// turn and the guided turn after it.
+    enum SpeculativeTurnPair: CaseIterable, Sendable {
+
+        /// A schema turn whose prompt carries no schema, then a plain turn.
+        case schemaThenPlain
+
+        /// A schema turn, then a schema turn.
+        case schemaThenSchema
+
+        /// A plain turn, then a schema turn whose prompt carries no schema.
+        case plainThenSchema
+
+        /// The kind of the first turn and of the second.
+        fileprivate var kinds: (first: Kind, second: Kind) {
+            switch self {
+            case .schemaThenPlain: (.schema(includesSchemaInPrompt: false), .plain)
+            case .schemaThenSchema:
+                (GuidedPromptCacheReuseTests.schema, GuidedPromptCacheReuseTests.schema)
+            case .plainThenSchema: (.plain, .schema(includesSchemaInPrompt: false))
+            }
+        }
+    }
+
+    /// The characters at the end of the first response that the render of a second turn writes
+    /// in another form, as a chat template writes the end of a message again: none, the last
+    /// token, which the first turn never fed, and a tail that reaches into the tokens it fed.
+    private static let rewrittenTails = [0, 1, 2, 3]
+
+    /// `text` with each of its last `count` characters written as another character.
+    private static func rewritingTail(of text: String, count: Int) -> String {
+        String(text.dropLast(count)) + String(text.suffix(count).map { $0 == "_" ? "-" : "_" })
+    }
+
+    /// The second turn of `pair` on a clustered setup that speculates, the first response its
+    /// render carries, and the start position of the drafter of rank 0 in each round of that
+    /// turn.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private struct ClusteredSecondTurn {
+        let turn: MTPTurn
+        let renderedFirstResponse: String
+        let drafterStarts: [Int]
+
+        /// Runs both turns of `pair` in one session of `setup`.
+        ///
+        /// - Parameters:
+        ///   - pair: The kinds of the two turns.
+        ///   - setup: A clustered setup that speculates.
+        ///   - rewrittenTail: The characters at the end of the first response that the render
+        ///     of the second turn writes in another form.
+        /// - Throws: The error of a pass, or the failed requirement when the setup has no
+        ///   worker.
+        init(of pair: SpeculativeTurnPair, on setup: Setup, rewritingTail rewrittenTail: Int)
+            async throws
+        {
+            let worker = try #require(setup.worker)
+            let first = try await setup.respond(
+                to: GuidedPromptCacheReuseTests.request(pair.kinds.first, setup: setup))
+            let firstRounds = worker.drafterStartPositionsOfRounds.count
+            renderedFirstResponse = GuidedPromptCacheReuseTests.rewritingTail(
+                of: first.responseText, count: rewrittenTail)
+            turn = try await setup.respond(
+                to: GuidedPromptCacheReuseTests.request(
+                    pair.kinds.second, setup: setup, firstResponse: renderedFirstResponse))
+            drafterStarts = Array(worker.drafterStartPositionsOfRounds.dropFirst(firstRounds))
+        }
+    }
+
+    /// The drafter of rank 0 keeps its entries from the first position of the session's cache
+    /// at the first round of the second turn. A drafter that started cold at the second turn
+    /// would start its entries where the second turn found the cache.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(arguments: SpeculativeTurnPair.allCases, rewrittenTails)
+    func aClusteredSecondTurnStartsTheDrafterOfRankZeroWarm(
+        pair: SpeculativeTurnPair, rewrittenTail: Int
+    ) async throws {
+        let setup = try Setup(.clustered, speculates: true)
+        defer { setup.remove() }
+
+        let second = try await ClusteredSecondTurn(
+            of: pair, on: setup, rewritingTail: rewrittenTail)
+
+        #expect(second.drafterStarts.first == 0)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(arguments: SpeculativeTurnPair.allCases, rewrittenTails)
+    func aClusteredSecondTurnWritesTheTextOfAColdTurn(
+        pair: SpeculativeTurnPair, rewrittenTail: Int
+    ) async throws {
+        let setup = try Setup(.clustered, speculates: true)
+        let cold = try Setup(.clustered, speculates: true)
+        defer {
+            setup.remove()
+            cold.remove()
+        }
+
+        let second = try await ClusteredSecondTurn(
+            of: pair, on: setup, rewritingTail: rewrittenTail)
+        let coldTurn = try await cold.respond(
+            to: Self.request(
+                pair.kinds.second, setup: cold, firstResponse: second.renderedFirstResponse))
+
+        #expect(!coldTurn.responseText.isEmpty)
+        #expect(second.turn.responseText == coldTurn.responseText)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(arguments: SpeculativeTurnPair.allCases)
+    func aClusteredSecondTurnReportsTheDraftsTheTargetAccepted(pair: SpeculativeTurnPair)
+        async throws
+    {
+        let setup = try Setup(.clustered, speculates: true)
+        defer { setup.remove() }
+
+        let second = try await ClusteredSecondTurn(of: pair, on: setup, rewritingTail: 0)
+
+        let accepted =
+            second.turn.metadata[SpeculativeDecodingOutcome.MetadataKey.acceptedDraftTokenCount]
+            as? Int
+        #expect((accepted ?? 0) > 0)
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
