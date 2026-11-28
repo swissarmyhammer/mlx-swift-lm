@@ -173,10 +173,26 @@ comments:
     - evidence: swift build --build-tests complete, 0 code warnings (one SwiftPM note about the Cmlx bundle); swift-format lint clean on InProcessRemoteModelWorker.swift and ClusterExecutorTests.swift. xcrun xctest: MLXLMTests 1261 XCTest 0 failures + 2845 Swift Testing passed (3 known issues, in untouched AttentionKernelToleranceTests and ToolTests MiniCPM5, both withKnownIssue markers in committed code); MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 672 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest 0 failures. 0 skipped.
     - next: review/commit
   timestamp: 2026-11-28T04:21:42.974059+00:00
+- actor: claude-code
+  id: 01m8g687zmhgh3r7c059shyeex
+  text: |-
+    ### review — clean
+    - evidence: review sha HEAD~1..HEAD (bea73630): 0 findings (7 attempted, 0 failed, 0 skipped); 2 kanban files not matched by any validator. Both prior findings (2026-11-27 21:59) checked.
+    - next: none — task moved to done
+  timestamp: 2026-11-28T04:22:42.420936+00:00
+- actor: claude-code
+  id: 01m8g68g837521ef1ck3wg6tct
+  text: |-
+    ### finish iteration 3 — clean
+    - implement: changed — 2 test files, both findings checked
+    - test: green — all 5 bundles (MLXLMTests 2845+1261, MLXFoundationModelsTests 672, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 11)
+    - commit: bea73630
+    - review: clean — 0 findings
+  timestamp: 2026-11-28T04:22:50.883376+00:00
 depends_on:
 - 01M8FZZ0C8R7PYY6JH0ARXS2A5
-position_column: doing
-position_ordinal: '80'
+position_column: done
+position_ordinal: ffffff8f80
 title: 'Clustered models: guided speculation with the remote MTP drafter (RemoteMTPDrafter conforms to ResumableMTPDrafterModel and StatefulMTPDistributionDrafterModel)'
 ---
 ## What
