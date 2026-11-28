@@ -45,6 +45,36 @@ comments:
     - pre-existing: MLXLMTests reports "3 known issues", all from the committed withKnownIssue block in Tests/MLXLMTests/ToolTests.swift (MiniCPM5 CDATA close tag), a file this change does not touch.
     - next: review/commit
   timestamp: 2026-11-28T03:00:17.337368+00:00
+- actor: claude-code
+  id: 01m8g1pnyc6amk3b7erz362e79
+  text: |-
+    ### review — findings
+    - evidence: review sha HEAD~1..HEAD (e0765fa2): 2 findings (2 confirmed, 1 refuted) — Tests/MLXFoundationModelsTests/SpeculativeDecodingOutcomeMetadataTests.swift:276, Tests/MLXFoundationModelsTests/SpeculativeDecodingOutcomeMetadataTests.swift:415
+    - next: implement the two reuse/reuse findings in the 2026-11-27 21:00 Review Findings section; task stays in review
+  timestamp: 2026-11-28T03:03:12.588021+00:00
+- actor: claude-code
+  id: 01m8g1q3dg2me18shkjej01b8t
+  text: |-
+    ### finish iteration 1 — findings
+    - implement: changed — 9 files (5 library, 4 test)
+    - test: green — all 5 bundles (MLXLMTests 2845+1261, MLXFoundationModelsTests 663, MLXGuidedGenerationTests 96, CXGrammarTests 7, MLXHuggingFaceMacrosTests 21)
+    - commit: e0765fa2
+    - review: findings — SpeculativeDecodingOutcomeMetadataTests.swift:276, SpeculativeDecodingOutcomeMetadataTests.swift:415
+  timestamp: 2026-11-28T03:03:26.384777+00:00
+- actor: claude-code
+  id: 01m8g1x8k4sqc45j61mf3xymmw
+  text: |-
+    ### implement — changed
+    - evidence: 1 file — Tests/MLXFoundationModelsTests/SpeculativeDecodingOutcomeMetadataTests.swift. Finding :276: deleted `anIncompatibleDrafterStatesWhy`; its fallbackDetail assertion ("cannot draft for the target") now sits in `anIncompatibleDrafterReportsWhy` beside expectIncompatibleFallback. Finding :415: new private `schemaPass(weights:speculativeDecoding:)` (nil = fixture's own drafter) returns (plain, speculative); `aSchemaPassReportsItsGuidedDrafts`, `aSchemaPassWithAnIncompatibleDrafterReportsWhy` and `unguidedDrafterSchemaPass` (now a one-call wrapper passing the StatelessMTPDrafter configuration) all use it, so the GuidedExecutorModels/transcript/makeExecutorRequest/respond setup lives once in the file. Every prior assertion kept. swift build --build-tests clean; xcrun xctest MLXFoundationModelsTests: 662 tests/88 suites passed (663 before minus the merged test), exit 0; swift-format lint clean. Both findings checked.
+    - next: review
+  timestamp: 2026-11-28T03:06:48.292552+00:00
+- actor: claude-code
+  id: 01m8g2d3rf27xar7mphzjdtnty
+  text: |-
+    ### test — green
+    - evidence: swift build --build-tests clean (only a SwiftPM bundle-mtime notice); swift-format lint of SpeculativeDecodingOutcomeMetadataTests.swift clean. xcrun xctest: MLXLMTests 1261 XCTest + 2845 Swift Testing passed, 0 failed; MLXGuidedGenerationTests 96 passed; MLXFoundationModelsTests 662 passed; CXGrammarTests 7 passed; MLXHuggingFaceMacrosTests 11 XCTest passed. 0 skipped. MLXLMTests reports 3 known issues from the pre-existing withKnownIssue tests aNearTieRejectsATokenOutsideTheTwoBest (AttentionKernelToleranceTests.swift) and the MiniCPM5 CDATA close-tag test (ToolTests.swift); neither file is in this change.
+    - next: review
+  timestamp: 2026-11-28T03:15:27.631912+00:00
 position_column: doing
 position_ordinal: '80'
 title: 'Speculative decoding: a guided call whose drafter can''t draft through a grammar mask reports its own fallback reason, with the stated reason in the response metadata'
@@ -61,3 +91,16 @@ On bench cluster4i (Inkling with MTP on 2 Macs, stable b330697f), 66 of 452 call
 - A guided turn on a local model whose drafter lacks the guided conformances also reports `.unsupportedGuidance`.
 - A model with no drafter still reports its existing reason.
 #cluster
+
+## Review Findings (2026-11-27 21:00)
+
+> Scope: `review sha HEAD~1..HEAD` — reviewed the diffs only — lines this change added or modified. 9 file(s) reviewed, 4 not reviewed.
+
+> 4 file(s) not reviewed — no validator matched:
+> - `.kanban/tasks/01M8FZZ0C8R7PYY6JH0ARXS2A5.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8FZZ0C8R7PYY6JH0ARXS2A5.md` — no validator matches this file
+> - `.kanban/tasks/01M8FZZA0769H5PS4TA9MVG23K.jsonl` — no validator matches this file
+> - `.kanban/tasks/01M8FZZA0769H5PS4TA9MVG23K.md` — no validator matches this file
+
+- [x] `Tests/MLXFoundationModelsTests/SpeculativeDecodingOutcomeMetadataTests.swift:276` `reuse/reuse` — The new test `anIncompatibleDrafterStatesWhy` rebuilds the full fixture and respond call of the existing `anIncompatibleDrafterReportsWhy`. Only the final assertion differs. This is a near-match that was not extended, so the same setup now lives in two places and will drift. Extend `anIncompatibleDrafterReportsWhy` with `#expect(ReportedOutcome(metadata).fallbackDetail?.contains("cannot draft for the target") == true)`, or move the shared setup into a helper that both tests call (for example `respondToIncompatibleDrafter()` returning the metadata).
+- [x] `Tests/MLXFoundationModelsTests/SpeculativeDecodingOutcomeMetadataTests.swift:415` `reuse/reuse` — The new helper `unguidedDrafterSchemaPass` repeats the body of the existing schema-pass setup, which builds `GuidedExecutorModels`, a transcript, `makeExecutorRequest` and `respond` with a speculative-decoding argument. It differs only in the drafter. The near-match was not parameterized, so there are now two parallel copies of this setup. Generalize the existing setup into one helper that takes the speculative-decoding configuration (or the drafter factory) as a parameter. Have `aSchemaPassWithAnIncompatibleDrafterReportsWhy` and the new unguided-drafter tests both call it.

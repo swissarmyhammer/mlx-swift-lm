@@ -255,7 +255,7 @@ struct SpeculativeDecodingOutcomeMetadataTests {
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test("a text turn whose drafter cannot draft for the target reports why, and no drafts")
+    @Test("a text turn whose drafter cannot draft for the target reports and states why")
     func anIncompatibleDrafterReportsWhy() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
@@ -268,25 +268,11 @@ struct SpeculativeDecodingOutcomeMetadataTests {
 
         let (_, metadata) = try await respond(session, to: Prompt(fixture.text(for: Self.prompt)))
 
-        expectIncompatibleFallback(ReportedOutcome(metadata))
-    }
-
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-    @Test("a text turn whose drafter cannot draft for the target states why in its entry")
-    func anIncompatibleDrafterStatesWhy() async throws {
-        let weights = try makeScriptedWeightsDirectory()
-        defer { try? FileManager.default.removeItem(at: weights) }
-        let fixture = try Qwen35MTPFixture()
-        let session = LanguageModelSession(
-            model: fixture.makeLanguageModel(
-                weights: weights,
-                speculativeDecoding: try Qwen35MTPFixture.makeIncompatibleSpeculativeDecoding()),
-            tools: [], instructions: nil)
-
-        let (_, metadata) = try await respond(session, to: Prompt(fixture.text(for: Self.prompt)))
-
-        let detail = ReportedOutcome(metadata).fallbackDetail
-        #expect(detail?.contains("cannot draft for the target") == true, "\(detail ?? "none")")
+        let reported = ReportedOutcome(metadata)
+        expectIncompatibleFallback(reported)
+        #expect(
+            reported.fallbackDetail?.contains("cannot draft for the target") == true,
+            "\(reported.fallbackDetail ?? "none")")
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -306,18 +292,29 @@ struct SpeculativeDecodingOutcomeMetadataTests {
 
     // MARK: - Executor passes
 
+    /// The plain and speculative passes of one schema request, the speculative model drafting
+    /// with `speculativeDecoding`, or with the fixture's own drafter when it is `nil`.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private func schemaPass(
+        weights: URL, speculativeDecoding: MLXSpeculativeDecoding? = nil
+    ) async throws -> (plain: GuidedExecutorModels.Turn, speculative: GuidedExecutorModels.Turn) {
+        let models = try GuidedExecutorModels(
+            weights: weights, capabilities: [.guidedGeneration],
+            speculativeDecoding: speculativeDecoding)
+        let request = makeExecutorRequest(
+            transcript: models.transcript(prompt: Self.prompt),
+            schema: FixtureLookupArguments.generationSchema,
+            generationOptions: GuidedExecutorModels.greedy)
+        return try await models.respond(to: request)
+    }
+
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     @Test("a schema pass reports the drafts of its guided generation; a plain one reports none")
     func aSchemaPassReportsItsGuidedDrafts() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try GuidedExecutorModels(weights: weights, capabilities: [.guidedGeneration])
-        let request = makeExecutorRequest(
-            transcript: models.transcript(prompt: Self.prompt),
-            schema: FixtureLookupArguments.generationSchema,
-            generationOptions: GuidedExecutorModels.greedy)
 
-        let turns = try await models.respond(to: request)
+        let turns = try await schemaPass(weights: weights)
 
         #expect(turns.speculative.turn.failure == nil)
         expectSpeculated(
@@ -395,34 +392,25 @@ struct SpeculativeDecodingOutcomeMetadataTests {
     func aSchemaPassWithAnIncompatibleDrafterReportsWhy() async throws {
         let weights = try makeScriptedWeightsDirectory()
         defer { try? FileManager.default.removeItem(at: weights) }
-        let models = try GuidedExecutorModels(
-            weights: weights, capabilities: [.guidedGeneration],
-            speculativeDecoding: try Qwen35MTPFixture.makeIncompatibleSpeculativeDecoding())
-        let request = makeExecutorRequest(
-            transcript: models.transcript(prompt: Self.prompt),
-            schema: FixtureLookupArguments.generationSchema,
-            generationOptions: GuidedExecutorModels.greedy)
 
-        let turns = try await models.respond(to: request)
+        let turns = try await schemaPass(
+            weights: weights,
+            speculativeDecoding: try Qwen35MTPFixture.makeIncompatibleSpeculativeDecoding())
 
         #expect(turns.speculative.turn.failure == nil)
         expectIncompatibleFallback(ReportedOutcome(turns.speculative.turn.metadata))
     }
 
-    /// A schema pass of a model whose drafter drafts for the target, but cannot draft through a
-    /// grammar mask.
+    /// The speculative pass of a schema request, on a model whose drafter drafts for the target
+    /// but cannot draft through a grammar mask.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func unguidedDrafterSchemaPass(weights: URL) async throws -> GuidedExecutorModels.Turn {
-        let models = try GuidedExecutorModels(
-            weights: weights, capabilities: [.guidedGeneration],
+        try await schemaPass(
+            weights: weights,
             speculativeDecoding: try Qwen35MTPFixture.makeSpeculativeDecoding(drafter: {
                 StatelessMTPDrafter()
-            }))
-        let request = makeExecutorRequest(
-            transcript: models.transcript(prompt: Self.prompt),
-            schema: FixtureLookupArguments.generationSchema,
-            generationOptions: GuidedExecutorModels.greedy)
-        return try await models.respond(to: request).speculative
+            })
+        ).speculative
     }
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
