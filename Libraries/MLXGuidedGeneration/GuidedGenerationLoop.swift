@@ -134,9 +134,11 @@ public enum GuidedGenerationLoop {
     /// drafter of this process the hidden rows of each prompt chunk, from the drafter
     /// continuation of the carried cache when it stands where the cache ends, and from a cold
     /// drafter state there otherwise. Rank 0 of a cluster target feeds its drafter itself. The
-    /// generation gives what it leaves to `handOff`: the model state of its prefill, and then
-    /// the tokens it counted with the caches of its target, which hold the prompt and every
-    /// token a forward fed. The output is the output of plain guided
+    /// generation gives what it leaves to `handOff`: the model state of its prefill with the
+    /// drafter continuation at the end of the prompt, and then the tokens it counted with the
+    /// caches of its target, which hold the prompt and every token a forward fed, and the drafter
+    /// continuation a drafter of this process finalized where those caches end. The output is
+    /// the output of plain guided
     /// decoding: see ``GuidedSpeculation`` and ``GuidedClusterSpeculation``. A drafter that cannot draft for the
     /// target, or a target that cannot verify in place, leaves the generation to plain decoding,
     /// and the generation records why on its diagnostic sink, which the response metadata reads.
@@ -197,7 +199,9 @@ public enum GuidedGenerationLoop {
         }
         let prefilled = try target.prefill(
             input, parameters: prefill, drafterFeed: feed)
-        handOff.prefillDidEnd(target.state)
+        handOff.prefillDidEnd(target.state) {
+            promptEndContinuation(of: feed, prefilled: prefilled)
+        }
         let logitDim = prefilled.logits.shape[prefilled.logits.ndim - 1]
         let rules = GuidedDecisionRules(
             constraint: constraint, maxTokens: maxTokens, vocabSize: vocabSize,
@@ -218,15 +222,37 @@ public enum GuidedGenerationLoop {
                 bufferPoolClearing: bufferPoolClearing, logitProcessor: logitProcessor,
                 logitSampler: logitSampler, prompt: input.text.tokens, emit: emit)
             defer { decoder.finalizeProcessor() }
+            var drafterContinuation: MTPDrafterContinuation?
             if decoder.hasBudget, let first = try decoder.decide(from: prefilled.logits) {
-                try decode(
+                drafterContinuation = try decode(
                     from: first, drafter: drafter, speculation: speculation, feed: feed,
                     prefilled: prefilled, decoder: &decoder, target: &target)
             }
             handOff.generationDidEnd(
-                GuidedGeneratedCache(countedTokens: decoder.countedTokens, cache: target.cache))
+                GuidedGeneratedCache(
+                    countedTokens: decoder.countedTokens, cache: target.cache,
+                    drafterContinuation: drafterContinuation))
             return try decoder.finish()
         }
+    }
+
+    /// The MTP drafter continuation at the end of the prompt a prefill fed `feed`: the state
+    /// its chunks left, extended over the segment of the final forward.
+    ///
+    /// - Parameters:
+    ///   - feed: The feed the prefill chunks went through, or `nil`.
+    ///   - prefilled: What the prefill gave.
+    /// - Returns: The continuation, or `nil` without a feed, or when the final forward gave no
+    ///   segment or no hidden rows.
+    private static func promptEndContinuation(
+        of feed: MTPDrafterPrefillFeed?, prefilled: GuidedPrefill
+    ) -> MTPDrafterContinuation? {
+        guard let feed, let segmentTokens = prefilled.segmentTokens,
+            let segmentHidden = prefilled.segmentHidden
+        else { return nil }
+        return feed.promptEndContinuation(
+            finalSegment: segmentTokens, segmentHidden: segmentHidden,
+            positionDeltas: prefilled.positionDeltas)
     }
 
     /// Decodes the rest of a generation from `first`, the tokens its first decision feeds the
@@ -240,13 +266,16 @@ public enum GuidedGenerationLoop {
     ///   - prefilled: What the prefill gave.
     ///   - decoder: The decisions and the output of the generation.
     ///   - target: The target.
+    /// - Returns: The MTP drafter continuation at the end of the caches of the target, which a
+    ///   drafter of this process leaves when it speculated to the end of the generation, or
+    ///   `nil`. Rank 0 of a cluster target keeps the state of its own drafter.
     /// - Throws: `CancellationError`, the failure of a forward of a cluster target, or the error
     ///   of the matcher.
     private static func decode(
         from first: [Int32], drafter: GuidedDrafter?, speculation: MTPSpeculation?,
         feed: MTPDrafterPrefillFeed?, prefilled: GuidedPrefill, decoder: inout GuidedDecoder,
         target: inout GuidedTarget
-    ) throws {
+    ) throws -> MTPDrafterContinuation? {
         switch drafter {
         case .cluster(var speculating):
             try speculating.decode(from: first, decoder: &decoder, target: target)
@@ -256,13 +285,13 @@ public enum GuidedGenerationLoop {
                     speculation: speculation, drafter: drafter, feed: feed,
                     prefill: prefilled, firstFeed: first, target: target)
             {
-                try speculating.decode(from: first, decoder: &decoder, target: &target)
-            } else {
-                try decodePlainly(from: first, decoder: &decoder, target: &target)
+                return try speculating.decode(from: first, decoder: &decoder, target: &target)
             }
+            try decodePlainly(from: first, decoder: &decoder, target: &target)
         case nil:
             try decodePlainly(from: first, decoder: &decoder, target: &target)
         }
+        return nil
     }
 
     /// Decodes the rest of a generation one token per decision, from `pending`, the tokens the

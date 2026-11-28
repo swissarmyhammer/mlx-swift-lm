@@ -310,6 +310,70 @@ struct GuidedPromptCacheReuseTests {
         #expect((drafted ?? 0) > 0)
     }
 
+    /// The entry the session of `setup` keeps.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func entry(of setup: Setup) async throws -> ExecutorPromptCacheEntry {
+        try #require(await setup.store.peek(setup.key()))
+    }
+
+    /// The MTP drafter continuation `entry` keeps, which must stand at the end of its ledger.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    private static func alignedDrafterState(of entry: ExecutorPromptCacheEntry) throws
+        -> MTPDrafterContinuation
+    {
+        let drafterState = try #require(entry.drafterState, "The entry must keep a drafter state.")
+        try #require(
+            drafterState.isAligned(
+                withMainTokenCount: entry.tokens.count, drafterID: drafterState.drafterID))
+        return drafterState
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSpeculativeSchemaTurnChecksInADrafterStateAlignedWithItsLedger() async throws {
+        let setup = try Setup(.local, speculates: true)
+        defer { setup.remove() }
+
+        _ = try await setup.respond(to: Self.request(Self.schema, setup: setup))
+
+        let entry = try await Self.entry(of: setup)
+        #expect(
+            entry.drafterState.map {
+                $0.isAligned(withMainTokenCount: entry.tokens.count, drafterID: $0.drafterID)
+            } == true)
+    }
+
+    /// The second turn resumes the drafter continuation the first turn checked in, thus its
+    /// drafter keeps the entries of the first turn from the start of the prompt. A drafter that
+    /// started cold where the cache ends would start its entries there.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSpeculativeSecondSchemaTurnResumesTheDrafterStateOfTheFirstTurn() async throws {
+        let setup = try Setup(.local, speculates: true)
+        defer { setup.remove() }
+
+        _ = try await Self.twoTurns(Self.schema, Self.schema, setup: setup)
+
+        let drafterState = try Self.alignedDrafterState(of: try await Self.entry(of: setup))
+        #expect(drafterState.state.cacheStartPosition == 0)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test
+    func aSpeculativeSchemaTurnKeepsTheDrafterStateOfItsPromptEndCheckpoint() async throws {
+        let setup = try Setup(.local, speculates: true)
+        defer { setup.remove() }
+
+        _ = try await setup.respond(to: Self.request(Self.schema, setup: setup))
+
+        let checkpoint = try #require(try await Self.entry(of: setup).checkpoint)
+        #expect(
+            checkpoint.drafterContinuation.map {
+                $0.isAligned(
+                    withMainTokenCount: checkpoint.tokens.count, drafterID: $0.drafterID)
+            } == true)
+    }
+
     /// The plain turn before the schema turn leaves the MTP drafter continuation of its
     /// generation in the cache, which the schema turn resumes.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

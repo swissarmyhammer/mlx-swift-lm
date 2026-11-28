@@ -45,9 +45,11 @@ struct GuidedSpeculation {
     /// The drafter.
     private let drafter: any GuidedMTPDrafter
 
-    /// The drafter's own state: one entry for each token the main cache holds, and one for the
-    /// token the next forward feeds first.
+    /// The drafter's own state, in the form ``drafterAlignment`` names.
     private var drafterState: MTPDrafterState
+
+    /// Where the drafter state stands against the main cache.
+    private var drafterAlignment = DrafterAlignment.awaitingNextToken
 
     /// The most drafts of one round.
     private let maximumDrafts: Int
@@ -58,11 +60,25 @@ struct GuidedSpeculation {
     /// The target position deltas of the last forward, or `nil` for a target without them.
     private var positionDeltas: MLXArray?
 
-    /// Whether the target stopped reporting its drafter state, which ends the speculation.
-    private var stoodDown = false
-
     /// The test sink that records each round, or `nil`.
     private let diagnosticSink = GuidedGenerationDiagnosticSink.current
+
+    /// Where the drafter state stands against the main cache.
+    private enum DrafterAlignment {
+
+        /// One entry for each token the main cache holds, and one for the token the next forward
+        /// feeds first, which pairs it with ``lastKeptHidden``.
+        case awaitingNextToken
+
+        /// One entry for each token the main cache holds but the last, whose target hidden row
+        /// is ``lastKeptHidden``: the form of a finalized ``MTPDrafterContinuation``. The
+        /// generation stopped after a forward, and no token follows, or it finalized the state.
+        case atCacheEnd
+
+        /// The drafter state does not follow the main cache: the speculation stood down, and
+        /// plain decoding fed the rest, or the last forward gave no hidden rows.
+        case lost
+    }
 
     /// The tokens a verify feeds for a round and whether they hold the feed of its last draft.
     private struct VerifyBatch {
@@ -230,7 +246,7 @@ struct GuidedSpeculation {
     }
 
     /// Decodes the rest of the generation from `pending`, the tokens the last decision feeds
-    /// the target.
+    /// the target, and finalizes the drafter state where the main cache ends.
     ///
     /// A round that cannot verify in place hands the rest of the generation to plain decoding,
     /// and reports it. A generation whose budget leaves no draft has nothing to report.
@@ -239,16 +255,37 @@ struct GuidedSpeculation {
     ///   - pending: The tokens of the last decision, which no forward fed yet.
     ///   - decoder: The decisions and the output of the generation.
     ///   - target: The target.
+    /// - Returns: The drafter continuation at the end of the main cache, which a next generation
+    ///   over the caches resumes, or `nil` when plain decoding fed the rest of the generation or
+    ///   the last forward gave no hidden rows.
     /// - Throws: `CancellationError`, the failure of a forward of a cluster target
     ///   (``GuidedTarget/checkFailure()``), or the error of the matcher.
     mutating func decode(
+        from pending: [Int32], decoder: inout GuidedDecoder, target: inout GuidedTarget
+    ) throws -> MTPDrafterContinuation? {
+        try decodeRounds(from: pending, decoder: &decoder, target: &target)
+        return finalizedContinuation(target: target)
+    }
+
+    /// Decodes the rest of the generation from `pending` in speculative rounds, and plainly once
+    /// the speculation ends.
+    ///
+    /// - Parameters:
+    ///   - pending: The tokens of the last decision, which no forward fed yet.
+    ///   - decoder: The decisions and the output of the generation.
+    ///   - target: The target.
+    /// - Throws: As ``decode(from:decoder:target:)`` throws.
+    private mutating func decodeRounds(
         from pending: [Int32], decoder: inout GuidedDecoder, target: inout GuidedTarget
     ) throws {
         var feed = pending
         while decoder.hasBudget {
             try Task.checkCancellation()
-            guard !stoodDown, let drafts = draftsThisRound(decoder: decoder, target: target)
+            guard drafterAlignment != .lost,
+                let drafts = draftsThisRound(decoder: decoder, target: target)
             else {
+                // Plain decoding feeds tokens the drafter state does not take.
+                drafterAlignment = .lost
                 try GuidedGenerationLoop.decodePlainly(
                     from: feed, decoder: &decoder, target: &target)
                 return
@@ -303,6 +340,7 @@ struct GuidedSpeculation {
                 // The generation stops at this draft. The main cache keeps the decided token and
                 // the drafts before it, which the output holds whole.
                 target.keepVerified(1 + index, of: batch.tokens.count)
+                commitVerified(batch, kept: 1 + index, output: output, next: nil, target: target)
                 return nil
             }
             lastFeed = feed
@@ -322,10 +360,7 @@ struct GuidedSpeculation {
         // The main cache keeps the verified positions the output counted even when the
         // generation stops here: no rejected draft stays in it.
         target.keepVerified(kept, of: batch.tokens.count)
-        guard let next else { return nil }
-        commitDrafter(
-            fed: batch.tokens, kept: kept, hidden: output.state?[mtpLastHiddenStatesKey],
-            positionDeltas: output.state?[mtpPositionDeltasKey], next: next, target: target)
+        commitVerified(batch, kept: kept, output: output, next: next, target: target)
         return next
     }
 
@@ -373,7 +408,7 @@ struct GuidedSpeculation {
         }
         asyncEval(last.logits)
         try decoder.advance()
-        guard let next = try decoder.decide(from: last.logits) else { return nil }
+        let next = try decoder.decide(from: last.logits)
         let hiddenRows = outputs.compactMap { $0.state?[mtpLastHiddenStatesKey] }
         commitDrafter(
             fed: feed, kept: feed.count,
@@ -382,14 +417,39 @@ struct GuidedSpeculation {
         return next
     }
 
+    /// Commits the positions of a round's verify the main cache kept to the drafter, with the
+    /// hidden rows and the position deltas the verify gave.
+    ///
+    /// - Parameters:
+    ///   - batch: The verify of the round.
+    ///   - kept: The verified positions the main cache kept.
+    ///   - output: What the verify forward gave.
+    ///   - next: The tokens the round's last decision feeds the target, or `nil` when the
+    ///     generation stops.
+    ///   - target: The target.
+    private mutating func commitVerified(
+        _ batch: VerifyBatch, kept: Int, output: LMOutput, next: [Int32]?, target: GuidedTarget
+    ) {
+        commitDrafter(
+            fed: batch.tokens, kept: kept, hidden: output.state?[mtpLastHiddenStatesKey],
+            positionDeltas: output.state?[mtpPositionDeltasKey], next: next, target: target)
+    }
+
     /// Commits the fed tokens the main cache kept, and the first token `next` feeds, to the
     /// drafter, each paired with the target hidden row of the position before it.
     ///
-    /// A forward that reported no hidden rows ends the speculation.
+    /// A forward that reported no hidden rows ends the speculation. When the generation stops,
+    /// no token follows: see ``commitDrafterAtStop(fed:kept:hidden:positionDeltas:target:)``.
     private mutating func commitDrafter(
-        fed: [Int32], kept: Int, hidden: MLXArray?, positionDeltas: MLXArray?, next: [Int32],
+        fed: [Int32], kept: Int, hidden: MLXArray?, positionDeltas: MLXArray?, next: [Int32]?,
         target: GuidedTarget
     ) {
+        guard let next else {
+            commitDrafterAtStop(
+                fed: fed, kept: kept, hidden: hidden, positionDeltas: positionDeltas,
+                target: target)
+            return
+        }
         guard let hidden, let first = next.first else {
             standDown(reason: Self.missingDrafterStateReason(of: target.model))
             return
@@ -403,13 +463,104 @@ struct GuidedSpeculation {
         lastKeptHidden = hidden[0..., (kept - 1) ..< kept, 0...]
     }
 
+    /// Commits the fed tokens the main cache kept to the drafter when the generation stops after
+    /// them.
+    ///
+    /// No token follows, thus the drafter takes an entry for each kept token after the first --
+    /// the first has its entry already -- each paired with the target hidden row of the position
+    /// before it, and the row of the last kept position becomes the boundary: the form
+    /// ``DrafterAlignment/atCacheEnd`` names. The tentative entries of the round's drafts go
+    /// first, as a commit removes them.
+    ///
+    /// A forward that reported no hidden rows, or a drafter that refuses the entries, leaves the
+    /// drafter state ``DrafterAlignment/lost``. The generation ends here, thus nothing reports a
+    /// stand-down.
+    private mutating func commitDrafterAtStop(
+        fed: [Int32], kept: Int, hidden: MLXArray?, positionDeltas: MLXArray?,
+        target: GuidedTarget
+    ) {
+        self.positionDeltas = positionDeltas ?? self.positionDeltas
+        guard let hidden, drafterState.removeLastEntries(drafterState.proposalAppended),
+            kept == 1
+                || drafter.appendDrafterState(
+                    target: target.model, tokens: MLXArray(Array(fed[1 ..< kept]))[.newAxis],
+                    targetHidden: hidden[0..., ..<(kept - 1), 0...],
+                    positionDeltas: self.positionDeltas, state: &drafterState,
+                    sampler: mtpDrafterSeedSampler)
+        else {
+            drafterAlignment = .lost
+            return
+        }
+        // No round drafts after the stop, and a finalized continuation holds no seed.
+        drafterState.dropSeed()
+        lastKeptHidden = hidden[0..., (kept - 1) ..< kept, 0...]
+        drafterAlignment = .atCacheEnd
+    }
+
+    /// The drafter continuation at the end of the main cache, finalized as the plain MTP
+    /// iterator finalizes its own (``ResumableMTPDrafterModel/finalizeDrafterState(target:targetBoundaryHidden:targetProcessedTokenCount:discardedTargetTokens:positionDeltas:state:)``).
+    ///
+    /// The main cache holds no rejected draft when the generation ends, thus the finalize
+    /// discards no target token.
+    ///
+    /// - Parameter target: The target, whose cache the generation ended.
+    /// - Returns: The continuation, with its arrays evaluated, or `nil` when the drafter state is
+    ///   ``DrafterAlignment/lost``, or when it unexpectedly does not stand where the main cache
+    ///   ends.
+    private mutating func finalizedContinuation(target: GuidedTarget) -> MTPDrafterContinuation? {
+        let mainTokenCount = target.cacheStorage.processedTokenCount
+        switch drafterAlignment {
+        case .lost:
+            return nil
+        case .awaitingNextToken:
+            guard
+                drafter.finalizeDrafterState(
+                    target: target.model, targetBoundaryHidden: lastKeptHidden,
+                    targetProcessedTokenCount: mainTokenCount, discardedTargetTokens: 0,
+                    positionDeltas: positionDeltas, state: &drafterState)
+            else {
+                return discardedContinuation(reason: "could not be finalized")
+            }
+            drafterAlignment = .atCacheEnd
+        case .atCacheEnd:
+            break
+        }
+        let continuation = MTPDrafterContinuation(
+            state: drafterState, targetBoundaryHidden: lastKeptHidden,
+            targetProcessedTokenCount: mainTokenCount, drafterID: drafter.drafterID)
+        guard
+            continuation.isAligned(withMainTokenCount: mainTokenCount, drafterID: drafter.drafterID)
+        else {
+            return discardedContinuation(reason: "does not stand where the main cache ends")
+        }
+        // The continuation leaves the generation only once its lazy values are settled.
+        eval(continuation.heldArrays)
+        return continuation
+    }
+
+    /// Records that the drafter state of a generation that speculated to its end could not
+    /// become a continuation, which is unexpected. The caches stay authoritative, thus the next
+    /// generation over them starts its drafter cold, and its output does not change.
+    ///
+    /// - Parameter reason: What the drafter state did, in words.
+    /// - Returns: `nil`, the continuation the generation hands over.
+    private func discardedContinuation(reason: String) -> MTPDrafterContinuation? {
+        let message = "The guided MTP drafter state \(reason); the continuation is discarded"
+        assertionFailure(message)
+        Self.logger.error(message)
+        return nil
+    }
+
+    /// The logger of the speculation.
+    private static let logger = MLXLogger(label: "GuidedSpeculation")
+
     /// Ends the speculation of the generation, and reports the
     /// ``SpeculativeDecodingFallbackReason/unavailableContinuation`` fallback once.
     ///
     /// - Parameter reason: The stated reason.
     private mutating func standDown(reason: String) {
-        guard !stoodDown else { return }
-        stoodDown = true
+        guard drafterAlignment != .lost else { return }
+        drafterAlignment = .lost
         Self.report(MTPDrafterFallback(reason: .unavailableContinuation, statedReason: reason))
     }
 

@@ -73,6 +73,28 @@ struct GuidedGenerationInklingMTPTests {
         }
     }
 
+    /// Every schema of the fixtures hands over a DSpark drafter continuation that stands where
+    /// the caches of the target end, so the next generation over those caches resumes it.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test(arguments: Self.blockSizes, Self.prefillSteps)
+    func aGuidedGenerationHandsOverADrafterContinuationAlignedWithItsCaches(
+        blockSize: Int, prefillStep: Int?
+    ) throws {
+        let fixture = try Qwen35MTPFixture()
+        let target = try Inkling2TinyModels.target(json: Self.json)
+        let drafter = try Inkling2TinyModels.drafter(json: Self.json)
+
+        let aligned = try GuidedFixtureSchema.allCases.map { schema in
+            try GuidedFixtureRun.generate(
+                schema: schema.json, prompt: Self.prompt, fixture: fixture,
+                blockSize: blockSize, drafter: drafter, target: target,
+                prefill: PrefillParameters(stepSize: prefillStep)
+            ).handsOverAnAlignedDrafterContinuation()
+        }
+
+        #expect(aligned.allSatisfy { $0 })
+    }
+
     /// The guided drafter of an Inkling 2 speculation is the DSpark head, and the target's
     /// forwards emit the hidden states of the taps the head reads.
     @Test

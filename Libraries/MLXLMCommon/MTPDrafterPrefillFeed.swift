@@ -80,6 +80,22 @@ package final class MTPDrafterPrefillFeed {
         self.startPosition = cachePosition
     }
 
+    /// A copy of `feed` that shares no drafter cache with it, so a chunk the copy takes leaves
+    /// `feed` as it is.
+    ///
+    /// - Parameter feed: The feed to copy.
+    private init(copying feed: MTPDrafterPrefillFeed) {
+        drafter = feed.drafter
+        target = feed.target
+        state = feed.state
+        state.cache = feed.state.cache.map { $0.copy() }
+        boundaryHidden = feed.boundaryHidden
+        startPosition = feed.startPosition
+        fedTokenCount = feed.fedTokenCount
+        isIntact = feed.isIntact
+        pendingRestartPosition = feed.pendingRestartPosition
+    }
+
     /// A feed of `drafter` at `cachePosition` that extends `continuation` when it is aligned
     /// there, and else starts a new drafter state there.
     ///
@@ -127,6 +143,41 @@ package final class MTPDrafterPrefillFeed {
             ? continuation : nil
     }
 
+    /// The drafter continuation at the end of the prompt: the state the chunks left, extended
+    /// over the final prompt segment the target's last forward evaluated as one more chunk
+    /// extends it. A prompt cache checkpoint at the end of the prompt keeps it.
+    ///
+    /// The extension runs on a copy of the drafter caches, thus the feed does not change, and
+    /// ``primedState`` still resumes the drafter from the boundary the chunks left.
+    ///
+    /// - Parameters:
+    ///   - finalSegment: The prompt tokens after the fed chunks, shape `[B, n]` or `[n]`.
+    ///   - segmentHidden: At least one target hidden row for each token of `finalSegment`.
+    ///   - positionDeltas: The target position deltas of the last forward, or `nil`.
+    /// - Returns: The continuation, or `nil` when the segment is empty, when its hidden rows are
+    ///   missing, or when a chunk did not reach the drafter state.
+    package func promptEndContinuation(
+        finalSegment: MLXArray, segmentHidden: MLXArray, positionDeltas: MLXArray?
+    ) -> MTPDrafterContinuation? {
+        guard let rows = Self.rows(of: finalSegment, in: segmentHidden) else { return nil }
+        let extended = MTPDrafterPrefillFeed(copying: self)
+        extended.append(tokens: finalSegment, hiddenStates: rows, positionDeltas: positionDeltas)
+        return extended.continuation
+    }
+
+    /// The target hidden rows of the tokens of `finalSegment`: one for each token.
+    ///
+    /// - Parameters:
+    ///   - finalSegment: The prompt tokens after the fed chunks, shape `[B, n]` or `[n]`.
+    ///   - segmentHidden: The hidden rows the target's last forward emitted, shape
+    ///     `[B, m, hidden]`.
+    /// - Returns: The first `n` rows, or `nil` when the segment is empty or `m` is less than `n`.
+    private static func rows(of finalSegment: MLXArray, in segmentHidden: MLXArray) -> MLXArray? {
+        let segmentLength = normalizedMTPTokenBatch(finalSegment).dim(-1)
+        guard segmentLength > 0, segmentHidden.dim(1) >= segmentLength else { return nil }
+        return segmentHidden[0..., ..<segmentLength, 0...]
+    }
+
     /// The tokens of `prompt` the chunks did not feed: the segment the target's last forward
     /// evaluated, when `prepare` evaluated the whole prompt and returned logits.
     ///
@@ -152,9 +203,7 @@ package final class MTPDrafterPrefillFeed {
         finalSegment: MLXArray, segmentHidden: MLXArray, firstBonus: MLXArray,
         positionDeltas: MLXArray?
     ) -> MTPDrafterState? {
-        let segmentLength = normalizedMTPTokenBatch(finalSegment).dim(-1)
-        guard segmentLength > 0, segmentHidden.dim(1) >= segmentLength else { return nil }
-        let rows = segmentHidden[0..., ..<segmentLength, 0...]
+        guard let rows = Self.rows(of: finalSegment, in: segmentHidden) else { return nil }
         var primed = state
         if isIntact, let boundaryHidden,
             drafter.resumeDrafterState(

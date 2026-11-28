@@ -36,8 +36,8 @@ package struct GuidedCarriedCache {
     }
 }
 
-/// What a guided generation leaves when its decoding ends: the tokens it counted, and the caches
-/// of its target.
+/// What a guided generation leaves when its decoding ends: the tokens it counted, the caches of
+/// its target, and the MTP drafter continuation that stands where those caches end.
 ///
 /// The caches hold the prompt and a prefix of ``countedTokens``: every token a forward fed, and
 /// none of the drafts a speculative round did not keep. A token the generation counted but did
@@ -52,6 +52,11 @@ package struct GuidedGeneratedCache {
     /// The caches of the target, which a KV-cache configuration can have replaced with
     /// compressed caches while the generation ran.
     package let cache: [KVCache]
+
+    /// The MTP drafter continuation that stands where ``cache`` ends, finalized as the plain MTP
+    /// iterator finalizes its own, or `nil` when the generation did not speculate with a drafter
+    /// of this process to its end. Its arrays are evaluated.
+    package let drafterContinuation: MTPDrafterContinuation?
 }
 
 /// Receives what a guided generation leaves for the prompt cache of its caller.
@@ -61,22 +66,32 @@ package struct GuidedGeneratedCache {
 /// positions no counted token names.
 package struct GuidedCacheHandOff {
 
-    /// Receives the model state the prefill left, once the prefill ended and before the first
-    /// decision feeds the target. The caches then stand at the end of the prompt.
-    package let prefillDidEnd: (LMOutput.State?) -> Void
+    /// Receives the model state the prefill left, and a reader of the MTP drafter continuation
+    /// at the end of the prompt, once the prefill ended and before the first decision feeds the
+    /// target. The caches then stand at the end of the prompt.
+    ///
+    /// The reader gives `nil` when the generation does not feed a drafter of this process. It
+    /// copies the drafter caches, thus a receiver reads it only when it keeps the continuation,
+    /// and only before it returns.
+    package let prefillDidEnd: (LMOutput.State?, () -> MTPDrafterContinuation?) -> Void
 
-    /// Receives the counted tokens and the caches once the decoding ended, before the generation
-    /// reports how it ended. A generation that runs out of budget hands them over too.
+    /// Receives the counted tokens, the caches and the MTP drafter continuation once the
+    /// decoding ended, before the generation reports how it ended. A generation that runs out of
+    /// budget hands them over too.
     package let generationDidEnd: (GuidedGeneratedCache) -> Void
 
     /// Creates a hand-off that gives the end of the prefill to `prefillDidEnd`, and the end of
     /// the decoding to `generationDidEnd`.
     ///
     /// - Parameters:
-    ///   - prefillDidEnd: Receives the model state of the prefill; the default drops it.
-    ///   - generationDidEnd: Receives the counted tokens and the caches; the default drops them.
+    ///   - prefillDidEnd: Receives the model state of the prefill and the reader of the drafter
+    ///     continuation at the end of the prompt; the default drops both.
+    ///   - generationDidEnd: Receives the counted tokens, the caches and the drafter
+    ///     continuation; the default drops them.
     package init(
-        prefillDidEnd: @escaping (LMOutput.State?) -> Void = { _ in },
+        prefillDidEnd: @escaping (LMOutput.State?, () -> MTPDrafterContinuation?) -> Void = {
+            _, _ in
+        },
         generationDidEnd: @escaping (GuidedGeneratedCache) -> Void = { _ in }
     ) {
         self.prefillDidEnd = prefillDidEnd

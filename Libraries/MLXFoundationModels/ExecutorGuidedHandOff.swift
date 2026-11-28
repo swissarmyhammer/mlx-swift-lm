@@ -8,7 +8,8 @@ import MLXGuidedGeneration
 import MLXLMCommon
 
 /// Holds what the guided loop of one executor pass leaves -- the model state of its prefill, and
-/// the tokens it counted with the caches of its target -- until the pass commits its cache.
+/// the tokens it counted with the caches of its target and the MTP drafter continuation where
+/// they end -- until the pass commits its cache.
 ///
 /// The loop runs on the respond task, which then commits, thus one task at a time reads and
 /// writes this box.
@@ -21,8 +22,8 @@ final class ExecutorGuidedHandOff {
     /// Records the model state the prefill left, and reports the end of the prefill to the slot.
     private let prefill: ExecutorPrefillRecorder
 
-    /// The tokens the loop counted and the caches of its target, or nil until its decoding
-    /// ended.
+    /// The tokens the loop counted, the caches of its target and the drafter continuation, or
+    /// nil until its decoding ended.
     private var generated: GuidedGeneratedCache?
 
     /// Creates a hand-off that holds nothing yet, for a pass of `promptCache`.
@@ -36,12 +37,13 @@ final class ExecutorGuidedHandOff {
     /// The hand-off the guided loop gives what it leaves to.
     ///
     /// The end of the prefill goes to the slot at once, which takes a checkpoint there when the
-    /// plan of the pass asked for one at the end of the prompt. The guided loop hands over no MTP
-    /// drafter continuation, thus that checkpoint keeps none.
+    /// plan of the pass asked for one at the end of the prompt. That checkpoint keeps the MTP
+    /// drafter continuation the loop reads at the end of the prompt, when it speculates with a
+    /// drafter of this process.
     var cacheHandOff: GuidedCacheHandOff {
         GuidedCacheHandOff(
-            prefillDidEnd: { [prefill] state in
-                prefill.record(state: state, drafterState: { nil })
+            prefillDidEnd: { [prefill] state, drafterState in
+                prefill.record(state: state, drafterState: drafterState)
             },
             generationDidEnd: { [self] generated in
                 self.generated = generated
@@ -51,8 +53,10 @@ final class ExecutorGuidedHandOff {
     /// Commits the cache of the pass to the slot: the caches of the target, whose ledger is the
     /// tokens `plan` represents and the tokens the loop counted that those caches hold.
     ///
-    /// The entry keeps no MTP drafter continuation: the guided loop finalizes none, thus the
-    /// drafter of the next pass starts cold where the caches end, and its output does not change.
+    /// The entry keeps the MTP drafter continuation the loop finalized when it stands at the end
+    /// of that ledger, thus the drafter of the next pass resumes it there. A loop that leaves
+    /// none -- a plain or cluster pass, or one whose speculation stood down -- leaves the drafter
+    /// of the next pass to start cold where the caches end, and its output does not change.
     ///
     /// - Parameter plan: The plan the pass ran, or nil when the pass carried none.
     func commit(_ plan: ExecutorPromptCachePlan?) {
@@ -64,7 +68,8 @@ final class ExecutorGuidedHandOff {
             }
         promptCache.commit(
             plan?.holding(generationCache: generated?.cache),
-            generatedTokens: generated?.countedTokens ?? [], state: state)
+            generatedTokens: generated?.countedTokens ?? [], state: state,
+            drafterState: generated?.drafterContinuation)
     }
 }
 
